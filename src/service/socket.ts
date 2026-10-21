@@ -22,6 +22,18 @@ function optional<T>(value: unknown, parse: (value: unknown) => T): T | undefine
 	return value === undefined ? undefined : parse(value);
 }
 
+function flag(value: unknown, name: string): boolean {
+	if (typeof value !== "boolean") throw new BadInput(`${name} must be a boolean`);
+	return value;
+}
+
+/** A task block's default agent: a non-blank name, trimmed. */
+function agentName(value: unknown): string {
+	const name = string(value, "agent").trim();
+	if (name === "") throw new BadInput("agent must not be blank");
+	return name;
+}
+
 function block(value: unknown): BlockId {
 	const id = parseBlockId(string(value, "block"));
 	if (id === null) throw new BadInput("block must be b followed by a positive integer");
@@ -84,9 +96,10 @@ export function parseRequest(op: string, args: unknown): Request | ProtocolError
 				switch (a.field) {
 					case "title": return { op, args: { ...target, field: "title", value: string(a.value, "value") } };
 					case "done":
-						if (typeof a.value !== "boolean") throw new BadInput("done value must be a boolean");
-						return { op, args: { ...target, field: "done", value: a.value } };
-					default: throw new BadInput("field must be title or done");
+						return { op, args: { ...target, field: "done", value: flag(a.value, "done value") } };
+					case "agent": return { op, args: { ...target, field: "agent", value: a.value === null ? null : agentName(a.value) } };
+					case "isolated": return { op, args: { ...target, field: "isolated", value: a.value === null ? null : flag(a.value, "isolated value") } };
+					default: throw new BadInput("field must be title, done, agent or isolated");
 				}
 			}
 			case "edit": return { op, args: { run: optional(a.run, run), block: block(a.block), find: string(a.find, "find"), replace: string(a.replace, "replace") } };
@@ -99,13 +112,28 @@ export function parseRequest(op: string, args: unknown): Request | ProtocolError
 			case "insert": {
 				const content = object(a.content, "content");
 				switch (content.kind) {
-					case "task": return { op, args: { run: optional(a.run, run), after: optional(a.after, block), title: string(a.title, "title"), content: { kind: "task", body: string(content.body, "body") } } };
+					case "task": return {
+						op,
+						args: {
+							run: optional(a.run, run), after: optional(a.after, block), title: string(a.title, "title"),
+							content: {
+								kind: "task",
+								body: string(content.body, "body"),
+								...(content.agent === undefined ? {} : { agent: agentName(content.agent) }),
+								...(content.isolated === undefined ? {} : { isolated: flag(content.isolated, "isolated") }),
+							},
+						},
+					};
 					case "design":
 						if (content.requirement !== undefined) throw new BadInput("a design block's requirement belongs to the person; insert it with an empty requirement");
+						if (content.agent !== undefined || content.isolated !== undefined) throw new BadInput("a design block has no execution contract (agent, isolated)");
 						return { op, args: { run: optional(a.run, run), after: optional(a.after, block), title: string(a.title, "title"), content: { kind: "design", design: string(content.design, "design") } } };
 					default: throw new BadInput("content kind must be task or design");
 				}
 			}
+			case "move":
+				if (a.after === undefined) throw new BadInput("after must be a block id, or null for the top");
+				return { op, args: { run: optional(a.run, run), block: block(a.block), after: a.after === null ? null : block(a.after) } };
 			case "revisions": return { op, args: { run: optional(a.run, run), block: optional(a.block, block), after: optional(a.after, v => integer(v, "after", 0)) } };
 			case "refetch": return { op, args: { run: optional(a.run, run), targets: array(a.targets, "targets", v => string(v, "target")) } };
 			case "compile":

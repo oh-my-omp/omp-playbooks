@@ -476,3 +476,149 @@ describe("Core Launch integration", () => {
 		expect(f.core.launchInfo(launch)!.dirty).toEqual([]);
 	}, 12_000);
 });
+
+// C2 / C3-Core of #9: launch defaults, closed-Launch guards, and race-free rebase.
+describe("Launch execution contract and lifecycle guards", () => {
+	const configured = (id: BlockId, body: string, agent?: string, isolated?: boolean): Block => ({
+		id, title: id, done: false,
+		content: { kind: "task", body, ...(agent === undefined ? {} : { agent }), ...(isolated === undefined ? {} : { isolated }) },
+	});
+
+	test("launch returns the contract every root shares; a contract change neither dirties the Launch nor notifies", async () => {
+		const f = await fixture([configured("b1", "one ((b4))", "task:mid", true), configured("b2", "two", "task:mid", false), configured("b3", "three"), configured("b4", "source", "task:low")]);
+		expect(await f.success({ op: "launch", args: { run: f.run, blocks: ["b1"] } })).toEqual({ launch: "l1", kind: "prompt", text: "one source", agent: "task:mid", isolated: true });
+		expect(await f.success({ op: "launch", args: { run: f.run, blocks: ["b1", "b2"] } })).toEqual({ launch: "l2", kind: "prompt", text: "one source\n\ntwo", agent: "task:mid" });
+		expect(await f.success({ op: "launch", args: { run: f.run, blocks: ["b1", "b3"] } })).toEqual({ launch: "l3", kind: "prompt", text: "one source\n\nthree" });
+		await f.success({ op: "lock", args: { run: f.run, block: "b4" } });
+		await f.success({ op: "set", args: { run: f.run, block: "b4", field: "agent", value: null } });
+		await f.success({ op: "set", args: { run: f.run, block: "b4", field: "isolated", value: true } });
+		expect(f.core.launchInfo("l1")!.dirty).toEqual([]);
+		await debounce();
+		expect(f.changed()).toEqual([]);
+		expect(f.store.readRunLog(f.run).entries.filter(entry => entry.data.type === "content_replaced").map(entry => entry.data)).toEqual([
+			{ type: "content_replaced", block: "b4", content: { kind: "task", body: "source" } },
+			{ type: "content_replaced", block: "b4", content: { kind: "task", body: "source", isolated: true } },
+		]);
+	}, 6_000);
+
+	test("a closed Launch refuses bind and rebase but still answers info, close and late results; post refuses another Run's Launch", async () => {
+		const f = await fixture();
+		const launch = await f.launch();
+		await f.success({ op: "close", args: { launch } });
+		const closed = f.core.launchInfo(launch)!;
+		expect(error(await f.send({ op: "bind", args: { launch, agent: "late" } }), "BadLaunch").message).toBe("Launch 已关闭");
+		expect(error(await f.send({ op: "rebase", args: { launch } }), "BadLaunch").message).toBe("Launch 已关闭");
+		expect(await f.success({ op: "close", args: { launch } })).toBeNull();
+		expect(await f.success({ op: "launch_info", args: { launch } })).toEqual(closed);
+		expect(f.core.launchInfo(launch)).toEqual(closed);
+		expect(await f.success({ op: "post", args: { run: f.run, kind: "result", text: "late", block: "b1", launch } })).toEqual({ seq: expect.any(Number) });
+		expect(f.core.startRun("Other run", null)).toBeNull();
+		const other = f.core.runs().at(-1)!.id;
+		const before = f.store.readRunLog(other).entries;
+		expect(error(await f.send({ op: "post", args: { run: other, kind: "result", text: "wrong run", block: "b1", launch } }), "BadValue").message).toBe("Launch 不属于这个 Run");
+		expect(f.store.readRunLog(other).entries).toEqual(before);
+	});
+
+	test("rebase refuses roots that no longer form a Launch of the same kind", async () => {
+		const f = await fixture([block("b1", "Task:\n((b2))"), block("b2", "before"), block("b3", "third")]);
+		const switched = await f.launch(["b1"]);
+		f.edit("b1", "```js\nconsole.log(1);\n```");
+		expect(error(await f.send({ op: "rebase", args: { launch: switched } }), "BadLaunch").message).toContain("执行块");
+		const multi = await f.launch(["b2", "b3"]);
+		f.edit("b3", "```js\nconsole.log(3);\n```");
+		expect(error(await f.send({ op: "rebase", args: { launch: multi } }), "BadLaunch").message).toBe("编排块只能单独启动");
+		const deleted = await f.launch(["b2"]);
+		await f.success({ op: "lock", args: { run: f.run, block: "b2" } });
+		await f.success({ op: "delete", args: { run: f.run, block: "b2" } });
+		expect(error(await f.send({ op: "rebase", args: { launch: deleted } }), "BadLaunch").message).toContain("b2");
+		for (const id of [switched, multi, deleted]) expect(f.core.launchInfo(id)!.baselines).toHaveLength(1);
+	});
+
+	test("an edit made while rebase fetches stays dirty and is judged against the new baseline", async () => {
+		let release: () => void = () => { throw new Error("fetch not started"); };
+		const gated: Fetcher = {
+			async fetch(target) {
+				const key = references.targetKey(target);
+				if (key === "file:new.txt") await new Promise<void>(resolve => { release = resolve; });
+				return { ok: true, at: Date.parse("2026-01-01T00:00:00Z"), value: { kind: "file", text: `text of ${key}` } };
+			},
+		};
+		const f = await fixture(undefined, gated);
+		const launch = await f.launch();
+		f.edit("b2", "uses ((file:new.txt))");
+		// The rebase request runs until it awaits the gated fetch, so this edit lands mid-rebase.
+		const rebased = f.send({ op: "rebase", args: { launch } });
+		f.edit("b2", "later ((file:new.txt))");
+		const lateSeq = f.core.launchInfo(launch)!.dirty.find(([id]) => id === "b2")![1];
+		release();
+		const outcome = await rebased;
+		const baselines = f.core.launchInfo(launch)!.baselines;
+		expect(baselines).toHaveLength(2);
+		expect(outcome).toEqual({ ok: true, result: { baseline: baselines[1] } });
+		expect(baselines[1]).toContain("later");
+		expect(baselines[1]).toContain("text of file:new.txt");
+		expect(f.core.launchInfo(launch)!.dirty).toEqual([["b2", lateSeq]]);
+		await debounce();
+		expect(f.changed()).toEqual([]);
+		expect(f.core.launchInfo(launch)!.dirty).toEqual([]);
+	}, 8_000);
+
+	test("a judgment compiles the contents current after its fetch, so its current is what rebase accepts", async () => {
+		let release: () => void = () => { throw new Error("fetch not started"); };
+		const gated: Fetcher = {
+			async fetch(target) {
+				const key = references.targetKey(target);
+				if (key === "file:new.txt") await new Promise<void>(resolve => { release = resolve; });
+				return { ok: true, at: Date.parse("2026-01-01T00:00:00Z"), value: { kind: "file", text: `text of ${key}` } };
+			},
+		};
+		const f = await fixture(undefined, gated);
+		const launch = await f.launch();
+		// The document's own check pass starts this fetch; the judgment waits for the same in-flight fetch.
+		f.edit("b2", "first ((file:new.txt))");
+		await debounce();
+		expect(f.changed()).toEqual([]);
+		f.edit("b2", "latest ((file:other.txt))");
+		release();
+		const event = await awaitChanges(f.changed, 1);
+		const judged = 'Task:\nlatest <external source="file:other.txt" fetched="2026-01-01T00:00:00.000Z">\ntext of file:other.txt\n</external>';
+		expect(event.data.current).toMatchObject({ kind: "Ok", text: judged });
+		expect(await f.success({ op: "rebase", args: { launch } })).toEqual({ baseline: judged });
+	}, 10_000);
+
+	test("edit numbers continue above persisted dirty entries after a restart, so rebase clears what it accepted", async () => {
+		const f = await fixture();
+		const launch = await f.launch();
+		f.disconnect();
+		for (const text of ["one", "two", "three"]) f.edit("b2", text);
+		const persisted = f.core.launchInfo(launch)!.dirty;
+		expect(persisted.map(([id]) => id)).toEqual(["b2"]);
+		f.core.stop();
+		const restarted = new Core({ store: f.store, references, checks, fetcher: { async fetch() { throw new Error("no external targets"); } }, panes: { ownPane: () => null, async focusPane() { return { ok: false, error: "unused" }; } } });
+		cleanups.push(() => restarted.stop());
+		expect(restarted.load()).toBeNull();
+		const conn: Connection = { id: 99, send() {}, close() {} };
+		restarted.connected(conn);
+		expect((await restarted.handle(conn, "hello", { op: "hello", args: { session: "launch-owner" } })).ok).toBe(true);
+		expect(await restarted.handle(conn, "rebase", { op: "rebase", args: { launch } })).toEqual({ ok: true, result: { baseline: "Task:\nthree" } });
+		expect(restarted.launchInfo(launch)!.dirty).toEqual([]);
+		expect(restarted.pencil(f.ref, "b2", "body")).toBeNull();
+		expect(restarted.setDraft(f.ref, "b2", "four")).toBeNull();
+		expect(restarted.commit(f.ref, "b2")).toBeNull();
+		const [[, next]] = restarted.launchInfo(launch)!.dirty as [[BlockId, number]];
+		expect(next).toBeGreaterThan(persisted[0]![1]);
+	});
+
+	test("rebase and later judgments compile with the Run's current block results", async () => {
+		const f = await fixture([block("b1", "Task:\n((b2.result))"), block("b2", "producer")]);
+		await f.success({ op: "post", args: { run: f.run, kind: "result", text: "first result", block: "b2" } });
+		const launch = await f.launch();
+		await f.success({ op: "post", args: { run: f.run, kind: "result", text: "second result", block: "b2" } });
+		expect(await f.success({ op: "rebase", args: { launch } })).toEqual({ baseline: "Task:\nsecond result" });
+		expect(f.core.launchInfo(launch)!.snapshot.result).toMatchObject({ text: "Task:\nfirst result" });
+		f.edit("b1", "Changed task:\n((b2.result))");
+		const event = await awaitChanges(f.changed, 1);
+		expect(event.data.current).toMatchObject({ kind: "Ok", text: "Changed task:\nsecond result" });
+		expect(event.data.diff).toBe(references.unifiedDiff("Task:\nsecond result", "Changed task:\nsecond result"));
+	}, 8_000);
+});

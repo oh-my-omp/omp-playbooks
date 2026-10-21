@@ -21,12 +21,14 @@ import type {
 	Launch,
 	LaunchCloser,
 	LaunchId,
+	LaunchKind,
 	PlaybookDoc,
 	RecordKind,
 	Revision,
 	RunId,
 	RunMeta,
 	TargetKey,
+	TaskConfig,
 	TimelineEntry,
 } from "../domain/model";
 import { coordinatorField, fieldText, humanFieldValid, idNumber, withField } from "../domain/model";
@@ -131,9 +133,46 @@ export function isOrchestration(content: BlockContent): boolean {
 export function wireBlock(block: Block): Record<string, unknown> {
 	const content = block.content;
 	switch (content.kind) {
-		case "task": return { id: block.id, kind: "task", title: block.title, body: content.body, done: block.done };
+		case "task": return {
+			id: block.id, kind: "task", title: block.title, body: content.body,
+			...(content.agent === undefined ? {} : { agent: content.agent }),
+			...(content.isolated === undefined ? {} : { isolated: content.isolated }),
+			done: block.done,
+		};
 		case "design": return { id: block.id, kind: "design", title: block.title, requirement: content.requirement, design: content.design, done: block.done };
 	}
+}
+
+/** A block's execution contract; a design block has none. */
+function taskConfig(content: BlockContent): TaskConfig {
+	return content.kind === "task" ? { agent: content.agent, isolated: content.isolated } : {};
+}
+
+/** Task content carrying exactly `config`; unset keys are absent, not undefined. */
+function withConfig(content: Extract<BlockContent, { kind: "task" }>, config: TaskConfig): BlockContent {
+	return {
+		kind: "task",
+		body: content.body,
+		...(config.agent === undefined ? {} : { agent: config.agent }),
+		...(config.isolated === undefined ? {} : { isolated: config.isolated }),
+	};
+}
+
+/** The contract every root shares: a key is returned only when all roots set it to the same value. */
+function sharedConfig(contents: readonly BlockContent[]): TaskConfig {
+	const configs = contents.map(taskConfig);
+	const shared = <K extends keyof TaskConfig>(key: K): TaskConfig[K] => {
+		const first = configs[0]?.[key];
+		return first !== undefined && configs.every(config => config[key] === first) ? first : undefined;
+	};
+	const agent = shared("agent");
+	const isolated = shared("isolated");
+	return { ...(agent === undefined ? {} : { agent }), ...(isolated === undefined ? {} : { isolated }) };
+}
+
+/** Three-way merge of one value: the disk's change wins unless the disk still has the last written value. */
+function merged<T>(disk: T, written: T, current: T): T {
+	return disk === written || disk === current ? current : disk;
 }
 
 export class Core implements CoreApi, K1Handler {
@@ -191,7 +230,10 @@ export class Core implements CoreApi, K1Handler {
 			for (const launch of log.launches.values()) {
 				this.#maxLaunch = Math.max(this.#maxLaunch, idNumber(launch.id));
 				this.#launches.set(launch.id, { record: launch, pending: null, deadline: null, timer: undefined, generation: 0, judging: false });
+				// Dirty entries are ordered against new edits, so edit numbers continue above every persisted one.
+				for (const [, seq] of launch.dirty) this.#editSeq = Math.max(this.#editSeq, seq);
 			}
+			for (const entry of log.entries) if (entry.data.type === "block_edited") this.#editSeq = Math.max(this.#editSeq, entry.data.edit);
 		}
 		for (const doc of this.#docs.values()) for (const block of doc.blocks) this.#maxBlock = Math.max(this.#maxBlock, idNumber(block.id));
 		for (const doc of this.#docs.values()) if (doc.run?.status === "running") this.#scheduleReminder(doc.run.id, true);
@@ -368,6 +410,16 @@ export class Core implements CoreApi, K1Handler {
 				if (doc.run) this.#append(doc.run.id, origin, { type: "content_replaced", block: change.block, content: change.content });
 				break;
 			}
+			case "config": {
+				// The execution contract is not compiled text: it neither marks Launches dirty nor ends inspections.
+				const index = doc.blocks.findIndex(block => block.id === change.block);
+				const current = doc.blocks[index]!;
+				if (current.content.kind !== "task") throw new Error(`block ${change.block} is not a task block`);
+				const content = withConfig(current.content, change.config);
+				doc.blocks[index] = { ...current, content };
+				if (doc.run) this.#append(doc.run.id, origin, { type: "content_replaced", block: change.block, content });
+				break;
+			}
 			case "done": {
 				const index = doc.blocks.findIndex(block => block.id === change.block);
 				doc.blocks[index] = { ...doc.blocks[index]!, done: change.done };
@@ -394,10 +446,10 @@ export class Core implements CoreApi, K1Handler {
 			}
 			case "reorder": {
 				const byId = new Map(doc.blocks.map(block => [block.id, block]));
-				doc.blocks = change.order.flatMap(id => {
-					const block = byId.get(id);
-					return block ? [block] : [];
-				});
+				if (change.order.length !== byId.size || new Set(change.order).size !== byId.size || change.order.some(id => !byId.has(id))) {
+					throw new Error("reorder needs a permutation of the document's blocks");
+				}
+				doc.blocks = change.order.map(id => byId.get(id)!);
 				if (doc.run) this.#append(doc.run.id, origin, { type: "blocks_reordered", order: change.order });
 				break;
 			}
@@ -543,10 +595,22 @@ export class Core implements CoreApi, K1Handler {
 					this.#applyEdit(doc, "disk", { kind: "field", block: block.id, field, text });
 					if (lock?.kind === "human" && lock.field === field) this.#notice(doc, block.id, "磁盘文件修改了这个字段");
 				}
+				if (block.content.kind === "task" && current.content.kind === "task") {
+					const disk = taskConfig(block.content);
+					const written = taskConfig(previous.content);
+					const mine = taskConfig(current.content);
+					const config = { agent: merged(disk.agent, written.agent, mine.agent), isolated: merged(disk.isolated, written.isolated, mine.isolated) };
+					if (config.agent !== mine.agent || config.isolated !== mine.isolated) this.#applyEdit(doc, "disk", { kind: "config", block: block.id, config });
+				}
 			}
 			if (block.done !== previous.done && block.done !== current.done) this.#applyEdit(doc, "disk", { kind: "done", block: block.id, done: block.done });
 		});
-		const order = next.blocks.map(block => block.id);
+		// Blocks added since the last write-back are not on disk: they keep their slots, and the disk's
+		// blocks fill the remaining slots in the disk's order.
+		const onDisk = new Set(next.blocks.map(block => block.id));
+		const diskOrder = next.blocks.map(block => block.id);
+		let slot = 0;
+		const order = doc.blocks.map(block => onDisk.has(block.id) ? diskOrder[slot++]! : block.id);
 		if (order.join() !== doc.blocks.map(block => block.id).join()) this.#applyEdit(doc, "disk", { kind: "reorder", order });
 	}
 
@@ -589,16 +653,15 @@ export class Core implements CoreApi, K1Handler {
 		if (launch.record.dirty.length === 0) return;
 		if (launch.deadline !== null && launch.deadline > this.#now()) return;
 		const doc = this.#docs.get(launch.record.run)!;
-		const bodies = this.#contents(doc);
 		const maxSeq = Math.max(...launch.record.dirty.map(([, seq]) => seq));
 		const changed = launch.record.dirty.map(([block]) => block);
 		const generation = launch.generation;
 		launch.judging = true;
-		const fetches = await this.#launchFetches(launch, bodies);
+		const fetches = await this.#launchFetches(launch);
 		launch.judging = false;
 		if (generation !== launch.generation || !this.#isActive(launch) || launch.pending !== null) return;
-		const results = new Map(launch.record.snapshot.results);
-		const result = this.#refs.compile(launch.record.blocks, this.#input(doc, fetches, bodies, results));
+		// The same inputs `rebase` accepts: current contents and the Run's current results.
+		const result = this.#refs.compile(launch.record.blocks, this.#input(doc, fetches));
 		const baseline = launch.record.baselines.at(-1)!;
 		const dropUpTo = (): void => {
 			this.#setLaunch(launch, { ...launch.record, dirty: launch.record.dirty.filter(([, seq]) => seq > maxSeq) });
@@ -627,19 +690,28 @@ export class Core implements CoreApi, K1Handler {
 		if (launch.pending === null && launch.record.dirty.length > 0 && launch.deadline !== null && launch.deadline <= this.#now()) void this.#judge(launch);
 	}
 
-	/** The judgment fetch table of a Launch, extended with newly referenced targets (launch-events.md §3). */
-	async #launchFetches(launch: LaunchState, bodies: ReadonlyMap<BlockId, BlockContent>): Promise<Map<TargetKey, FetchOutcome>> {
-		const table = new Map(launch.record.fetches);
-		const added: [TargetKey, FetchOutcome][] = [];
-		for (const target of this.#refs.externalTargets(launch.record.blocks, bodies)) {
-			const key = this.#refs.targetKey(target);
-			if (table.has(key)) continue;
-			const outcome = this.#fetches.get(key) ?? (await this.#fetchTarget(target, false));
-			table.set(key, outcome);
-			added.push([key, outcome]);
+	/**
+	 * The judgment fetch table of a Launch, extended with every target its current closure references
+	 * (launch-events.md §3). Fetching yields to other requests that may edit the closure, so this repeats
+	 * until the contents at return need no target the table lacks.
+	 */
+	async #launchFetches(launch: LaunchState): Promise<Map<TargetKey, FetchOutcome>> {
+		const doc = this.#docs.get(launch.record.run)!;
+		for (;;) {
+			const table = new Map(launch.record.fetches);
+			const added: [TargetKey, FetchOutcome][] = [];
+			for (const target of this.#refs.externalTargets(launch.record.blocks, this.#contents(doc))) {
+				const key = this.#refs.targetKey(target);
+				if (table.has(key)) continue;
+				const outcome = this.#fetches.get(key) ?? (await this.#fetchTarget(target, false));
+				table.set(key, outcome);
+				added.push([key, outcome]);
+			}
+			if (added.length === 0) return table;
+			// A concurrent judgment or rebase may have recorded the same targets meanwhile.
+			const recorded = new Set(launch.record.fetches.map(([key]) => key));
+			this.#setLaunch(launch, { ...launch.record, fetches: [...launch.record.fetches, ...added.filter(([key]) => !recorded.has(key))] });
 		}
-		if (added.length > 0) this.#setLaunch(launch, { ...launch.record, fetches: [...launch.record.fetches, ...added] });
-		return table;
 	}
 
 	#closeLaunch(launch: LaunchState, by: LaunchCloser, origin: EntryOrigin): void {
@@ -859,8 +931,39 @@ export class Core implements CoreApi, K1Handler {
 				const held = this.#held(request.args.run, request.args.block);
 				if (!held.ok) return held;
 				const { doc } = held.result;
-				if (request.args.field === "title") this.#applyEdit(doc, "coordinator", { kind: "field", block: request.args.block, field: "title", text: request.args.value });
-				else this.#applyEdit(doc, "coordinator", { kind: "done", block: request.args.block, done: request.args.value });
+				switch (request.args.field) {
+					case "title":
+						this.#applyEdit(doc, "coordinator", { kind: "field", block: request.args.block, field: "title", text: request.args.value });
+						return ok(null);
+					case "done":
+						this.#applyEdit(doc, "coordinator", { kind: "done", block: request.args.block, done: request.args.value });
+						return ok(null);
+					case "agent":
+					case "isolated": {
+						const content = held.result.block.content;
+						if (content.kind !== "task") return fail("BadValue", "设计块没有执行配置");
+						const value = request.args.value ?? undefined;
+						const config = { ...taskConfig(content), [request.args.field]: value };
+						this.#applyEdit(doc, "coordinator", { kind: "config", block: request.args.block, config });
+						return ok(null);
+					}
+				}
+			}
+			case "move": {
+				const { block: id, after } = request.args;
+				const target = this.#target(request.args.run, id, true);
+				if (!target.ok) return target;
+				if (target.result.doc.locks.get(id)?.kind === "human") return fail("Locked", "人正在编辑这个块");
+				const held = this.#held(request.args.run, id);
+				if (!held.ok) return held;
+				const { doc } = held.result;
+				if (after === id) return fail("BadValue", "不能把块移到自己后面");
+				if (after !== null && !this.#block(doc, after)) return fail("UnknownBlock", `块 ${after} 不存在`);
+				const current = doc.blocks.map(block => block.id);
+				const rest = current.filter(other => other !== id);
+				const index = after === null ? 0 : rest.indexOf(after) + 1;
+				const order = [...rest.slice(0, index), id, ...rest.slice(index)];
+				if (order.join() !== current.join()) this.#applyEdit(doc, "coordinator", { kind: "reorder", order });
 				return ok(null);
 			}
 			case "edit": {
@@ -951,6 +1054,7 @@ export class Core implements CoreApi, K1Handler {
 			case "bind": {
 				const launch = this.#owned(session!, request.args.launch);
 				if (!launch.ok) return launch;
+				if (launch.result.record.closed !== null) return fail("BadLaunch", "Launch 已关闭");
 				this.#setLaunch(launch.result, { ...launch.result.record, agents: [...launch.result.record.agents, request.args.agent] });
 				this.#append(launch.result.record.run, "coordinator", { type: "agent_bound", launch: request.args.launch, agent: request.args.agent });
 				this.#emit(refOf(launch.result.record.run));
@@ -1058,21 +1162,15 @@ export class Core implements CoreApi, K1Handler {
 		if (docState.run.status === "finished") return fail("RunFinished", "Run 已结束");
 		if (blocks.length === 0) return fail("BadLaunch", "blocks 为空");
 		for (const id of blocks) if (!this.#block(docState, id)) return fail("UnknownBlock", `块 ${id} 不存在`);
-		const kindError = (): Outcome<never> | null => {
-			const designs = blocks.filter(id => this.#block(docState, id)!.content.kind === "design");
-			if (designs.length > 0) return fail("BadLaunch", `设计块 ${designs.join(", ")} 不能直接启动：在执行块中引用它`);
-			if (blocks.some(id => isOrchestration(this.#block(docState, id)!.content)) && blocks.length > 1) return fail("BadLaunch", "编排块只能单独启动");
-			return null;
-		};
-		const before = kindError();
-		if (before) return before;
+		const before = this.#rootsError(docState, blocks);
+		if (before) return fail("BadLaunch", before);
 		await this.#ensureFetched(docState, blocks);
 		if (this.#isFinished(docState)) return fail("RunFinished", "Run 已结束");
 		for (const id of blocks) if (!this.#block(docState, id)) return fail("UnknownBlock", `块 ${id} 不存在`);
 		// A disk edit may have switched a block's kind while fetching.
-		const after = kindError();
-		if (after) return after;
-		const orchestration = blocks.filter(id => isOrchestration(this.#block(docState, id)!.content));
+		const after = this.#rootsError(docState, blocks);
+		if (after) return fail("BadLaunch", after);
+		const kind = this.#launchKind(docState, blocks);
 		const bodies = this.#contents(docState);
 		const results = this.#results(run);
 		const result = this.#refs.compile(blocks, this.#input(docState, this.#fetches, bodies, results));
@@ -1094,7 +1192,7 @@ export class Core implements CoreApi, K1Handler {
 			run,
 			session,
 			blocks: [...blocks],
-			kind: orchestration.length > 0 ? "orchestration" : "prompt",
+			kind,
 			snapshot: { result, fetches, results: usedResults },
 			agents: [],
 			baselines: [result.text],
@@ -1108,25 +1206,56 @@ export class Core implements CoreApi, K1Handler {
 		this.#store.appendLaunch(run, record);
 		this.#append(run, "coordinator", { type: "launch_created", launch: id, kind: record.kind, blocks: record.blocks });
 		this.#emit(docState.ref);
-		return ok({ launch: id, kind: record.kind, text: result.text });
+		const config = kind === "prompt" ? sharedConfig(blocks.map(block => this.#block(docState, block)!.content)) : {};
+		return ok({ launch: id, kind, text: result.text, ...config });
 	}
 
+	/** Why `blocks` cannot be Launch roots: a design block, or an orchestration block not started alone (README §定义). */
+	#rootsError(doc: DocState, blocks: readonly BlockId[]): string | null {
+		const designs = blocks.filter(id => this.#block(doc, id)!.content.kind === "design");
+		if (designs.length > 0) return `设计块 ${designs.join(", ")} 不能直接启动：在执行块中引用它`;
+		if (blocks.length > 1 && this.#launchKind(doc, blocks) === "orchestration") return "编排块只能单独启动";
+		return null;
+	}
+
+	#launchKind(doc: DocState, blocks: readonly BlockId[]): LaunchKind {
+		return blocks.some(id => isOrchestration(this.#block(doc, id)!.content)) ? "orchestration" : "prompt";
+	}
+
+	/**
+	 * Accept the current compile as the Launch's new baseline (launch-events.md §3). Edits made while
+	 * fetching stay dirty and are judged against the new baseline; roots must still form a Launch of
+	 * the same kind. `snapshot` keeps the frozen first compile.
+	 */
 	async #rebase(session: string, id: LaunchId): Promise<Outcome<unknown>> {
 		const owned = this.#owned(session, id);
 		if (!owned.ok) return owned;
 		const launch = owned.result;
-		const doc = this.#docs.get(launch.record.run)!;
-		const bodies = this.#contents(doc);
-		const fetches = await this.#launchFetches(launch, bodies);
-		const result = this.#refs.compile(launch.record.blocks, this.#input(doc, fetches, bodies, new Map(launch.record.snapshot.results)));
+		if (launch.record.closed !== null) return fail("BadLaunch", "Launch 已关闭");
+		const run = launch.record.run;
+		const generation = launch.generation;
+		const accepted = this.#editSeq;
+		const fetches = await this.#launchFetches(launch);
+		const doc = this.#docs.get(run)!;
+		if (doc.run?.status !== "running") return fail("RunFinished", "Run 已结束");
+		if (launch.record.closed !== null) return fail("BadLaunch", "Launch 已关闭");
+		if (launch.generation !== generation) return fail("BadLaunch", "Launch 在 rebase 期间已变化，请重新 rebase");
+		const missing = launch.record.blocks.filter(block => !this.#block(doc, block));
+		if (missing.length > 0) return fail("BadLaunch", `根块 ${missing.join(", ")} 已删除`);
+		const roots = this.#rootsError(doc, launch.record.blocks);
+		if (roots) return fail("BadLaunch", roots);
+		if (this.#launchKind(doc, launch.record.blocks) !== launch.record.kind) return fail("BadLaunch", `根块已不是${launch.record.kind === "prompt" ? "执行块" : "编排块"}：重新启动`);
+		const result = this.#refs.compile(launch.record.blocks, this.#input(doc, fetches));
 		if (result.kind === "Err") return fail("CompileError", "编译失败", result.error);
 		launch.generation++;
 		launch.pending = null;
 		launch.judging = false;
-		launch.deadline = null;
 		clearTimeout(launch.timer);
 		launch.timer = undefined;
-		this.#setLaunch(launch, { ...launch.record, baselines: [...launch.record.baselines, result.text], notified: null, dirty: [] });
+		const dirty = launch.record.dirty.filter(([, seq]) => seq > accepted);
+		this.#setLaunch(launch, { ...launch.record, baselines: [...launch.record.baselines, result.text], notified: null, dirty });
+		launch.deadline = dirty.length > 0 ? this.#now() + JUDGE_DELAY_MS : null;
+		this.#scheduleJudge(launch);
 		this.#emit(doc.ref);
 		return ok({ baseline: result.text });
 	}
@@ -1210,7 +1339,11 @@ export class Core implements CoreApi, K1Handler {
 		if (kind === "retrospective" && doc.run.status !== "finished") return fail("BadValue", "复盘只能写在已结束的 Run 中");
 		if (next !== null && kind !== "update") return fail("BadValue", "next 只用于 update");
 		if (block !== null && !this.#block(doc, block)) return fail("UnknownBlock", `块 ${block} 不存在`);
-		if (launch !== null && !this.#launches.has(launch)) return fail("UnknownLaunch", `Launch ${launch} 不存在`);
+		if (launch !== null) {
+			const owner = this.#launches.get(launch);
+			if (!owner) return fail("UnknownLaunch", `Launch ${launch} 不存在`);
+			if (owner.record.run !== run) return fail("BadValue", "Launch 不属于这个 Run");
+		}
 		if (kind === "update" && doc.run.status === "running") {
 			const seconds = next ?? doc.run.updateEvery;
 			if (seconds !== null) this.#setDue(doc, this.#now() + seconds * 1000);
@@ -1534,4 +1667,6 @@ type EditChange =
 	| { readonly kind: "done"; readonly block: BlockId; readonly done: boolean }
 	| { readonly kind: "insert"; readonly after: BlockId | null; readonly block: Block }
 	| { readonly kind: "delete"; readonly block: BlockId }
-	| { readonly kind: "reorder"; readonly order: readonly BlockId[] };
+	| { readonly kind: "reorder"; readonly order: readonly BlockId[] }
+	/** A task block's execution contract replaced whole. */
+	| { readonly kind: "config"; readonly block: BlockId; readonly config: TaskConfig };

@@ -80,12 +80,18 @@ function timestamp(value: unknown): number {
 }
 /**
  * Block content by field shape: `body` is a task block, `requirement` + `design` a design block.
+ * A task block may also carry its execution contract: `agent` (non-blank after trimming) and `isolated`.
  * `others` are the other keys allowed beside the content keys; mixed or missing shapes are errors.
  */
 function decodeContent(v: Fields, required: readonly string[], optional: readonly string[] = []): BlockContent {
 	if (Object.hasOwn(v, "body")) {
-		keys(v, [...required, "body"], optional);
-		return { kind: "task", body: string(v.body) };
+		keys(v, [...required, "body"], [...optional, "agent", "isolated"]);
+		return {
+			kind: "task",
+			body: string(v.body),
+			...(Object.hasOwn(v, "agent") ? { agent: agentName(v.agent) } : {}),
+			...(Object.hasOwn(v, "isolated") ? { isolated: boolean(v.isolated) } : {}),
+		};
 	}
 	if (Object.hasOwn(v, "requirement") || Object.hasOwn(v, "design")) {
 		keys(v, [...required, "requirement", "design"], optional);
@@ -93,9 +99,19 @@ function decodeContent(v: Fields, required: readonly string[], optional: readonl
 	}
 	throw new Error("A block needs body (task block) or requirement and design (design block)");
 }
-function contentFields(content: BlockContent): Record<string, string> {
+function agentName(value: unknown): string {
+	const name = string(value).trim();
+	if (name === "") throw new Error("agent must not be blank");
+	return name;
+}
+/** Content fields as stored in Run log entries; execution contract keys only when set. */
+function contentFields(content: BlockContent): Record<string, string | boolean> {
 	switch (content.kind) {
-		case "task": return { body: content.body };
+		case "task": return {
+			body: content.body,
+			...(content.agent === undefined ? {} : { agent: content.agent }),
+			...(content.isolated === undefined ? {} : { isolated: content.isolated }),
+		};
 		case "design": return { requirement: content.requirement, design: content.design };
 	}
 }
@@ -154,11 +170,21 @@ function bodyScalar(body: string): string {
 	const content = body.endsWith("\n") ? body.slice(0, -1) : body;
 	return `|2${indicator}\n${content.split("\n").map(line => `      ${line}\n`).join("")}`;
 }
+/** Content fields as YAML lines of a block mapping; a task block without a contract is written as before. */
+function contentYaml(content: BlockContent): string {
+	switch (content.kind) {
+		case "task":
+			return `    body: ${bodyScalar(content.body)}`
+				+ (content.agent === undefined ? "" : `    agent: ${quoted(content.agent)}\n`)
+				+ (content.isolated === undefined ? "" : `    isolated: ${content.isolated}\n`);
+		case "design": return `    requirement: ${bodyScalar(content.requirement)}    design: ${bodyScalar(content.design)}`;
+	}
+}
 function serialize(doc: PlaybookDoc, run: RunMeta | null): string {
 	let text = `title: ${quoted(doc.title)}\nblocks:${doc.blocks.length === 0 ? " []" : ""}\n`;
 	for (const block of doc.blocks) {
 		text += `  - id: ${block.id}\n    title: ${quoted(block.title)}\n`;
-		for (const [key, value] of Object.entries(contentFields(block.content))) text += `    ${key}: ${bodyScalar(value)}`;
+		text += contentYaml(block.content);
 		text += `    done: ${block.done}\n`;
 	}
 	if (run !== null) {

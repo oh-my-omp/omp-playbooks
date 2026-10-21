@@ -685,3 +685,72 @@ describe("Design change request drafts and revision journals", () => {
 		expect(persistedTemplate(h.store)).toEqual(designDoc);
 	});
 });
+
+describe("Task execution contract and block moves", () => {
+	test("insert and set write, change and clear agent and isolated; title, body and done edits keep them; design blocks refuse them", async () => {
+		const h = fixture(panes, designDoc);
+		await hello(h);
+		const ok = { ok: true, result: null } as const;
+		expect(await h.request({ op: "insert", args: { title: "Configured", content: { kind: "task", body: "configured body", agent: "task:mid", isolated: true } } })).toEqual({ ok: true, result: { block: "b4" } });
+		expect(await h.request({ op: "read", args: { block: "b4" } })).toEqual({ ok: true, result: { id: "b4", kind: "task", title: "Configured", body: "configured body", agent: "task:mid", isolated: true, done: false } });
+		await h.request({ op: "lock", args: { block: "b4" } }, "config-lock");
+		expect(await h.request({ op: "set", args: { block: "b4", field: "title", value: "Renamed" } })).toEqual(ok);
+		expect(await h.request({ op: "write", args: { block: "b4", text: "rewritten body" } })).toEqual(ok);
+		expect(await h.request({ op: "edit", args: { block: "b4", find: "rewritten", replace: "edited" } })).toEqual(ok);
+		expect(await h.request({ op: "set", args: { block: "b4", field: "done", value: true } })).toEqual(ok);
+		expect(visible(h, template, "b4").block).toEqual({ id: "b4", title: "Renamed", done: true, content: { kind: "task", body: "edited body", agent: "task:mid", isolated: true } });
+		expect(await h.request({ op: "set", args: { block: "b4", field: "agent", value: "task:low" } })).toEqual(ok);
+		expect(await h.request({ op: "set", args: { block: "b4", field: "isolated", value: null } })).toEqual(ok);
+		expect(visible(h, template, "b4").block.content).toEqual({ kind: "task", body: "edited body", agent: "task:low" });
+		expect(await h.request({ op: "set", args: { block: "b4", field: "agent", value: null } })).toEqual(ok);
+		expect(await h.request({ op: "set", args: { block: "b4", field: "isolated", value: false } })).toEqual(ok);
+		expect(visible(h, template, "b4").block.content).toEqual({ kind: "task", body: "edited body", isolated: false });
+		expect(await h.request({ op: "unlock", args: { block: "b4", request: "config-lock" } })).toEqual(ok);
+		expect(h.api.pencil(template, "b4", "body")).toBeNull();
+		expect(h.api.setDraft(template, "b4", "human body")).toBeNull();
+		expect(h.api.commit(template, "b4")).toBeNull();
+		expect(visible(h, template, "b4").block.content).toEqual({ kind: "task", body: "human body", isolated: false });
+		await h.request({ op: "lock", args: { block: "b1" } }, "design-lock");
+		expectError(await h.request({ op: "set", args: { block: "b1", field: "agent", value: "task:mid" } }), "BadValue");
+		expectError(await h.request({ op: "set", args: { block: "b1", field: "isolated", value: true } }), "BadValue");
+		expect(visible(h, template, "b1").block).toEqual(designDoc.blocks[0]);
+		h.stop();
+		expect(persistedTemplate(h.store).blocks.at(-1)).toEqual({ id: "b4", title: "Renamed", done: true, content: { kind: "task", body: "human body", isolated: false } });
+	});
+
+	test("a contract change in a Run is recorded as content_replaced with the whole content", async () => {
+		const h = fixture();
+		await hello(h);
+		const { id } = run(h);
+		await h.request({ op: "lock", args: { run: id, block: "b1" } }, "run-config-lock");
+		expect(await h.request({ op: "set", args: { run: id, block: "b1", field: "agent", value: "task:mid" } })).toEqual({ ok: true, result: null });
+		expect(h.store.readRunLog(id).entries.at(-1)?.data).toEqual({ type: "content_replaced", block: "b1", content: { kind: "task", body: "alpha unique repeated repeated aaa", agent: "task:mid" } });
+	});
+
+	test("move puts a held block first or after another, records the Run order, and leaves an unchanged order unrecorded", async () => {
+		const h = fixture();
+		await hello(h);
+		const { id, ref } = run(h);
+		const order = () => h.api.view(ref).blocks.map(item => item.block.id);
+		const reorders = () => h.store.readRunLog(id).entries.filter(entry => entry.data.type === "blocks_reordered").map(entry => entry.data);
+		await h.request({ op: "lock", args: { run: id, block: "b3" } }, "move-lock");
+		expect(await h.request({ op: "move", args: { run: id, block: "b3", after: null } })).toEqual({ ok: true, result: null });
+		expect(order()).toEqual(["b3", "b1", "b2"]);
+		expect(await h.request({ op: "move", args: { run: id, block: "b3", after: "b1" } })).toEqual({ ok: true, result: null });
+		expect(order()).toEqual(["b1", "b3", "b2"]);
+		const entries = h.store.readRunLog(id).entries.length;
+		expect(await h.request({ op: "move", args: { run: id, block: "b3", after: "b1" } })).toEqual({ ok: true, result: null });
+		expect(h.store.readRunLog(id).entries).toHaveLength(entries);
+		expect(reorders()).toEqual([{ type: "blocks_reordered", order: ["b3", "b1", "b2"] }, { type: "blocks_reordered", order: ["b1", "b3", "b2"] }]);
+		expectError(await h.request({ op: "move", args: { run: id, block: "b3", after: "b3" } }), "BadValue");
+		expectError(await h.request({ op: "move", args: { run: id, block: "b3", after: "b9" } }), "UnknownBlock");
+		expectError(await h.request({ op: "move", args: { run: id, block: "b2", after: null } }), "NotLocked");
+		expect(h.api.pencil(ref, "b2", "title")).toBeNull();
+		expectError(await h.request({ op: "move", args: { run: id, block: "b2", after: null } }), "Locked");
+		expect(order()).toEqual(["b1", "b3", "b2"]);
+		expect(reorders()).toHaveLength(2);
+		h.stop();
+		const persisted = h.store.readRuns().get(id);
+		expect(persisted?.ok && persisted.doc.blocks.map(block => block.id)).toEqual(["b1", "b3", "b2"]);
+	});
+});

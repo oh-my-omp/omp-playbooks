@@ -334,6 +334,30 @@ describe("core disk persistence — README S2 / contracts K4", () => {
 		expect(f.store.readRunLog(run).entries.filter(entry => entry.origin === "disk")).toEqual(entries);
 	});
 
+	test("disk execution contract edits merge per key, keep the body, and never dirty an active Launch", async () => {
+		const configured: PlaybookDoc = {
+			...initial,
+			blocks: initial.blocks.map(block => block.id === "b2" ? { ...block, content: { kind: "task", body: "before", agent: "task:old" } } : block),
+		};
+		const f = fixture(configured);
+		await f.hello();
+		const { run, ref } = await f.startRun();
+		expect((await f.request({ op: "launch", args: { run, blocks: ["b1"] } })).ok).toBe(true);
+		const withIsolated = { kind: "task", body: "before", agent: "task:old", isolated: true } as const;
+		f.externalDoc(ref, { ...configured, blocks: configured.blocks.map(block => block.id === "b2" ? { ...block, content: withIsolated } : block) });
+		await eventually(() => Bun.deepEquals(f.block(ref, "b2").block.content, withIsolated));
+		expect(f.block(ref, "b2").block.content).toEqual(withIsolated);
+		const withoutAgent = { kind: "task", body: "before", isolated: true } as const;
+		f.externalDoc(ref, { ...configured, blocks: configured.blocks.map(block => block.id === "b2" ? { ...block, content: withoutAgent } : block) });
+		await eventually(() => Bun.deepEquals(f.block(ref, "b2").block.content, withoutAgent));
+		expect(f.block(ref, "b2").block.content).toEqual(withoutAgent);
+		expect(f.core.launchInfo("l1")!.dirty).toEqual([]);
+		expect(f.core.view(ref).timeline.filter(entry => entry.origin === "disk").map(entry => entry.data)).toEqual([
+			{ type: "content_replaced", block: "b2", content: withIsolated },
+			{ type: "content_replaced", block: "b2", content: withoutAgent },
+		]);
+	});
+
 	test("a disk design edit preserves a human requirement draft without a conflict notice", async () => {
 		const f = fixture(designInitial);
 		expect(f.core.pencil(template, "b2", "requirement")).toBeNull();

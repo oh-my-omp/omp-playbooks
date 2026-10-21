@@ -25,10 +25,17 @@ export function idNumber(id: BlockId | RunId | LaunchId): number {
 	return Number(id.slice(1));
 }
 
-/** What a block holds. A task block is a prompt that can run; a design block pairs the person's requirement with the coordinator's design draft. */
+/**
+ * What a block holds. A task block is a prompt that can run, optionally carrying the execution
+ * contract its Launch defaults to (`agent`, `isolated`); a design block pairs the person's
+ * requirement with the coordinator's design draft.
+ */
 export type BlockContent =
-	| { readonly kind: "task"; readonly body: string }
+	| { readonly kind: "task"; readonly body: string; readonly agent?: string; readonly isolated?: boolean }
 	| { readonly kind: "design"; readonly requirement: string; readonly design: string };
+
+/** A task block's execution contract: the coordinator's defaults when it starts the block's Launch. */
+export type TaskConfig = Pick<Extract<BlockContent, { kind: "task" }>, "agent" | "isolated">;
 
 /** A block (README §定义 块). */
 export interface Block {
@@ -58,7 +65,7 @@ export function withField(block: Block, field: BlockField, text: string): Block 
 	if (field === "title") return { ...block, title: text };
 	const content = block.content;
 	switch (content.kind) {
-		case "task": return field === "body" ? { ...block, content: { kind: "task", body: text } } : null;
+		case "task": return field === "body" ? { ...block, content: { ...content, body: text } } : null;
 		case "design":
 			if (field === "requirement") return { ...block, content: { ...content, requirement: text } };
 			if (field === "design") return { ...block, content: { ...content, design: text } };
@@ -267,7 +274,7 @@ export type EntryData =
 	| { readonly type: "block_edited"; readonly block: BlockId; readonly field: BlockField; readonly text: string; readonly edit: number }
 	| { readonly type: "block_added"; readonly block: BlockId; readonly title: string; readonly content: BlockContent }
 	| { readonly type: "block_deleted"; readonly block: BlockId; readonly title: string; readonly content: BlockContent }
-	/** A disk edit switched the block between task and design. */
+	/** A disk edit switched the block between task and design, or a task block's execution contract changed. */
 	| { readonly type: "content_replaced"; readonly block: BlockId; readonly content: BlockContent }
 	| { readonly type: "blocks_reordered"; readonly order: readonly BlockId[] }
 	| { readonly type: "done_changed"; readonly block: BlockId; readonly done: boolean }
