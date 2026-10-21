@@ -103,10 +103,10 @@ blocks:
 | 块 | 文件字段 | 用途和编辑入口 |
 |---|---|---|
 | 设计块 | `requirement`、`design` | 人直接改需求；主会话改可视化设计稿。不能直接启动 |
-| 执行块 | `body` | 人或主会话直接改 Markdown/prompt；可以作为上下文被引用，也可以在 Run 中启动 |
+| 执行块 | `body`；可选 `agent`、`isolated` | 人或主会话直接改 Markdown/prompt；可以作为上下文被引用，也可以在 Run 中启动。`agent`、`isolated` 是它的执行契约：启动 subagent 时默认使用的 agent，以及是否让 worker 在独立 worktree 中工作 |
 | 编排块 | 同样是 `body`，正文整体为一个 `js` 或 `py` 代码围栏 | 执行协调者的编排代码，不把它当成普通 worker prompt |
 
-每个块必须有 `id`、`title`、`done`，以及对应的内容字段。ID 为 `b1`、`b2` 等正整数编号，不能重复。YAML **不写 `kind`**；类型由字段决定。混写 `body` 和 `requirement`/`design`、缺字段、未知字段会被拒绝。多行内容建议用 `|`，空需求或空设计用空字符串或空块标量。
+每个块必须有 `id`、`title`、`done`，以及对应的内容字段。ID 为 `b1`、`b2` 等正整数编号，不能重复。YAML **不写 `kind`**；类型由字段决定。混写 `body` 和 `requirement`/`design`、缺字段、未知字段会被拒绝。`agent`（去掉首尾空白后非空的字符串）和 `isolated`（布尔值）只能写在执行块上；不写时文件里也不出现。多行内容建议用 `|`，空需求或空设计用空字符串或空块标量。
 
 `done` 是显式填写或勾选的标记，不是设计认可状态，也不从检查、subagent 返回值或 Launch 状态推导。现有只有 `body` 的文件仍可使用。
 
@@ -115,7 +115,10 @@ blocks:
 1. 标题、执行正文、需求：点“铅笔”，改文字，再点“完成”；`Esc` 也会提交这些字段，**不是撤销**。
 2. 设计：查看绘制结果，点“写修改 prompt”，精确写下哪里要改、改成什么，再手动点“提交修改”。主会话收到通知后读块并修订 `design`，不会改 `requirement`。
 3. 修改 prompt 的 `Esc` **不提交**。点“放弃”丢弃当前草稿。空 prompt 或没有协调者连接时提交被拒，草稿保留在编辑框里。
-4. 一个服务内，包括模板和各 Run，同时只能有一个人的字段草稿。编辑锁覆盖整个块；人正在编辑时，协调者不能写同一块。协调者持锁时可点“打断”收回块。
+4. 设计稿里的 `ask` 显示为单选或多选控件，默认选中 `*` 推荐项。改选后点“提交选择”，面板把 `针对问题「<问题>」，选择：<选项>` 作为这个设计块的修改 prompt 提交，和手写的修改 prompt 一样进入修改记录并通知主会话；主会话修订设计时把已回答的 `ask` 换成对应的设计结论。没有协调者连接时提交被拒，这段文字留在修改 prompt 编辑框里；块被锁、已有其他草稿、Run 已结束或没有选中项时按钮不可用。
+5. 一个服务内，包括模板和各 Run，同时只能有一个人的字段草稿。编辑锁覆盖整个块；人正在编辑时，协调者不能写同一块。协调者持锁时可点“打断”收回块。
+
+块多时可点状态行的“折叠”，卡片只留状态行（含锁状态）、标题和提示；顶部“全部折叠”“全部展开”作用于当前文档的所有卡片。折叠只影响显示：检查结果和 `playbook_check inspect` 返回的视图与展开时相同，正在编辑的草稿也保留，展开后继续。执行块设置了 `agent` 或 `isolated` 时，状态行显示对应标识。
 
 提交成功的 prompt 进入只追加的修改记录，卡片中的“修改记录”默认折叠。记录的是**人的修改要求**，不是设计版本快照、设计 diff 或 AI 回复；普通读块不会自动附带它。
 
@@ -131,7 +134,7 @@ blocks:
 |---|---|---|
 | 模板 | 原始 YAML，供各次 Run 复制 | 改模板不会同步改已有 Run |
 | Run | “开始 Run”或 `playbook_run start` 复制模板；所有 `done` 重置为 `false`。结束后不能通过卡片或工具编辑块 | 开始 Run 不启动 agent；结束 Run 不要求所有块已 done |
-| Launch | 对 Run 的执行块编译，冻结 prompt/编排代码并建立记录；显式关闭或结束 Run 时关闭 | `launch`/`bind` 不启动 worker；结果记录不关闭 Launch；关闭记录不取消 worker |
+| Launch | 对 Run 的执行块编译，冻结 prompt/编排代码并建立记录；显式关闭、`playbook.result` 收尾或结束 Run 时关闭 | `launch`/`bind` 不启动 worker；`playbook_timeline` 写结果本身不关闭 Launch；关闭记录不取消 worker |
 
 Run 有独立的块内容、修改记录和时间线。**点“开始 Run”后，在顶部切换到该 Run 标签**再编辑或启动；工具调用也要传返回的 Run ID，例如 `r1`。不传 `run` 的读、改、编译、检查工具操作的是模板。
 
@@ -143,7 +146,7 @@ Run 中点执行块的“启动”，会向协调者发 `launch_requested`。勾
 
 文档服务会重新编译受影响的活跃 Launch，与基线比较；编译文本改变或编译失败时，经过约 2 秒合并通知协调者。人的内容修改、磁盘内容修改，以及协调者修订设计，都可能触发通知；标题、`done`、协调者自己修改执行正文不会触发同样的内容变更通知。活跃指未关闭且属于当前连接的协调者会话；新会话接管文档不会接管旧会话的 Launch。
 
-通知不会自动改正在运行的 worker prompt。协调者决定是否告知 worker、重新安排工作或调用 `playbook_launch rebase` 接受当前编译结果为新基线。`rebase` 不改变最初冻结的快照；之后 `playbook.spawn` 仍使用最初快照。
+通知不会自动改正在运行的 worker prompt。协调者决定是否告知 worker、重新安排工作或调用 `playbook_launch rebase` 接受当前编译结果为新基线。`rebase` 把当前编译结果追加为新基线，最初冻结的快照仍留在 Launch 记录里；之后 `playbook.spawn` 和编排块的 `playbook.exec` 使用最新基线。已关闭的 Launch 不能再 `bind` 或 `rebase`。
 
 ### 记录与文件
 
@@ -215,7 +218,7 @@ Run 中点执行块的“启动”，会向协调者发 `launch_requested`。勾
 | `annot` | `annot`；正文 `结果可能[过期]{!读取前刷新}`，`# 标题 \| 旁注`、`> 图注` |
 | `kv` | `kv cols=2`；`存储: Redis`，`*不变量: 一个源头` 为通栏项 |
 | `callout` | `callout warn 缓存失效`；正文为 Markdown；类型 `info/ok/warn/err` |
-| `ask` | `ask` 或 `ask multi`；首行问题，随后 2–6 个 `* 推荐项 \| 说明` 或 `- 其他项 \| 说明`；单选必须恰有一个推荐项；**只展示，不收集选择** |
+| `ask` | `ask` 或 `ask multi`；首行问题，随后 2–6 个 `* 推荐项 \| 说明` 或 `- 其他项 \| 说明`；单选必须恰有一个推荐项；面板中可点选并“提交选择”，见[人怎么编辑](#人怎么编辑) |
 | `diff` | `diff file=src/value.ts title="变更"`；正文直接贴 unified diff，不从 `file` 加载；支持 `start`、`hl` |
 | `html` | `html`；结构化标签如 `<section><h3>方案</h3><p><strong>结论</strong></p></section>`，转换为 TSP，不运行网页 |
 | `svg` | `svg`；完整、静态、安全的 `<svg>`，建议明确 `viewBox` 或 `width`/`height` |
@@ -242,14 +245,14 @@ Run 中点执行块的“启动”，会向协调者发 `launch_requested`。勾
 |---|---|
 | `playbook_open` | `{doc}` |
 | `playbook_read` | `{doc?, run?, block?}`；历史 `{doc?, run?, op:"revisions", block?, after?}` |
-| `playbook_edit` | `{doc?, run?, op:"title"或"done", block, value}`；`replace` 用 `{block, find, replace}`；`write` 用 `{block, text}`；`panel` 用 `{block, panel, text}`；`insert` 用 `{after?, title, body}`；`insert_design` 用 `{after?, title, design}`；`delete` 用 `{block}`；每项还要传 `op` |
+| `playbook_edit` | `{doc?, run?, op:"title"或"done", block, value}`；`replace` 用 `{block, find, replace}`；`write` 用 `{block, text}`；`panel` 用 `{block, panel, text}`；`insert` 用 `{after?, title, body, agent?, isolated?}`；`insert_design` 用 `{after?, title, design}`；`delete` 用 `{block}`；`move` 用 `{block, after}`，`after` 为块 ID 或 `null`（移到首部）；`agent` 用 `{block, value}`，值为字符串或 `null`（清除）；`isolated` 用 `{block, value}`，值为布尔或 `null`；每项还要传 `op` |
 | `playbook_compile` | `{doc?, run?, op:"compile", blocks:[…]}`；重新取回 `{doc?, run?, op:"refetch", targets:[…]}` |
 | `playbook_check` | `{doc?, run?, op:"inspect", blocks:[…]}`；报告 `{doc?, run?, op:"report", blocks:[…], version, result}` |
 | `playbook_run` | `{doc?, op:"start", name, update_every?}`、`{doc?, op:"finish", run}`、`{doc?, op:"list"}` |
 | `playbook_timeline` | `{doc?, op:"read", run, after?}`；`{doc?, op:"post", run, kind, text, block?, launch?, next?, quote?}`；`{doc?, op:"snooze", run, after}` |
-| `playbook_launch` | `{doc?, op:"launch", run, blocks:[…]}`；`{doc?, op:"bind", launch, agent}`；`{doc?, op:"info"或"rebase"或"close", launch}` |
+| `playbook_launch` | `{doc?, op:"launch", run, blocks:[…]}` → `{launch, kind, text, agent?, isolated?}`；`{doc?, op:"bind", launch, agent}`；`{doc?, op:"info"或"rebase"或"close", launch}` |
 
-`playbook_edit` 的 `write/replace` 只改执行正文或设计稿，不能改需求；`replace` 的 `find` 必须恰好出现一次。`panel` 的 `text` 必须是以 `## <ID> 标题` 开始的整个替换面板。`insert_design` 的需求固定从空开始，由人填写。修改已有块时，一个调用内完成加锁、修改、解锁。
+`playbook_edit` 的 `write/replace` 只改执行正文或设计稿，不能改需求；`replace` 的 `find` 必须恰好出现一次。`panel` 的 `text` 必须是以 `## <ID> 标题` 开始的整个替换面板。`insert_design` 的需求固定从空开始，由人填写。`move` 在位置不变时不写记录。`agent`、`isolated` 只用于执行块，修改它们不改变编译文本，不触发执行中的变更通知；`launch` 只在所有根块对某一项预设了相同值时返回该项。修改已有块时，一个调用内完成加锁、修改、解锁。
 
 ### 跑一次执行块
 
@@ -258,35 +261,40 @@ Run 中点执行块的“启动”，会向协调者发 `launch_requested`。勾
 1. `playbook_open {doc: "/绝对路径/playbook.yaml"}`。
 2. `playbook_compile {op: "compile", blocks: ["b2"]}`：查看展开的需求和 B 面板。
 3. `playbook_run {op: "start", name: "检查缓存方案"}`：取得返回的 Run ID。以下假设为 `r1`，实际以返回值为准。
-4. 在主会话的 **JS eval** 中执行：
+4. 在主会话的 **JS eval** 中启动 worker：
 
 ```js
 var worker = await playbook.agent({
   run: "r1", blocks: ["b2"], agent: "task:mid", label: "检查缓存方案"
 });
-var checklist = await playbook.result(worker, { block: "b2" });
-await tool.playbook_launch({ op: "close", launch: worker.launch });
-return checklist;
 ```
+
+`playbook.agent` 在 worker 启动并绑定后立即返回。`worker` 是顶层变量，后续 eval 单元仍可使用；用 omp 的 `wait` 工具等待 worker，期间主会话照常处理面板上的修改请求和变更通知。worker 结束后另发一个 eval：
+
+```js
+return await playbook.result(worker);
+```
+
+它把结果记到 b2（Launch 只有一个块时自动关联）并关闭这个 Launch。不需要中途响应面板时，也可以用一次阻塞调用 `await playbook.run({ run: "r1", blocks: ["b2"], agent: "task:mid" })` 完成启动、等待、记录和关闭。
 
 5. 检查输出；需要时显式 `playbook_edit {op:"done", run:"r1", block:"b2", value:true}`，或者由人勾选。最后 `playbook_run {op:"finish", run:"r1"}`，再写复盘。
 
-`task:mid` 必须是当前 omp 可用的 agent；扩展不提供或配置它。没有指定 `agent` 时使用 omp 的默认 agent，默认被禁用时必须显式指定。
+`task:mid` 必须是当前 omp 可用的 agent；扩展不提供或配置它。调用时没有指定 `agent` 就用块上预设的 `agent`，块也没有预设时用 omp 的默认 agent；默认被禁用时必须显式指定或在块上预设。`isolated` 同样按“显式传参 > 块上预设 > 不传”决定。
 
 JS eval 的 `playbook` 由扩展注入，不要自行加导入行。辅助方法：
 
 | 方法 | 行为 |
 |---|---|
-| `playbook.run({run, blocks, …})` | 创建 Launch、启动并绑定一个 worker、等待、记结果；单块时自动把结果关联到该块 |
-| `playbook.agent({run, blocks, …})` | 创建并绑定，返回 `{launch, id, handle, …}`，不等待 |
-| `playbook.result(worker, {block?})` | 等待并写 `result`；等待异常写 `failure` 并抛出 |
-| `playbook.spawn(launch, {…})` | 在已有 prompt Launch 上增加 worker，使用原始冻结快照 |
+| `playbook.run({run, blocks, …})` | `playbook.agent` 加 `playbook.result`：创建 Launch、启动并绑定一个 worker、等待、记结果并关闭 Launch |
+| `playbook.agent({run, blocks, …})` | 创建 Launch 并启动、绑定 worker，返回 `{launch, blocks, id, handle, …}`，不等待；未传的 `agent`、`isolated` 取块上的预设；对编排块先关闭刚建的 Launch 再报错 |
+| `playbook.result(worker, {block?, close?})` | 等待并写 `result`，未给 `block` 时关联到 Launch 唯一的块；等待异常写 `failure` 并抛出。写完后按 `close` 关闭 Launch，默认在 worker 由 `playbook.agent` 创建时关闭 |
+| `playbook.spawn(launch, {…})` | 在未关闭的 prompt Launch 上增加 worker，使用最新基线（`rebase` 后即新文本）；它不拥有该 Launch，`result` 默认不关闭；Launch 已关闭时报错 |
 | `playbook.read({run?, block?})` | 读块；没有历史查询辅助，历史仍用 `playbook_read` 工具 |
 | `playbook.post({run, kind, text, …})` | 写记录 |
 | `playbook.timeline({run, after?})` | 读时间线 |
 | `playbook.context` | 编排执行时的 `{doc, run, launch}`；普通 eval 中为空 |
 
-辅助方法不会自动设 `done`、关闭成功的 Launch 或结束 Run。并行时在**同一 eval 单元**中启动多个 worker，再分别 `result`；不要跨单元保留 worker handle。含 `playbook.run/result` 且未显式给 `timeout` 的单元会设置 `timeout: 0`。
+辅助方法不会自动设 `done` 或结束 Run。并行时用多个 `playbook.agent` 启动 worker，各自存进顶层变量，之后分别 `result`；多个 worker 共用一个 Launch 时用 `playbook.spawn` 加入，最后收尾的那个传 `{close: true}`，或调用 `playbook_launch {op:"close"}`。含 `playbook.run/result` 且未显式给 `timeout` 的单元会设置 `timeout: 0`。
 
 ### 编排块
 
@@ -298,8 +306,7 @@ JS eval 的 `playbook` 由扩展注入，不要自行加导入行。辅助方法
     body: |
       ```js
       var worker = await playbook.agent({ blocks: ["b2"], agent: "task:mid" });
-      var result = await playbook.result(worker, { block: "b2" });
-      await tool.playbook_launch({ doc: playbook.context.doc, op: "close", launch: worker.launch });
+      var result = await playbook.result(worker);
       await tool.playbook_launch({ doc: playbook.context.doc, op: "close", launch: playbook.context.launch });
       return result;
       ```
@@ -314,7 +321,7 @@ JS eval 的 `playbook` 由扩展注入，不要自行加导入行。辅助方法
 await playbook.exec("l2")
 ```
 
-`exec` 是扩展拦截并替换整个单元的入口，不是普通辅助方法；不允许在这句前后追加代码。连接多份文档时可写 `await playbook.exec("l2", "/绝对路径/playbook.yaml")`。执行的是 Launch 冻结的编排代码，强制设置 `timeout: 0`；JS 辅助默认取该 Launch 的文档与 Run。原始 `tool.playbook_*` 调用不继承这些默认值：连接多份文档时需显式传 `doc`，操作 Run 时还需按工具参数要求显式传 `run`。
+`exec` 是扩展拦截并替换整个单元的入口，不是普通辅助方法；不允许在这句前后追加代码。连接多份文档时可写 `await playbook.exec("l2", "/绝对路径/playbook.yaml")`。执行的是 Launch 当前基线里的编排代码（没有 `rebase` 过就是启动时冻结的代码），强制设置 `timeout: 0`；JS 辅助默认取该 Launch 的文档与 Run。原始 `tool.playbook_*` 调用不继承这些默认值：连接多份文档时需显式传 `doc`，操作 Run 时还需按工具参数要求显式传 `run`。
 
 Python 编排会设置 **Python 变量** `PLAYBOOK_DOC`、`PLAYBOOK_RUN`、`PLAYBOOK_LAUNCH`，不是环境变量，也不注入 JS 的 `playbook` 辅助；直接使用 Python eval 的 `tool`、`agent` 接口，需要 omp 的 Python 后端可用。
 

@@ -35,6 +35,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		const id = parseLaunchId(value); if (id === null) throw new Error("Invalid Launch id"); return id;
 	});
 	const kind = z.enum(["update", "result", "failure", "retrospective"]);
+	/** A task block's default agent, as K1 stores it: trimmed and not blank. */
+	const agentName = z.string().trim().min(1);
 	const positive = z.number().int().positive();
 	const doc = z.string().optional();
 	const report = z.union([
@@ -54,9 +56,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		z.object({ doc, run: run.optional(), op: z.literal("replace"), block, find: z.string(), replace: z.string() }).strict(),
 		z.object({ doc, run: run.optional(), op: z.literal("write"), block, text: z.string() }).strict(),
 		z.object({ doc, run: run.optional(), op: z.literal("panel"), block, panel: z.string().regex(/^[A-Z][0-9]*$/), text: z.string() }).strict(),
-		z.object({ doc, run: run.optional(), op: z.literal("insert"), after: block.optional(), title: z.string(), body: z.string() }).strict(),
+		z.object({ doc, run: run.optional(), op: z.literal("insert"), after: block.optional(), title: z.string(), body: z.string(), agent: agentName.optional(), isolated: z.boolean().optional() }).strict(),
 		z.object({ doc, run: run.optional(), op: z.literal("insert_design"), after: block.optional(), title: z.string(), design: z.string() }).strict(),
 		z.object({ doc, run: run.optional(), op: z.literal("delete"), block }).strict(),
+		z.object({ doc, run: run.optional(), op: z.literal("move"), block, after: block.nullable() }).strict(),
+		z.object({ doc, run: run.optional(), op: z.literal("agent"), block, value: agentName.nullable() }).strict(),
+		z.object({ doc, run: run.optional(), op: z.literal("isolated"), block, value: z.boolean().nullable() }).strict(),
 	]);
 	const compileParams = z.union([
 		z.object({ doc, run: run.optional(), op: z.literal("compile"), blocks: z.array(block) }).strict(),
@@ -120,13 +125,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const runsResult = z.object({ runs: z.array(summary) });
 	const helloResult = z.object({ blocks: z.array(block), runs: z.array(summary), pane: z.string().optional() });
 	const wireBlock = z.union([
-		z.object({ id: block, kind: z.literal("task"), title: z.string(), body: z.string(), done: z.boolean() }),
+		z.object({ id: block, kind: z.literal("task"), title: z.string(), body: z.string(), agent: z.string().optional(), isolated: z.boolean().optional(), done: z.boolean() }),
 		z.object({ id: block, kind: z.literal("design"), title: z.string(), requirement: z.string(), design: z.string(), done: z.boolean() }),
 	]);
 	const readResult = z.object({ title: z.string(), blocks: z.array(wireBlock) });
 	const revisionsResult = z.object({ revisions: z.array(z.object({ seq: positive, at: z.number(), block, prompt: z.string() })) });
 	const postResult = z.object({ seq: positive });
-	const launchRecord = z.object({ id: launch, run, session: z.string(), kind: z.enum(["prompt", "orchestration"]), snapshot: z.object({ result: z.object({ text: z.string() }) }) });
+	const launchRecord = z.object({ id: launch, run, session: z.string(), kind: z.enum(["prompt", "orchestration"]), snapshot: z.object({ result: z.object({ text: z.string() }) }), baselines: z.array(z.string()).optional() });
 	const evalInput = z.object({ language: z.enum(["js", "py"]), code: z.string(), title: z.string().optional(), timeout: z.number().optional(), reset: z.boolean().optional() });
 
 	const clients = new Map<string, K1Client>();
@@ -223,8 +228,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	// Model-facing text: what the Playbook is, then the one working order across the tools.
 	const overview = "Tern Playbooks: a Playbook is a YAML prompt document the user and you edit together; a document service shows it as form cards in a Tern pane beside this session. Use the playbook_* tools when the user wants to write, review or run multi-step agent work as a Playbook, or points at a Playbook .yaml file.";
 	const format = "File format: `title: <text>` and `blocks:` a list of blocks of two kinds, each written as YAML block scalars (`|`). A task block `{id: b<n>, title, body, done: false}` is a prompt that runs: `body` is Markdown and may reference `((b2))` (another block), `((file:path | lines(1..40)))` (path relative to the Playbook) or `((https://github.com/o/r/issues/1))`; a body that is exactly one ```js or ```py fenced block is an orchestration block. A design block `{id: b<n>, title, requirement, design, done: false}` is one design or business unit: `requirement` is the person's, written only by them; `design` is yours, written in answer-me-with-html draft format (optional `---` frontmatter with template sheet|doc, title, subtitle, cols; a lead; `## A Panel title {span=2 meta=\"…\"}` panels; Markdown with tables (status words ok/no/warn), `$…$`/`$$` math and `![alt](path)` images; fences flow, er, sequence, tree, timeline, limits, annot, kv, callout, ask, diff, html, svg, and code blocks with src=/lines=/hl=; flow/er/tree lines may start with `+ ` `- ` `~ ` change markers) and drawn in the pane; it never expands `((…))`. Task blocks pull designs in by reference: `((b3))` (requirement and design), `((b3 | requirement))`, `((b3 | design))` or `((b3 | panel(A)))`, where A is a letter ID written in that panel's heading (write IDs on every panel a task may reference). Design blocks cannot be launched themselves.";
-	const order = "Order: write the YAML, playbook_open it, playbook_read/playbook_edit blocks, playbook_run {op:\"start\"} to copy the template into a Run (r<n>), then run blocks of that Run from eval: prompt blocks with `await playbook.run({ run: \"r1\", blocks: [\"b2\"] })` (one call: launch, start a subagent, bind it, wait, record the result); an orchestration block with playbook_launch {op:\"launch\"} and then an eval whose whole code is `await playbook.exec(\"l<n>\")`. `doc` may be omitted while exactly one Playbook is open.";
-	const evalHelp = "In eval, `playbook` is provided automatically: the extension adds the `var playbook = …` first line to any JS cell that uses it, so do not write that line yourself. playbook.run({run, blocks, agent?, label?, schema?}) → subagent result, recorded; pass agent: \"<name>\" (for example \"task:mid\") when the default subagent is disabled. playbook.agent({...}) → {launch, id, handle} without waiting (start several, then playbook.result(spawned, {block?}) each); playbook.spawn(launch, {...}) adds a subagent to a Launch; playbook.post({run, kind, text, block?, launch?}); playbook.timeline({run, after?}); playbook.read({run?, block?}); inside an orchestration Launch, playbook.context is {doc, run, launch}. Never keep an agent handle across eval calls.";
+	const order = "Order: write the YAML, playbook_open it, playbook_read/playbook_edit blocks, playbook_run {op:\"start\"} to copy the template into a Run (r<n>), then run blocks of that Run from eval: a prompt block with `var worker = await playbook.agent({ run: \"r1\", blocks: [\"b2\"] })` (returns once the subagent is started and bound) and, after it finishes, `await playbook.result(worker)` in a later eval (records the result on the block and closes the Launch), or in one blocking call `await playbook.run({ run: \"r1\", blocks: [\"b2\"] })`; an orchestration block with playbook_launch {op:\"launch\"} and then an eval whose whole code is `await playbook.exec(\"l<n>\")`. `doc` may be omitted while exactly one Playbook is open.";
+	const evalHelp = "In eval, `playbook` is provided automatically: the extension adds the `var playbook = …` first line to any JS cell that uses it, so do not write that line yourself. playbook.agent({run, blocks, agent?, isolated?, label?, schema?}) → {launch, blocks, id, handle} without waiting: keep it in a top-level `var` and wait with the top-level `wait` tool, so panel notices (revision requests, block changes) still reach you while the subagent works; then `await playbook.result(worker, {block?, close?})` in a later eval records the result (or failure) on the given block, by default the Launch's only block, and closes the Launch that playbook.agent created. Options left out come from the block's preset `agent`/`isolated`; pass agent: \"<name>\" (for example \"task:mid\") when the default subagent is disabled and the block sets none. playbook.run({...}) = agent + result in one blocking call. playbook.spawn(launch, {...}) adds a subagent to an open prompt Launch using its current baseline (after rebase, the rebased text); its result does not close the shared Launch unless {close: true}. playbook.post({run, kind, text, block?, launch?}); playbook.timeline({run, after?}); playbook.read({run?, block?}); inside an orchestration Launch, playbook.context is {doc, run, launch}.";
 
 	type Tool<T> = { readonly name: string; readonly label: string; readonly description: string; readonly parameters: { parse(value: unknown): T }; run(params: T, ctx: ExtensionContext): Promise<Reply> };
 	const tools = [
@@ -242,10 +247,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		} satisfies Tool<ReturnType<typeof readParams.parse>>,
 		{
 			name: "playbook_edit", label: "Playbook: edit", parameters: editParams,
-			description: "Change one block of the template (or of Run `run`). op title {block, value}; done {block, value: boolean}; replace {block, find, replace} where find occurs exactly once in your field (a task's body, a design's draft); write {block, text} replaces your field whole; panel {block, panel, text} replaces one design panel addressed by the letter ID its heading writes, `text` being that whole panel starting with `## <ID> Title`; insert {after?, title, body} adds a task block, insert_design {after?, title, design} adds a design block whose requirement starts empty (the person writes it) → {block}; delete {block}. A design's requirement is never yours to change. Each call locks the block, applies the change and unlocks it; `Locked` means the person is editing that block now, so read it later instead of retrying at once.",
+			description: "Change one block of the template (or of Run `run`). op title {block, value}; done {block, value: boolean}; replace {block, find, replace} where find occurs exactly once in your field (a task's body, a design's draft); write {block, text} replaces your field whole; panel {block, panel, text} replaces one design panel addressed by the letter ID its heading writes, `text` being that whole panel starting with `## <ID> Title`; insert {after?, title, body, agent?, isolated?} adds a task block, insert_design {after?, title, design} adds a design block whose requirement starts empty (the person writes it) → {block}; delete {block}; move {block, after: <block> or null for the top} reorders; agent {block, value: <agent name> or null} and isolated {block, value: boolean or null} set or clear a task block's execution contract, the defaults playbook.agent/playbook.run use for its subagent (design blocks have none). A design's requirement is never yours to change. Each call locks the block, applies the change and unlocks it; `Locked` means the person is editing that block now, so read it later instead of retrying at once.",
 			run: (params, ctx) => {
 				switch (params.op) {
-					case "insert": return request(params.doc, ctx, { op: "insert", args: { ...scoped(params.run), ...(params.after ? { after: params.after } : {}), title: params.title, content: { kind: "task", body: params.body } } });
+					case "insert": return request(params.doc, ctx, { op: "insert", args: { ...scoped(params.run), ...(params.after ? { after: params.after } : {}), title: params.title, content: { kind: "task", body: params.body, ...(params.agent !== undefined ? { agent: params.agent } : {}), ...(params.isolated !== undefined ? { isolated: params.isolated } : {}) } } });
 					case "insert_design": return request(params.doc, ctx, { op: "insert", args: { ...scoped(params.run), ...(params.after ? { after: params.after } : {}), title: params.title, content: { kind: "design", design: params.design } } });
 					case "write": return editBlock(params.doc, ctx, { ...scoped(params.run), block: params.block }, { op: "write", args: { ...scoped(params.run), block: params.block, text: params.text } });
 					case "panel": return editBlock(params.doc, ctx, { ...scoped(params.run), block: params.block }, { op: "panel", args: { ...scoped(params.run), block: params.block, panel: params.panel, text: params.text } });
@@ -253,6 +258,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					case "done": return editBlock(params.doc, ctx, { ...scoped(params.run), block: params.block }, { op: "set", args: { ...scoped(params.run), block: params.block, field: "done", value: params.value } });
 					case "replace": return editBlock(params.doc, ctx, { ...scoped(params.run), block: params.block }, { op: "edit", args: { ...scoped(params.run), block: params.block, find: params.find, replace: params.replace } });
 					case "delete": return editBlock(params.doc, ctx, { ...scoped(params.run), block: params.block }, { op: "delete", args: { ...scoped(params.run), block: params.block } });
+					case "move": return editBlock(params.doc, ctx, { ...scoped(params.run), block: params.block }, { op: "move", args: { ...scoped(params.run), block: params.block, after: params.after } });
+					case "agent": return editBlock(params.doc, ctx, { ...scoped(params.run), block: params.block }, { op: "set", args: { ...scoped(params.run), block: params.block, field: "agent", value: params.value } });
+					case "isolated": return editBlock(params.doc, ctx, { ...scoped(params.run), block: params.block }, { op: "set", args: { ...scoped(params.run), block: params.block, field: "isolated", value: params.value } });
 				}
 			},
 		} satisfies Tool<ReturnType<typeof editParams.parse>>,
@@ -297,7 +305,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		} satisfies Tool<ReturnType<typeof timelineParams.parse>>,
 		{
 			name: "playbook_launch", label: "Playbook: Launch", parameters: launchParams,
-			description: "A Launch is the frozen prompt of Run blocks that subagents work from; the person's later edits to those blocks arrive here as block_changed notices. launch {run, blocks} → {launch, kind, text} (prefer `playbook.run`/`playbook.agent` in eval, which also start and bind the subagent); bind {launch, agent}; info {launch} → the full record; rebase {launch} accepts the current text as the new baseline; close {launch} ends it.",
+			description: "A Launch is the frozen prompt of Run blocks that subagents work from; the person's later edits to those blocks arrive here as block_changed notices. launch {run, blocks} → {launch, kind, text, agent?, isolated?} (agent/isolated: the execution contract every block presets; prefer `playbook.agent`/`playbook.run` in eval, which also start and bind the subagent and apply that contract); bind {launch, agent}; info {launch} → the full record; rebase {launch} accepts the current text as the new baseline, which playbook.spawn and playbook.exec then use; close {launch} ends it (playbook.result closes the Launch playbook.agent created).",
 			run: (params, ctx) => {
 				switch (params.op) {
 					case "launch": return request(params.doc, ctx, { op: "launch", args: { run: params.run, blocks: params.blocks } });
@@ -335,14 +343,20 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				const blocks = JSON.stringify(event.data.blocks);
 				const bodies = await clients.get(absolute)?.request({ op: "read", args: { run: event.data.run } });
 				const parsed = bodies?.ok ? readResult.safeParse(bodies.result) : undefined;
-				const orchestration = parsed?.success === true && parsed.data.blocks.some(item => event.data.blocks.includes(item.id) && item.kind === "task" && ORCHESTRATION.test(item.body));
+				const requested = parsed?.success === true ? parsed.data.blocks.filter(item => event.data.blocks.includes(item.id)) : [];
+				const orchestration = requested.some(item => item.kind === "task" && ORCHESTRATION.test(item.body));
+				const only = requested.length === 1 && requested[0]!.kind === "task" ? requested[0]! : null;
+				const preset = only && (only.agent !== undefined || only.isolated !== undefined)
+					? `块 ${only.id} 已预设${only.agent !== undefined ? ` agent: "${only.agent}"` : ""}${only.isolated !== undefined ? ` isolated: ${only.isolated}` : ""}，不显式传参时 playbook.agent / playbook.run 自动使用。`
+					: "";
+				const call = `{ doc: ${docLiteral}, run: "${event.data.run}", blocks: ${blocks} }`;
 				next = orchestration
 					? `人请求启动编排块 ${blocks}。下一步：调用 playbook_launch {doc: ${docLiteral}, op: "launch", run: "${event.data.run}", blocks: ${blocks}} 得到 l<n>，再单独发一个 eval，代码只写 \`await playbook.exec("l<n>")\`。`
-					: `人请求启动 Run ${event.data.run} 的块 ${blocks}。下一步：在 eval 中运行 \`await playbook.run({ doc: ${docLiteral}, run: "${event.data.run}", blocks: ${blocks} })\`，它启动 subagent、绑定、等待并记录结果；默认 subagent 被禁用时加上 \`agent: "<可用的 agent>"\`（例如 "task:mid"）。eval 单元开头那行 \`var playbook = …\` 由扩展自动加入，不要自己再写。`;
+					: `人请求启动 Run ${event.data.run} 的块 ${blocks}。${preset}下一步二选一：① 不阻塞：在 eval 中 \`var worker = await playbook.agent(${call})\`，启动并绑定后立即返回；用顶层 wait 等它，期间仍能处理面板通知；结束后另发 eval \`await playbook.result(worker)\` 记录结果并关闭 Launch。② 单步：\`await playbook.run(${call})\` 启动、等待、记录并关闭。默认 subagent 被禁用且块没有预设 agent 时加上 \`agent: "<可用的 agent>"\`（例如 "task:mid"）。eval 单元开头那行 \`var playbook = …\` 由扩展自动加入，不要自己再写。`;
 				break;
 			}
 			case "block_changed":
-				next = `人修改了 Launch ${event.data.launch.id} 依赖的块 ${JSON.stringify(event.data.changed)}（diff 见下）。可以：调用 playbook_launch {op: "rebase", launch: "${event.data.launch.id}"} 接受当前文本为新基线；告诉仍在运行的 subagent；或不处理。`;
+				next = `人修改了 Launch ${event.data.launch.id} 依赖的块 ${JSON.stringify(event.data.changed)}（diff 见下）。可以：调用 playbook_launch {op: "rebase", launch: "${event.data.launch.id}"} 接受当前文本为新基线（之后 playbook.spawn 与 playbook.exec 使用它）；告诉仍在运行的 subagent；或不处理。`;
 				break;
 			case "check_requested":
 				next = `人请求检查块 ${JSON.stringify(event.data.blocks)}。下一步：playbook_check {op: "inspect"} 取得问题与 version，在 eval 中用 judge 回答，再 playbook_check {op: "report"}。`;
@@ -357,7 +371,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				const found = answer?.ok ? revisionsResult.safeParse(answer.result) : undefined;
 				const prompt = found?.success ? found.data.revisions.find(item => item.seq === event.data.revision)?.prompt : undefined;
 				const history = `playbook_read {doc: ${docLiteral}, ${scope}op: "revisions", block: "${event.data.block}"}`;
-				next = `人对${where}的设计块 ${event.data.block} 提交了修改 prompt #${event.data.revision}${prompt === undefined ? `（读取失败，用 ${history} 查询）` : `：\n<prompt>\n${prompt}\n</prompt>`}\n下一步：playbook_read {doc: ${docLiteral}, ${scope}block: "${event.data.block}"} 读需求与当前设计稿，按 prompt 修订设计：用 playbook_edit 的 write、replace 或 panel 改 design；不要改 requirement。需要以前的修改要求时用 ${history}。`;
+				next = `人对${where}的设计块 ${event.data.block} 提交了修改 prompt #${event.data.revision}${prompt === undefined ? `（读取失败，用 ${history} 查询）` : `：\n<prompt>\n${prompt}\n</prompt>`}\n下一步：playbook_read {doc: ${docLiteral}, ${scope}block: "${event.data.block}"} 读需求与当前设计稿，按 prompt 修订设计：用 playbook_edit 的 write、replace 或 panel 改 design；不要改 requirement。prompt 回答了设计稿中的 \`ask\` 时，把那个 ask 围栏替换为对应的设计结论。需要以前的修改要求时用 ${history}。`;
 				break;
 			}
 			case "run_started": case "run_finished": case "done_changed":
@@ -391,12 +405,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			if (!info.ok) return { block: true, reason: `${info.error.code}: ${info.error.message}` };
 			const record = launchRecord.parse(info.result);
 			if (record.kind !== "orchestration") return { block: true, reason: `${launchId} is a prompt Launch; start its subagent with \`await playbook.spawn("${launchId}")\` or \`playbook.run\`` };
-			const fence = ORCHESTRATION.exec(record.snapshot.result.text);
+			// The latest baseline: the frozen snapshot until a rebase accepted newer code.
+			const fence = ORCHESTRATION.exec(record.baselines?.at(-1) ?? record.snapshot.result.text);
 			if (!fence) return { block: true, reason: `${launchId} has no fenced js/py code in its snapshot` };
 			const context = { doc: absolute, run: record.run, launch: launchId };
 			const code = fence[1] === "js"
-				? `// playbook.exec("${launchId}") replaced by the Launch's frozen orchestration code.\n` + importLine(context) + fence[2]!
-				: `# Added by the tern-playbooks extension: playbook.exec("${launchId}") replaced by the Launch's frozen orchestration code.\nPLAYBOOK_DOC = ${JSON.stringify(absolute)}\nPLAYBOOK_RUN = ${JSON.stringify(record.run)}\nPLAYBOOK_LAUNCH = ${JSON.stringify(launchId)}\n${fence[2]!}`;
+				? `// playbook.exec("${launchId}") replaced by the Launch's orchestration code (its latest baseline).\n` + importLine(context) + fence[2]!
+				: `# Added by the tern-playbooks extension: playbook.exec("${launchId}") replaced by the Launch's orchestration code (its latest baseline).\nPLAYBOOK_DOC = ${JSON.stringify(absolute)}\nPLAYBOOK_RUN = ${JSON.stringify(record.run)}\nPLAYBOOK_LAUNCH = ${JSON.stringify(launchId)}\n${fence[2]!}`;
 			return { input: { ...input, language: fence[1], code, timeout: 0, title: input.title ?? `Playbook ${launchId}` } };
 		}
 		if (/\bplaybook\.exec\s*\(/.test(input.code)) {
