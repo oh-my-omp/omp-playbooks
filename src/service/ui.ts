@@ -222,7 +222,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 		const targets = selectedBlocks(view, block.id);
 		const mixed = targets.length > 1 && view.blocks.some(other => targets.includes(other.block.id) && isOrchestration(other.block.content));
 		const designSelected = view.blocks.some(other => targets.includes(other.block.id) && other.block.content.kind === "design");
-		const folded = collapsed.has(block.id) && item.lock.kind !== "human";
+		const folded = collapsed.has(block.id);
 		const contract = block.content.kind === "task" ? block.content : null;
 		const c: TspNode[] = [row(`${prefix}.state`, [
 			check(`${prefix}.selected`, "选择", selected.has(block.id), false, checked => { if (checked) selected.add(block.id); else selected.delete(block.id); redraw(); }),
@@ -291,8 +291,11 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 		if (block.content.kind === "design") chartNodes = 0;
 		if (item.lock.kind === "human" && item.lock.field === "body") chartNodes = summaries.get(block.id)?.chartNodes ?? 0;
 		summaries.set(block.id, { chartNodes, view: { md, images }, draftErrors });
-		// A folded card still drew everything above, so its checks and render status match an open card.
-		const shown = folded ? c.filter(node => node.id === `${prefix}.state` || node.id.startsWith(`${prefix}.title.`) || node.id.startsWith(`${prefix}.notice.`)) : c;
+		// A folded card still drew everything above, so its checks and render status match an open card;
+		// only its state row (with the lock), title view and notices are mounted. A draft's editor stays
+		// in Core, so its field is not focusable until the card opens again.
+		const shown = folded ? c.filter(node => node.id === `${prefix}.state` || node.id === `${prefix}.title.view` || node.id.startsWith(`${prefix}.notice.`)) : c;
+		if (folded) for (const id of fields.keys()) if (id.startsWith(`${prefix}.`)) fields.delete(id);
 		return { id: `${prefix}.card`, k: "card", p: { head: `${block.id} · ${block.content.kind === "task" ? "执行块" : "设计块"}` }, c: shown };
 	}
 	function commit(block: BlockId): void {

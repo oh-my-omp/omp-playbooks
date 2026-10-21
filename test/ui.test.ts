@@ -489,12 +489,12 @@ describe("ask selection, execution contract badges and card folding", () => {
 		expect(open.b1?.chartNodes).toBe(1);
 		expect(open.b2?.view.md.length).toBeGreaterThan(0);
 		tsp.click("b1.fold");
-		expect(tsp.node("b1.card").c?.map(node => node.id)).toEqual(["b1.state", "b1.title.controls", "b1.title.view", "b1.notice.0"]);
+		expect(tsp.node("b1.card").c?.map(node => node.id)).toEqual(["b1.state", "b1.title.view", "b1.notice.0"]);
 		expect(tsp.node("b1.fold").p?.text).toBe("展开");
 		expect(() => tsp.node("b1.body.view.0")).toThrow();
 		expect(tsp.node("b2.design")).toBeDefined();
 		tsp.click("cards.collapse");
-		expect(tsp.node("b2.card").c?.map(node => node.id)).toEqual(["b2.state", "b2.title.controls", "b2.title.view"]);
+		expect(tsp.node("b2.card").c?.map(node => node.id)).toEqual(["b2.state", "b2.title.view"]);
 		expect(lastStatus("b1")).toEqual(open.b1);
 		expect(lastStatus("b2")).toEqual(open.b2);
 		tsp.click("cards.expand");
@@ -505,5 +505,19 @@ describe("ask selection, execution contract badges and card folding", () => {
 		tsp.event({ ev: "other", body: { ev: "select", id: "tabs", item: "r1" } });
 		tsp.event({ ev: "other", body: { ev: "select", id: "tabs", item: "template" } });
 		expect(tsp.node("b2.design")).toBeDefined();
+	});
+
+	test("a card with an open draft folds too: its editor unmounts, focus leaves it, and the draft returns on opening", async () => {
+		const { core, tsp } = await fixture();
+		tsp.click("b1.body.pencil"); await tick();
+		expect(tsp.frames.at(-1)?.ops.at(-1)).toEqual(["focus", "b1.body"]);
+		tsp.click("b1.fold");
+		expect(tsp.node("b1.card").c?.map(node => node.id)).toEqual(["b1.state", "b1.title.view", "b1.notice.0"]);
+		expect(tsp.node("b1.lock").p?.text).toBe("人正在编辑");
+		expect(tsp.node("b1.fold").p?.text).toBe("展开");
+		expect(tsp.frames.at(-1)?.ops.at(-1)).toEqual(["focus", null]);
+		tsp.click("b1.fold");
+		expect(tsp.node("b1.body").p?.text).toBe(core.template.blocks[0]!.lock.kind === "human" ? core.template.blocks[0]!.lock.draft : "");
+		expect(tsp.node("b1.body").k).toBe("editor");
 	});
 });
