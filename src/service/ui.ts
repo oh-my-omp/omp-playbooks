@@ -10,6 +10,7 @@ import { fieldText, parseRunId } from "../domain/model";
 import type { BlockView, CoreApi, DocView, RenderStatus } from "../domain/ports";
 import { isOrchestration } from "./core";
 import { renderDraft, type DraftHost } from "./draft/components";
+import type { AskSpec } from "./draft/ask";
 import type { ChangeView, FileRead } from "./draft/contract";
 import type { FrameOp, TspEvent, TspInput, TspNode, TspSession } from "./tsp-types";
 
@@ -81,6 +82,13 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 	const info = new Map<string, string>();
 	/** View of each marked draft component, by `<block>.<component key>`; UI state only. */
 	const views = new Map<string, ChangeView>();
+	/**
+	 * The person's pick for each drawn `ask`, by block and fence line; UI state only. It starts at the
+	 * suggested options and starts over when the ask's question, mode or option labels change.
+	 */
+	const asks = new Map<BlockId, Map<string, { signature: string; selected: string[] }>>();
+	/** Cards showing only their state row, title and notices; UI state only. */
+	const collapsed = new Set<BlockId>();
 	const sentBlobs = new Set<string>();
 
 	function imageNode(id: string, bytes: Uint8Array, mime: string, alt: string, size?: { readonly w: number; readonly h: number }): TspNode {
@@ -115,6 +123,44 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 			if (lock?.kind === "human" && lock.field === name) return lock.draft;
 			return name === "prompt" || !item ? "" : fieldText(item.block, name) ?? "";
 		}, write: draft => core.setDraft(ref, block, draft) }, name === "prompt" ? "写给协调者的修改要求：哪里、改成什么" : `${block} ${LABELS[name]}`);
+	}
+	/** Option inputs and the submit button of an ask in `block`'s visible draft. */
+	function askControl(block: BlockId, canEdit: boolean): NonNullable<DraftHost["askControl"]> {
+		return (id, key, spec) => {
+			const signature = JSON.stringify([spec.question, spec.mode, spec.options.map(option => option.label)]);
+			const byKey = asks.get(block) ?? new Map<string, { signature: string; selected: string[] }>();
+			asks.set(block, byKey);
+			let choice = byKey.get(key);
+			if (choice?.signature !== signature) {
+				choice = { signature, selected: spec.options.filter(option => option.suggested).map(option => option.label) };
+				byKey.set(key, choice);
+			}
+			const state = choice;
+			const options = spec.options.map((option, index) => check(
+				`${id}.${index}`,
+				`${option.label}${option.suggested ? " · 建议" : ""}${option.note ? ` — ${option.note}` : ""}`,
+				state.selected.includes(option.label),
+				!canEdit,
+				checked => {
+					if (spec.mode === "single") { if (checked) state.selected = [option.label]; }
+					else state.selected = spec.options.map(other => other.label).filter(label => label === option.label ? checked : state.selected.includes(label));
+					redraw();
+				},
+				spec.mode === "single" ? id : undefined,
+				option.label,
+			));
+			return [col(`${id}.options`, options), button(`${id}.submit`, "提交选择", () => submitAsk(block, spec, state.selected), !canEdit || state.selected.length === 0)];
+		};
+	}
+	/** An ask's choice goes to the coordinator as a change request; refused, the text stays in the block's prompt draft. */
+	function submitAsk(block: BlockId, spec: AskSpec, selected: readonly string[]): void {
+		const started = core.pencil(ref, block, "prompt");
+		if (started) return showError(started);
+		focus = `${block}.prompt`; committed = null;
+		carets.delete(focus); undo.delete(focus); notices.delete(focus);
+		const drafted = core.setDraft(ref, block, `针对问题「${spec.question}」，选择：${selected.join("、")}`);
+		if (drafted) return showError(drafted);
+		submitPrompt(block);
 	}
 	function submitPrompt(block: BlockId): void {
 		const error = core.commit(ref, block);
@@ -176,7 +222,17 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 		const targets = selectedBlocks(view, block.id);
 		const mixed = targets.length > 1 && view.blocks.some(other => targets.includes(other.block.id) && isOrchestration(other.block.content));
 		const designSelected = view.blocks.some(other => targets.includes(other.block.id) && other.block.content.kind === "design");
-		const c: TspNode[] = [row(`${prefix}.state`, [check(`${prefix}.selected`, "选择", selected.has(block.id), false, checked => { if (checked) selected.add(block.id); else selected.delete(block.id); redraw(); }), check(`${prefix}.done`, "done", block.done, !unlocked || finished, done => { showError(core.setDone(ref, block.id, done)); }), text(`${prefix}.lock`, item.lock.kind === "coordinator" ? "协调者正在编辑" : item.lock.kind === "human" ? "人正在编辑" : "块锁：无"), ...(item.lock.kind === "coordinator" ? [button(`${prefix}.interrupt`, "打断", () => showError(core.interrupt(ref, block.id)), finished)] : [])])];
+		const folded = collapsed.has(block.id) && item.lock.kind !== "human";
+		const contract = block.content.kind === "task" ? block.content : null;
+		const c: TspNode[] = [row(`${prefix}.state`, [
+			check(`${prefix}.selected`, "选择", selected.has(block.id), false, checked => { if (checked) selected.add(block.id); else selected.delete(block.id); redraw(); }),
+			check(`${prefix}.done`, "done", block.done, !unlocked || finished, done => { showError(core.setDone(ref, block.id, done)); }),
+			text(`${prefix}.lock`, item.lock.kind === "coordinator" ? "协调者正在编辑" : item.lock.kind === "human" ? "人正在编辑" : "块锁：无"),
+			...(contract?.agent !== undefined ? [{ id: `${prefix}.agent`, k: "badge", p: { text: `agent: ${contract.agent}`, tone: "accent" } }] : []),
+			...(contract?.isolated !== undefined ? [{ id: `${prefix}.isolated`, k: "badge", p: { text: `isolated: ${contract.isolated ? "true" : "false"}`, tone: "accent" } }] : []),
+			...(item.lock.kind === "coordinator" ? [button(`${prefix}.interrupt`, "打断", () => showError(core.interrupt(ref, block.id)), finished)] : []),
+			button(`${prefix}.fold`, folded ? "展开" : "折叠", () => { if (collapsed.has(block.id)) collapsed.delete(block.id); else collapsed.add(block.id); redraw(); }),
+		])];
 		const editable: readonly ("title" | "body" | "requirement")[] = block.content.kind === "task" ? ["title", "body"] : ["title", "requirement"];
 		for (const name of editable) {
 			const editing = item.lock.kind === "human" && item.lock.field === name;
@@ -192,9 +248,10 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 		/** Checks read the design in the changes view, whatever view the person picked (issue #3 decision 8). */
 		let checkedDesign: readonly TspNode[] = [];
 		if (block.content.kind === "design") {
-			const drawn = renderDraft(block.content.design, draftHost(block.id));
-			draftErrors = drawn.diagnostics.filter(found => found.severity === "error").length;
 			const host = draftHost(block.id);
+			const drawn = renderDraft(block.content.design, { ...host, askControl: askControl(block.id, canEdit) });
+			draftErrors = drawn.diagnostics.filter(found => found.severity === "error").length;
+			// The hidden pass draws asks statically: no controls, no events, no selection state.
 			checkedDesign = renderDraft(block.content.design, { ...host, context: { ...host.context, svg: (id, _svg, _size, alt) => ({ id, k: "image", p: { alt } }), image: (id, _bytes, _mime, alt) => ({ id, k: "image", p: { alt } }) }, view: () => "changes" }).nodes;
 			c.push(section(`${prefix}.design`, "设计（由协调者按修改 prompt 修订）", block.content.design.trim() ? [...drawn.nodes] : [text(`${prefix}.design.empty`, "（协调者还没有写设计）", "muted")]));
 			if (drawn.diagnostics.length) c.push(section(`${prefix}.diagnostics`, `稿件问题 ${drawn.diagnostics.length}`, drawn.diagnostics.map((found, index) => text(`${prefix}.diagnostic.${index}`, `第 ${found.line} 行 · ${found.component} · ${found.message}`, found.severity === "error" ? "error" : "warning"))));
@@ -234,7 +291,9 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 		if (block.content.kind === "design") chartNodes = 0;
 		if (item.lock.kind === "human" && item.lock.field === "body") chartNodes = summaries.get(block.id)?.chartNodes ?? 0;
 		summaries.set(block.id, { chartNodes, view: { md, images }, draftErrors });
-		return { id: `${prefix}.card`, k: "card", p: { head: `${block.id} · ${block.content.kind === "task" ? "执行块" : "设计块"}` }, c };
+		// A folded card still drew everything above, so its checks and render status match an open card.
+		const shown = folded ? c.filter(node => node.id === `${prefix}.state` || node.id.startsWith(`${prefix}.title.`) || node.id.startsWith(`${prefix}.notice.`)) : c;
+		return { id: `${prefix}.card`, k: "card", p: { head: `${block.id} · ${block.content.kind === "task" ? "执行块" : "设计块"}` }, c: shown };
 	}
 	function commit(block: BlockId): void {
 		const lock = core.view(ref).blocks.find(item => item.block.id === block)?.lock;
@@ -245,7 +304,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 		redraw();
 	}
 	function switchView(next: DocRef): void {
-		ref = next; selected.clear(); previews.clear(); info.clear(); summaries.clear(); focus = null;
+		ref = next; selected.clear(); previews.clear(); info.clear(); summaries.clear(); asks.clear(); collapsed.clear(); focus = null;
 		postText = ""; postNext = ""; postBlock = null; postKindChosen = false; filter = "all";
 		redraw();
 	}
@@ -264,6 +323,10 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 			c.push(button("run.finish", "结束 Run", () => showError(core.finishRun(run.id)), run.status === "finished"));
 		}
 		const hasDraft = [core.view({ kind: "template" }), ...runs.map(run => core.view({ kind: "run", run: run.id }))].some(doc => doc.blocks.some(item => item.lock.kind === "human"));
+		const present = new Set(view.blocks.map(item => item.block.id));
+		for (const id of asks.keys()) if (!present.has(id)) asks.delete(id);
+		for (const id of collapsed) if (!present.has(id)) collapsed.delete(id);
+		if (view.blocks.length) c.push(row("cards", [button("cards.collapse", "全部折叠", () => { for (const item of view.blocks) collapsed.add(item.block.id); redraw(); }), button("cards.expand", "全部展开", () => { collapsed.clear(); redraw(); })]));
 		c.push(...view.blocks.map(item => blockCard(view, item, hasDraft)));
 		if (!view.blocks.length) c.push(row("block.insert", [button("block.insert.task", "新建执行块", () => showError(core.insertBlock(ref, null, "task")), view.run?.status === "finished"), button("block.insert.design", "新建设计块", () => showError(core.insertBlock(ref, null, "design")), view.run?.status === "finished")]));
 		if (view.run) {

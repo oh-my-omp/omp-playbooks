@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { startUi } from "../src/service/ui";
+import { checks } from "../src/service/checks";
+import { Core } from "../src/service/core";
+import { references } from "../src/service/references";
+import { createStore } from "../src/service/store";
+import type { EventPayload } from "../src/domain/protocol";
 import { fieldText, withField, type BlockContent, type BlockId, type CompileResult, type DocRef, type HumanField, type Launch, type LaunchId, type RecordKind, type Revision, type RunId } from "../src/domain/model";
 import type { BlockView, CoreApi, DocView, RenderStatus } from "../src/domain/ports";
 import type { RunSummary } from "../src/domain/protocol";
@@ -368,5 +375,135 @@ describe("K4 form UI", () => {
 		tsp.event({ ev: "change", id: "b2.selected", checked: false });
 		tsp.click("b1.launch");
 		expect(core.calls.filter(call => call.method === "requestLaunch")).toEqual([{ method: "requestLaunch", args: ["r1", ["b1"]] }]);
+	});
+});
+
+// #11: ask selection submits a change request; execution contract badges; folding keeps checks.
+const askDesign = "## A Cache\n\n```ask\nWhich cache?\n* Redis | keeps data\n- Memcached | no disk\n```\n";
+function choice(tsp: FakeTsp, index: number | "submit"): TspNode {
+	return tsp.node(`b1.design.view.p0.0.choice.${index}`);
+}
+async function realCore(design: string, coordinator: boolean) {
+	const directory = mkdtempSync("/tmp/tern-ui-ask-");
+	const store = createStore(join(directory, "playbook.yaml"));
+	store.write(template, store.serialize({ title: "Ask", blocks: [{ id: "b1", title: "Cache design", done: false, content: { kind: "design", requirement: "Pick a cache.", design } }] }, null));
+	const core = new Core({ store, references, checks, fetcher: { async fetch() { throw new Error("no external targets"); } }, panes: { ownPane: () => null, async focusPane() { return { ok: true }; } } });
+	expect(core.load()).toBeNull();
+	const events: EventPayload[] = [];
+	if (coordinator) {
+		const conn = { id: 1, send: (event: EventPayload) => { events.push(event); }, close() {} };
+		core.connected(conn);
+		expect((await core.handle(conn, "hello", { op: "hello", args: { session: "ask-session" } })).ok).toBe(true);
+	}
+	const tsp = new FakeTsp();
+	startUi(core, tsp, directory);
+	const ready = tsp.nextFrame(); tsp.input({ kind: "hello", dark: true }); await ready;
+	return { core, store, tsp, events, stop: () => { core.stop(); rmSync(directory, { recursive: true, force: true }); } };
+}
+
+describe("ask selection, execution contract badges and card folding", () => {
+	test("an ask starts at its suggestion; the chosen option is journaled and sent to the coordinator", async () => {
+		const f = await realCore(askDesign, true);
+		try {
+			expect(choice(f.tsp, 0).p).toMatchObject({ type: "radio", checked: true, value: "Redis" });
+			expect(choice(f.tsp, 1).p).toMatchObject({ type: "radio", checked: false, value: "Memcached" });
+			f.tsp.event({ ev: "change", id: "b1.design.view.p0.0.choice.1", checked: true }); await tick();
+			expect(choice(f.tsp, 0).p?.checked).toBe(false);
+			expect(choice(f.tsp, 1).p?.checked).toBe(true);
+			f.tsp.click("b1.design.view.p0.0.choice.submit"); await tick();
+			expect(f.store.readRevisions(template).map(revision => revision.prompt)).toEqual(["针对问题「Which cache?」，选择：Memcached"]);
+			expect(f.events).toEqual([{ event: "revision_requested", data: { block: "b1", revision: 1 } }]);
+			expect(f.core.view(template).blocks[0]!.lock).toEqual({ kind: "none" });
+			expect(descendants(f.tsp.node("b1.revisions")).filter(node => node.k === "md").map(node => node.p?.text)).toEqual(["针对问题「Which cache?」，选择：Memcached"]);
+		} finally { f.stop(); }
+	});
+
+	test("without a coordinator the refused choice stays in the block's prompt draft and the error is shown", async () => {
+		const f = await realCore(askDesign, false);
+		try {
+			f.tsp.click("b1.design.view.p0.0.choice.submit"); await tick();
+			expect(f.store.readRevisions(template)).toEqual([]);
+			expect(f.core.view(template).blocks[0]!.lock).toEqual({ kind: "human", field: "prompt", draft: "针对问题「Which cache?」，选择：Redis" });
+			expect(f.tsp.node("b1.prompt").p?.text).toBe("针对问题「Which cache?」，选择：Redis");
+			expect(f.tsp.node("error.0").p?.text).toBe("没有协调者连接：修改 prompt 仍保留，协调者连接后再提交");
+			expect(choice(f.tsp, "submit").p).toMatchObject({ attrs: { "aria-disabled": true } });
+		} finally { f.stop(); }
+	});
+
+	test("multi keeps an emptied choice across redraws, disables submit, and resets when the ask's options change", async () => {
+		const core = new FakeCore();
+		const multi = "## A Cache\n\n```ask multi\nWhich stores?\n* Redis\n* Postgres\n- Memcached\n```\n";
+		core.template = { ...core.template, blocks: [designItem("b1", multi)] };
+		const { tsp } = await fixture(core);
+		expect([0, 1, 2].map(index => choice(tsp, index).p?.checked)).toEqual([true, true, false]);
+		expect(choice(tsp, 0).p?.type).toBe("checkbox");
+		tsp.event({ ev: "change", id: "b1.design.view.p0.0.choice.0", checked: false });
+		tsp.event({ ev: "change", id: "b1.design.view.p0.0.choice.1", checked: false });
+		core.listener(template); await tick();
+		expect([0, 1, 2].map(index => choice(tsp, index).p?.checked)).toEqual([false, false, false]);
+		expect(choice(tsp, "submit").p).toMatchObject({ attrs: { "aria-disabled": true } });
+		tsp.click("b1.design.view.p0.0.choice.submit");
+		expect(core.calls.filter(call => call.method === "pencil")).toEqual([]);
+		tsp.event({ ev: "change", id: "b1.design.view.p0.0.choice.2", checked: true });
+		tsp.click("b1.design.view.p0.0.choice.submit"); await tick();
+		expect(core.calls.filter(call => ["pencil", "setDraft", "commit"].includes(call.method))).toEqual([
+			{ method: "pencil", args: [template, "b1", "prompt"] },
+			{ method: "setDraft", args: [template, "b1", "针对问题「Which stores?」，选择：Memcached"] },
+			{ method: "commit", args: [template, "b1"] },
+		]);
+		core.change(template, "b1", () => designItem("b1", multi.replace("- Memcached", "* SQLite")));
+		core.listener(template); await tick();
+		expect([0, 1, 2].map(index => choice(tsp, index).p?.checked)).toEqual([true, true, true]);
+	});
+
+	test("ask controls are unavailable while the block is locked, another draft exists, or the Run has finished", async () => {
+		const core = new FakeCore();
+		core.template = { ...core.template, blocks: [{ ...designItem("b1", askDesign), lock: { kind: "coordinator", request: "q1" } }] };
+		core.run = { ...core.run, run: { ...core.run.run!, status: "finished", finishedAt: 3000, updateDue: null }, blocks: [designItem("b1", askDesign)] };
+		const { tsp } = await fixture(core);
+		expect(choice(tsp, "submit").p).toMatchObject({ attrs: { "aria-disabled": true } });
+		expect(choice(tsp, 0).p?.disabled).toBe(true);
+		tsp.click("run.r1.open");
+		expect(choice(tsp, "submit").p).toMatchObject({ attrs: { "aria-disabled": true } });
+		tsp.click("b1.design.view.p0.0.choice.submit");
+		expect(core.calls.filter(call => call.method === "pencil")).toEqual([]);
+	});
+
+	test("a task card's state row shows its execution contract", async () => {
+		const core = new FakeCore();
+		const configured = item("b1");
+		core.template = { ...core.template, blocks: [{ ...configured, block: { ...configured.block, content: { kind: "task", body, agent: "task:mid", isolated: false } } }, item("b2", "Other")] };
+		const { tsp } = await fixture(core);
+		expect(tsp.node("b1.agent")).toMatchObject({ k: "badge", p: { text: "agent: task:mid" } });
+		expect(tsp.node("b1.isolated")).toMatchObject({ k: "badge", p: { text: "isolated: false" } });
+		expect(() => tsp.node("b2.agent")).toThrow();
+		expect(() => tsp.node("b2.isolated")).toThrow();
+	});
+
+	test("folding hides a card's body and design but keeps state, title and identical render status", async () => {
+		const core = new FakeCore();
+		core.template = { ...core.template, blocks: [item("b1"), designItem("b2")] };
+		const { tsp } = await fixture(core);
+		const lastStatus = (block: BlockId) => core.statuses.filter(status => status.block === block).at(-1)?.status;
+		const open = { b1: lastStatus("b1"), b2: lastStatus("b2") };
+		expect(open.b1?.chartNodes).toBe(1);
+		expect(open.b2?.view.md.length).toBeGreaterThan(0);
+		tsp.click("b1.fold");
+		expect(tsp.node("b1.card").c?.map(node => node.id)).toEqual(["b1.state", "b1.title.controls", "b1.title.view", "b1.notice.0"]);
+		expect(tsp.node("b1.fold").p?.text).toBe("展开");
+		expect(() => tsp.node("b1.body.view.0")).toThrow();
+		expect(tsp.node("b2.design")).toBeDefined();
+		tsp.click("cards.collapse");
+		expect(tsp.node("b2.card").c?.map(node => node.id)).toEqual(["b2.state", "b2.title.controls", "b2.title.view"]);
+		expect(lastStatus("b1")).toEqual(open.b1);
+		expect(lastStatus("b2")).toEqual(open.b2);
+		tsp.click("cards.expand");
+		expect(tsp.node("b1.body.view.0")).toBeDefined();
+		expect(tsp.node("b2.design")).toBeDefined();
+		expect(tsp.node("b1.fold").p?.text).toBe("折叠");
+		tsp.click("b2.fold");
+		tsp.event({ ev: "other", body: { ev: "select", id: "tabs", item: "r1" } });
+		tsp.event({ ev: "other", body: { ev: "select", id: "tabs", item: "template" } });
+		expect(tsp.node("b2.design")).toBeDefined();
 	});
 });

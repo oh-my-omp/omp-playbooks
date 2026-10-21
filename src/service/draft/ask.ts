@@ -2,7 +2,7 @@ import type { TspNode } from "../tsp-types";
 import { diagnostic, type FenceInput, type Parsed, type RenderContext, type Rendered } from "./contract";
 import { inlineSpans } from "./text";
 
-/** An ask is a displayed decision, not an input or a stored reader answer. */
+/** An ask is a decision the coordinator offers; the UI may let the person pick options and submit them as a change request. */
 export interface AskSpec {
 	readonly question: string;
 	readonly mode: "single" | "multi";
@@ -64,20 +64,19 @@ export function renderAsk(spec: AskSpec, ctx: RenderContext): Rendered {
 	const children: TspNode[] = [
 		{ id: `${ctx.id}.question`, k: "text", p: { spans: inlineSpans(spec.question, "strong") } },
 	];
-	for (const [index, option] of spec.options.entries()) {
-		const id = `${ctx.id}.option.${index}`;
-		const heading: TspNode[] = [
-			{ id: `${id}.label`, k: "text", p: { spans: inlineSpans(option.label, option.suggested ? "accent" : "") } },
-		];
-		if (option.suggested) heading.push({ id: `${id}.suggested`, k: "badge", p: { text: "建议", tone: "accent" } });
-		const content: TspNode[] = [{ id: `${id}.heading`, k: "row", p: { gap: 1 }, c: heading }];
-		if (option.note) content.push({ id: `${id}.note`, k: "text", p: { spans: inlineSpans(option.note, "muted") } });
-		children.push({ id, k: "col", p: { gap: 0 }, c: content });
+	if (ctx.askControl) children.push(...ctx.askControl(`${ctx.id}.choice`, spec));
+	else {
+		for (const [index, option] of spec.options.entries()) {
+			const id = `${ctx.id}.option.${index}`;
+			const heading: TspNode[] = [
+				{ id: `${id}.label`, k: "text", p: { spans: inlineSpans(option.label, option.suggested ? "accent" : "") } },
+			];
+			if (option.suggested) heading.push({ id: `${id}.suggested`, k: "badge", p: { text: "建议", tone: "accent" } });
+			const content: TspNode[] = [{ id: `${id}.heading`, k: "row", p: { gap: 1 }, c: heading }];
+			if (option.note) content.push({ id: `${id}.note`, k: "text", p: { spans: inlineSpans(option.note, "muted") } });
+			children.push({ id, k: "col", p: { gap: 0 }, c: content });
+		}
 	}
-	children.push({
-		id: `${ctx.id}.mode`,
-		k: "text",
-		p: { spans: [{ t: `${spec.mode === "single" ? "单选" : "多选"} · 仅展示，不收集选择`, s: "muted" }] },
-	});
+	children.push({ id: `${ctx.id}.mode`, k: "text", p: { spans: [{ t: spec.mode === "single" ? "单选" : "多选", s: "muted" }] } });
 	return { nodes: [{ id: `${ctx.id}.ask`, k: "col", p: { gap: 1 }, c: children }], diagnostics: [] };
 }
