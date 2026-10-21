@@ -17,15 +17,29 @@ export type PlaybookDeps = PlaybookContext & {
 	readonly agent: Spawn;
 };
 
-/** One subagent started for a Launch and already bound to it. */
-export type Spawned = { readonly doc?: string; readonly run: string; readonly launch: string; readonly id: string; readonly handle: AgentHandle };
+/**
+ * One subagent started for a Launch and already bound to it. `blocks` are the Launch's roots;
+ * `ownsLaunch` says this subagent's Launch was created for it alone (`playbook.agent`), so recording
+ * its result closes the Launch; a subagent added with `playbook.spawn` shares a Launch it does not own.
+ */
+export type Spawned = {
+	readonly doc?: string;
+	readonly run: string;
+	readonly launch: string;
+	readonly blocks: readonly string[];
+	readonly ownsLaunch: boolean;
+	readonly id: string;
+	readonly handle: AgentHandle;
+};
 
 export type AgentRequest = AgentOptions & { readonly doc?: string; readonly run?: string; readonly blocks: readonly string[] };
 
 class PlaybookError extends Error {}
 
-type Created = { readonly launch: string; readonly kind: string; readonly text: string };
-type LaunchInfo = { readonly run: string; readonly kind: string; readonly text: string };
+/** `playbook_launch {op: "launch"}`: the blocks' shared execution contract comes back with the Launch. */
+type Created = { readonly launch: string; readonly kind: string; readonly text: string; readonly agent?: string; readonly isolated?: boolean };
+/** `playbook_launch {op: "info"}`: `text` is the current baseline, the snapshot's text until a rebase. */
+type LaunchInfo = { readonly run: string; readonly kind: string; readonly text: string; readonly blocks: readonly string[]; readonly closed: boolean };
 
 function objectOf(value: unknown): object {
 	if (typeof value !== "object" || value === null) throw new PlaybookError(`unexpected tool result: ${JSON.stringify(value)}`);
@@ -50,13 +64,31 @@ function decode(value: unknown): unknown {
 }
 function created(value: unknown): Created {
 	const result = objectOf(value);
-	return { launch: stringAt(result, "launch"), kind: stringAt(result, "kind"), text: stringAt(result, "text") };
+	const agent: unknown = "agent" in result ? result.agent : undefined;
+	const isolated: unknown = "isolated" in result ? result.isolated : undefined;
+	if (agent !== undefined && typeof agent !== "string") throw new PlaybookError("launch result agent is not a string");
+	if (isolated !== undefined && typeof isolated !== "boolean") throw new PlaybookError("launch result isolated is not a boolean");
+	return {
+		launch: stringAt(result, "launch"), kind: stringAt(result, "kind"), text: stringAt(result, "text"),
+		...(agent === undefined ? {} : { agent }), ...(isolated === undefined ? {} : { isolated }),
+	};
+}
+function strings(value: unknown, key: string): string[] {
+	if (!Array.isArray(value) || !value.every(item => typeof item === "string")) throw new PlaybookError(`tool result has no string list ${key}`);
+	return value;
 }
 function launchInfo(value: unknown): LaunchInfo {
 	const record = objectOf(value);
 	const snapshot = objectOf("snapshot" in record ? record.snapshot : undefined);
 	const result = objectOf("result" in snapshot ? snapshot.result : undefined);
-	return { run: stringAt(record, "run"), kind: stringAt(record, "kind"), text: stringAt(result, "text") };
+	const baselines = strings("baselines" in record ? record.baselines : undefined, "baselines");
+	const closed: unknown = "closed" in record ? record.closed : undefined;
+	return {
+		run: stringAt(record, "run"), kind: stringAt(record, "kind"),
+		text: baselines.at(-1) ?? stringAt(result, "text"),
+		blocks: strings("blocks" in record ? record.blocks : undefined, "blocks"),
+		closed: closed !== null && closed !== undefined,
+	};
 }
 
 function textOf(value: unknown): string {
@@ -95,7 +127,7 @@ export function createPlaybook(deps: PlaybookDeps) {
 	 * When `agent()` itself fails on a Launch this call created, the Launch is closed so it does
 	 * not stay open with no agent; an existing Launch (spawn) is left as it is.
 	 */
-	async function start(target: { doc?: string; run: string }, launch: string, prompt: string, options: AgentOptions, fresh: boolean): Promise<Spawned> {
+	async function start(target: { doc?: string; run: string }, launch: string, blocks: readonly string[], prompt: string, options: AgentOptions, fresh: boolean): Promise<Spawned> {
 		let handle: AgentHandle;
 		try {
 			handle = await deps.agent(prompt, options);
@@ -105,31 +137,45 @@ export function createPlaybook(deps: PlaybookDeps) {
 			throw new PlaybookError(`agent() failed for Launch ${launch}${fresh ? " (closed)" : ""}: ${reason}. When the default subagent is disabled, pass agent: "<name>", for example agent: "task:mid".`);
 		}
 		await call("playbook_launch", { ...docArg(target.doc), op: "bind", launch, agent: handle.id });
-		return { ...target, launch, id: handle.id, handle };
+		return { ...target, launch, blocks, ownsLaunch: fresh, id: handle.id, handle };
 	}
 
-	/** launch → agent() → bind; returns at once, without waiting for the subagent. */
+	/**
+	 * launch → agent() → bind; returns at once, without waiting for the subagent. Options the caller
+	 * leaves out come from the blocks' execution contract that `launch` returns.
+	 */
 	async function agent(request: AgentRequest): Promise<Spawned> {
 		const target = scope(request.doc, request.run);
 		const launch = created(await call("playbook_launch", { ...target, op: "launch", blocks: [...request.blocks] }));
 		if (launch.kind === "orchestration") {
-			throw new PlaybookError(`${request.blocks.join(", ")} is an orchestration block: run it with \`await playbook.exec("${launch.launch}")\` in its own eval call`);
+			await call("playbook_launch", { ...docArg(target.doc), op: "close", launch: launch.launch });
+			throw new PlaybookError(`${request.blocks.join(", ")} is an orchestration block (Launch ${launch.launch} closed): start it with playbook_launch {op: "launch"} and run \`await playbook.exec("l<n>")\` as its own eval call`);
 		}
-		return start(target, launch.launch, launch.text, agentOptions(request), true);
+		const defaults: AgentOptions = { ...(launch.agent !== undefined ? { agent: launch.agent } : {}), ...(launch.isolated !== undefined ? { isolated: launch.isolated } : {}) };
+		return start(target, launch.launch, request.blocks, launch.text, { ...defaults, ...agentOptions(request) }, true);
 	}
 
-	/** Wait for a spawned subagent and record its outcome on the Run timeline. */
-	async function result(spawned: Spawned, options: { readonly block?: string } = {}): Promise<unknown> {
+	/**
+	 * Wait for a spawned subagent and record its outcome on the Run timeline: about `block`, or the
+	 * Launch's only block. Afterwards the Launch closes when `close` says so, by default when the
+	 * subagent owns it.
+	 */
+	async function result(spawned: Spawned, options: { readonly block?: string; readonly close?: boolean } = {}): Promise<unknown> {
 		const target = { ...docArg(spawned.doc), run: spawned.run };
-		const about = { launch: spawned.launch, ...(options.block ? { block: options.block } : {}) };
+		const block = options.block ?? (spawned.blocks.length === 1 ? spawned.blocks[0] : undefined);
+		const about = { launch: spawned.launch, ...(block ? { block } : {}) };
+		const finish = async (kind: "result" | "failure", text: string): Promise<void> => {
+			await call("playbook_timeline", { ...target, op: "post", kind, text, ...about });
+			if (options.close ?? spawned.ownsLaunch) await call("playbook_launch", { ...docArg(spawned.doc), op: "close", launch: spawned.launch });
+		};
 		let value: unknown;
 		try {
 			value = unwrap(await spawned.handle.wait());
 		} catch (error) {
-			await call("playbook_timeline", { ...target, op: "post", kind: "failure", text: error instanceof Error ? error.message : String(error), ...about });
+			await finish("failure", error instanceof Error ? error.message : String(error));
 			throw error;
 		}
-		await call("playbook_timeline", { ...target, op: "post", kind: "result", text: textOf(value), ...about });
+		await finish("result", textOf(value));
 		return value;
 	}
 
@@ -138,18 +184,18 @@ export function createPlaybook(deps: PlaybookDeps) {
 		agent,
 		result,
 
-		/** Another subagent on an existing Launch, with the Launch's frozen snapshot text. */
+		/** Another subagent on an open Launch, with the Launch's current baseline (its snapshot until a rebase); it does not own the Launch. */
 		async spawn(launch: string, request: AgentOptions & { readonly doc?: string } = {}): Promise<Spawned> {
 			const info = launchInfo(await call("playbook_launch", { ...docArg(request.doc), op: "info", launch }));
+			if (info.closed) throw new PlaybookError(`${launch} is closed; start a new Launch instead`);
 			if (info.kind === "orchestration") throw new PlaybookError(`${launch} is an orchestration Launch; it is not a subagent prompt`);
-			return start(scope(request.doc, info.run), launch, info.text, agentOptions(request), false);
+			return start(scope(request.doc, info.run), launch, info.blocks, info.text, agentOptions(request), false);
 		},
 
-		/** agent() then result(): start one subagent for the blocks and record what it returns. */
+		/** agent() then result(): start one subagent for the blocks, record what it returns and close its Launch. */
 		async run(request: AgentRequest & { readonly block?: string }): Promise<unknown> {
 			const spawned = await agent(request);
-			const block = request.block ?? (request.blocks.length === 1 ? request.blocks[0] : undefined);
-			return result(spawned, block ? { block } : {});
+			return result(spawned, request.block ? { block: request.block } : {});
 		},
 
 		post(request: { readonly doc?: string; readonly run?: string; readonly kind: RecordKind; readonly text: string; readonly block?: string; readonly launch?: string; readonly next?: number }): Promise<unknown> {
