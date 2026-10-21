@@ -130,7 +130,7 @@ describe("ask syntax", () => {
 	}
 });
 
-describe("ask display-only rendering", () => {
+describe("ask rendering without controls (the checks' hidden pass)", () => {
 	test("shows the question, accent suggestion badge, ordinary options, muted notes and single-choice explanation", () => {
 		const rendered = renderAsk(value(parseAsk(input(example))), context);
 		expect(rendered.diagnostics).toEqual([]);
@@ -142,7 +142,7 @@ describe("ask display-only rendering", () => {
 		expect(nodes.some(candidate => candidate.id === `${context.id}.option.1.suggested`)).toBe(false);
 		expect(node(nodes, "option.0.note").p).toEqual({ spans: [{ t: "keeps data after a restart", s: "muted" }] });
 		expect(node(nodes, "option.1.note").p).toEqual({ spans: [{ t: "simpler, no disk", s: "muted" }] });
-		expect(node(nodes, "mode").p).toEqual({ spans: [{ t: "单选 · 仅展示，不收集选择", s: "muted" }] });
+		expect(node(nodes, "mode").p).toEqual({ spans: [{ t: "单选", s: "muted" }] });
 	});
 
 	test("multi marks every suggestion and retains inline text semantics", () => {
@@ -154,7 +154,7 @@ describe("ask display-only rendering", () => {
 		expect(node(nodes, "option.1.label").p).toEqual({ spans: [{ t: "Memcached", s: "accent em" }] });
 		expect(node(nodes, "option.2.label").p).toEqual({ spans: [{ t: "Other", s: "del" }] });
 		expect(node(nodes, "option.0.note").p).toEqual({ spans: [{ t: "使用 ", s: "muted" }, { t: "磁盘", s: "muted code" }] });
-		expect(node(nodes, "mode").p).toEqual({ spans: [{ t: "多选 · 仅展示，不收集选择", s: "muted" }] });
+		expect(node(nodes, "mode").p).toEqual({ spans: [{ t: "多选", s: "muted" }] });
 	});
 
 	test("a multi-choice display with no suggestions omits badges and empty note nodes", () => {
@@ -181,5 +181,14 @@ describe("ask display-only rendering", () => {
 		for (const view of ["before", "after"] as const) {
 			expect(renderAsk(spec, { ...context, view })).toEqual(displayed);
 		}
+	});
+
+	test("with an askControl hook, the UI's controls replace the static option list and receive the parsed ask", () => {
+		const spec = value(parseAsk(input(example)));
+		const calls: { id: string; spec: AskSpec }[] = [];
+		const control: TspNode = { id: "panel.cache.choice.submit", k: "el", p: { tag: "button" } };
+		const nodes = descendants(renderAsk(spec, { ...context, askControl: (id, given) => { calls.push({ id, spec: given }); return [control]; } }).nodes);
+		expect(calls).toEqual([{ id: "panel.cache.choice", spec }]);
+		expect(nodes.map(candidate => candidate.id)).toEqual(["panel.cache.ask", "panel.cache.question", "panel.cache.choice.submit", "panel.cache.mode"]);
 	});
 });

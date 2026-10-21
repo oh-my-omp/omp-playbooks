@@ -2,6 +2,7 @@
 // component modules (src/service/draft/<component>.ts) and the TSP renderer.
 // Draft syntax follows answer-me-with-html's draft format (`am help <component>`).
 import type { TspNode } from "../tsp-types";
+import type { AskSpec } from "./ask";
 
 /** One finding about a design draft; `line` is 1-based in the design text. */
 export interface DraftDiagnostic {
@@ -59,6 +60,11 @@ export interface RenderContext {
 	image(id: string, bytes: Uint8Array, mime: string, alt: string): TspNode;
 	/** Read a file by a path relative to the Playbook's directory (or absolute); refuses paths outside that directory. */
 	readFile(path: string): FileRead;
+	/**
+	 * Selection controls for an `ask`: its options as inputs and a submit button, owned by the UI.
+	 * Absent when the draft is drawn without interaction (the checks' hidden pass); the ask is then shown statically.
+	 */
+	askControl?(id: string, spec: AskSpec): readonly TspNode[];
 }
 
 /** Split a leading change marker (`+ `, `- `, `~ `) off `text`. */

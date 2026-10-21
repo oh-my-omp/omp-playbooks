@@ -2,7 +2,7 @@
 // other fence language is a code block (am: "Any other fence language is a code block").
 import type { TspNode } from "../tsp-types";
 import { parseAnnot, renderAnnot } from "./annot";
-import { parseAsk, renderAsk } from "./ask";
+import { parseAsk, renderAsk, type AskSpec } from "./ask";
 import { parseCallout, renderCallout } from "./callout";
 import { parseCode, renderCode } from "./code";
 import { diagnostic, type ChangeView, type DraftDiagnostic, type FenceInput, type Parsed, type RenderContext, type Rendered } from "./contract";
@@ -89,11 +89,12 @@ export function draftDiagnostics(design: string): DraftDiagnostic[] {
 export interface DraftHost {
 	/** Prefix for every node id. */
 	readonly id: string;
-	readonly context: Omit<RenderContext, "id" | "view">;
-	/** Current view of the marked component whose stable key is `key`. */
+	readonly context: Omit<RenderContext, "id" | "view" | "askControl">;
 	view(key: string): ChangeView;
 	/** A control switching the view of `key` (the UI owns the state and the event). */
 	viewSwitch(id: string, key: string, current: ChangeView): TspNode;
+	/** Selection controls for the `ask` whose stable key is `key`; omitted to draw asks without interaction. */
+	askControl?(id: string, key: string, spec: AskSpec): readonly TspNode[];
 }
 
 export interface DraftRender {
@@ -115,7 +116,8 @@ export function renderDraft(design: string, host: DraftHost): DraftRender {
 		const view = item.marked ? host.view(key) : "changes";
 		let rendered: Rendered;
 		try {
-			rendered = item.render({ ...host.context, id, view });
+			const askControl = host.askControl;
+			rendered = item.render({ ...host.context, id, view, ...(askControl ? { askControl: (controlId: string, spec: AskSpec) => askControl(controlId, key, spec) } : {}) });
 		} catch (error) {
 			// A renderer bug stays inside its component: the rest of the draft still draws.
 			const message = error instanceof Error ? error.message : String(error);
