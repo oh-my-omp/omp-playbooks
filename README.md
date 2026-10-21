@@ -22,7 +22,7 @@ You need [Bun](https://bun.sh), omp and Tern. The process that loads the extensi
 The repository is [oh-my-omp/omp-playbooks](https://github.com/oh-my-omp/omp-playbooks); the installed omp package name and the Tern plugin ID are still `tern-playbooks`, and the upgrade and uninstall commands below use that name.
 
 ```sh
-omp plugin install 'https://github.com/oh-my-omp/omp-playbooks.git#master'
+omp plugin install 'https://github.com/oh-my-omp/omp-playbooks.git#main'
 ```
 
 When the extension loads it checks for Tern and links the package's `tern-plugin/` into Tern; it skips this when the same directory is already linked. The link points at the omp install directory itself. The Tern daemon reloads plugin files edited in place, but an upgrade replaces the whole install directory, which leaves the daemon on a missing link target or an old version. The extension therefore compares the version in `tern-plugin/plugin.toml` with the version the daemon loaded, runs `tern plugin reload` when they differ, and reports the outcome in the main session. If the versions still differ after the reload it only warns and does not abort the install; the next extension load compares again.
@@ -33,7 +33,7 @@ When the extension loads it checks for Tern and links the package's `tern-plugin
 omp plugin upgrade tern-playbooks
 ```
 
-After updating, start a new omp session; running extensions and document services are not hot-swapped. Wind down any work in progress, then close the old document-service pane and let the new session open it again. `playbook_open` reuses an existing service, so it cannot be used to force a switch to the new one. After every push to `master`, CI increments the last version component in both `package.json` and `tern-plugin/plugin.toml`, so the version tells old and new code apart.
+After updating, start a new omp session; running extensions and document services are not hot-swapped. Wind down any work in progress, then close the old document-service pane and let the new session open it again. `playbook_open` reuses an existing service, so it cannot be used to force a switch to the new one. After every push to `main`, CI increments the last version component in both `package.json` and `tern-plugin/plugin.toml`, so the version tells old and new code apart.
 
 To uninstall, remove both sides:
 

@@ -22,7 +22,7 @@ Tern Playbooks 把**设计、执行 prompt 和编排代码**放在一份可共�
 仓库是 [oh-my-omp/omp-playbooks](https://github.com/oh-my-omp/omp-playbooks)；安装后的 omp 包名和 Tern 插件 ID 仍是 `tern-playbooks`，下文的升级、卸载命令都用这个名字。
 
 ```sh
-omp plugin install 'https://github.com/oh-my-omp/omp-playbooks.git#master'
+omp plugin install 'https://github.com/oh-my-omp/omp-playbooks.git#main'
 ```
 
 扩展加载时检查 Tern，并把包内的 `tern-plugin/` 链接到 Tern；已链接到同一目录时跳过。链接的就是 omp 安装目录本身。Tern 守护进程会自己重新加载原地修改的插件文件，但升级会整个替换安装目录，守护进程会停在“链接目标不存在”或旧版本上。所以扩展随后比较 `tern-plugin/plugin.toml` 的版本和守护进程已加载的版本，不同时执行 `tern plugin reload`，并在主会话提示结果。重新加载后版本仍不一致时只警告、不中断安装，下次加载扩展会再比较。
@@ -33,7 +33,7 @@ omp plugin install 'https://github.com/oh-my-omp/omp-playbooks.git#master'
 omp plugin upgrade tern-playbooks
 ```
 
-更新后启动新的 omp 会话；已运行的扩展和文档服务不会热替换。先妥善结束正在执行的工作，再关闭旧文档服务 pane，由新会话重新打开。`playbook_open` 会复用已有服务，不能借它强制换成新服务。每次推到 `master` 后，CI 把 `package.json` 和 `tern-plugin/plugin.toml` 的版本最后一位同时加一，所以版本号可以区分新旧代码。
+更新后启动新的 omp 会话；已运行的扩展和文档服务不会热替换。先妥善结束正在执行的工作，再关闭旧文档服务 pane，由新会话重新打开。`playbook_open` 会复用已有服务，不能借它强制换成新服务。每次推到 `main` 后，CI 把 `package.json` 和 `tern-plugin/plugin.toml` 的版本最后一位同时加一，所以版本号可以区分新旧代码。
 
 卸载时分别移除两侧：
 
