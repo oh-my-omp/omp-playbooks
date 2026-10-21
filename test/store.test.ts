@@ -93,6 +93,37 @@ describe("YAML persistence", () => {
 			if (!result.ok) expect(result.error.length).toBeGreaterThan(0);
 		});
 	}
+	test("a task block's execution contract roundtrips trimmed, and a block without one serializes as before", () => {
+		const { store } = fixture();
+		expect(store.serialize(doc, null)).toBe('title: "Incident: #237"\nblocks:\n  - id: b1\n    title: "First step"\n    body: |2\n      alpha\n      beta\n      gamma\n    done: false\n');
+		const parsed = store.parse('title: "T"\nblocks:\n  - id: b1\n    title: "A"\n    body: |2-\n      hi\n    agent: " task:mid "\n    isolated: false\n    done: false\n', false);
+		const configured: PlaybookDoc = { title: "T", blocks: [{ id: "b1", title: "A", content: { kind: "task", body: "hi", agent: "task:mid", isolated: false }, done: false }] };
+		expect(parsed).toEqual({ ok: true, doc: configured, run: null });
+		const text = store.serialize(configured, null);
+		expect(text).toBe('title: "T"\nblocks:\n  - id: b1\n    title: "A"\n    body: |2-\n      hi\n    agent: "task:mid"\n    isolated: false\n    done: false\n');
+		expect(store.parse(text, false)).toEqual({ ok: true, doc: configured, run: null });
+		const isolatedOnly: PlaybookDoc = { title: "T", blocks: [{ id: "b1", title: "A", content: { kind: "task", body: "hi", isolated: true }, done: false }] };
+		expect(store.parse(store.serialize(isolatedOnly, null), false)).toEqual({ ok: true, doc: isolatedOnly, run: null });
+	});
+	for (const [name, extra] of [
+		["blank agent", { agent: "   " }],
+		["null agent", { agent: null }],
+		["numeric agent", { agent: 3 }],
+		["string isolated", { isolated: "true" }],
+		["null isolated", { isolated: null }],
+	] as const) {
+		test(`task execution contract rejects ${name}`, () => {
+			const { store } = fixture();
+			expect(store.parse(JSON.stringify({ title: "T", blocks: [{ id: "b1", title: "A", body: "x", done: false, ...extra }] }), false).ok).toBe(false);
+		});
+	}
+	for (const extra of [{ agent: "task:mid" }, { isolated: true }]) {
+		test(`a design block refuses ${Object.keys(extra)[0]}`, () => {
+			const { store } = fixture();
+			const result = store.parse(JSON.stringify({ title: "T", blocks: [{ id: "b1", title: "D", requirement: "", design: "", done: false, ...extra }] }), false);
+			expect(result).toEqual({ ok: false, error: `Unknown field: ${Object.keys(extra)[0]}` });
+		});
+	}
 	test("malformed Unicode is rejected before filesystem mutation", () => {
 		const { directory, path, store } = fixture();
 		const original = store.serialize(doc, null);
@@ -237,9 +268,10 @@ describe("append-only facts", () => {
 	for (const type of ["block_added", "block_deleted", "content_replaced"] as const) {
 		for (const { content, flattened } of [
 			{ content: { kind: "task", body: "task\nbody\n" }, flattened: { body: "task\nbody\n" } },
+			{ content: { kind: "task", body: "configured\n", agent: "task:mid", isolated: false }, flattened: { body: "configured\n", agent: "task:mid", isolated: false } },
 			{ content: { kind: "design", requirement: "human\nrequirement\n", design: "## A Plan\n\nDesign\n" }, flattened: { requirement: "human\nrequirement\n", design: "## A Plan\n\nDesign\n" } },
-		] satisfies { content: BlockContent; flattened: { body: string } | { requirement: string; design: string } }[]) {
-			test(`${type} stores flattened ${content.kind} content and reopens it`, () => {
+		] satisfies { content: BlockContent; flattened: { body: string; agent?: string; isolated?: boolean } | { requirement: string; design: string } }[]) {
+			test(`${type} stores flattened ${content.kind} content${"agent" in content ? " with its execution contract" : ""} and reopens it`, () => {
 				const { directory, path, store } = fixture();
 				const data: EntryData = type === "content_replaced"
 					? { type, block: "b2", content }

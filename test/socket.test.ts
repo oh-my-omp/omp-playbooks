@@ -63,8 +63,15 @@ const valid: readonly [string, unknown][] = [
 	["read", { run: "r1", block: "b2" }],
 	["set", { block: "b2", field: "title", value: "title" }],
 	["set", { block: "b2", field: "done", value: false }],
+	["set", { block: "b2", field: "agent", value: "task:mid" }],
+	["set", { block: "b2", field: "agent", value: null }],
+	["set", { block: "b2", field: "isolated", value: true }],
+	["set", { block: "b2", field: "isolated", value: null }],
 	["edit", { block: "b2", find: "before", replace: "after" }],
 	["insert", { after: "b2", title: "new", content: { kind: "task", body: "body" } }],
+	["insert", { title: "configured", content: { kind: "task", body: "body", agent: "task:mid", isolated: false } }],
+	["move", { run: "r1", block: "b2", after: "b1" }],
+	["move", { block: "b2", after: null }],
 	["insert", { title: "design", content: { kind: "design", design: "## A Panel" } }],
 	["write", { block: "b2", text: "whole" }],
 	["panel", { block: "b2", panel: "A", text: "## A Panel" }],
@@ -141,8 +148,17 @@ describe("parseRequest", () => {
 			["post", { run: "r1", kind: "result", text: "x", next: 1 }], ["post", { run: "r1", kind: "update", text: "x", quote: 3 }],
 			["post", { run: "r1", kind: "update", text: "x", launch: "l0" }], ["post", { run: "r1", kind: "update", text: "x", block: "b0" }],
 			["ack", { event: 1 }],
+			["set", { block: "b1", field: "agent", value: "   " }], ["set", { block: "b1", field: "agent", value: 3 }], ["set", { block: "b1", field: "isolated", value: "true" }],
+			["insert", { title: "x", content: { kind: "task", body: "x", agent: " " } }], ["insert", { title: "x", content: { kind: "task", body: "x", isolated: "yes" } }],
+			["insert", { title: "x", content: { kind: "design", design: "d", agent: "task:mid" } }], ["insert", { title: "x", content: { kind: "design", design: "d", isolated: true } }],
+			["move", { block: "b2" }], ["move", { block: "b2", after: "b0" }], ["move", { block: "b2", after: 1 }],
 		];
 		for (const [op, args] of invalid) expect(parseRequest(op, args)).toMatchObject({ code: "BadValue" });
+	});
+
+	test("trims a task block's agent name at the boundary", () => {
+		expect(parseRequest("set", { block: "b1", field: "agent", value: " task:mid " })).toEqual({ op: "set", args: { block: "b1", field: "agent", value: "task:mid" } });
+		expect(parseRequest("insert", { title: "x", content: { kind: "task", body: "x", agent: "\ttask:low\n" } })).toEqual({ op: "insert", args: { title: "x", content: { kind: "task", body: "x", agent: "task:low" } } });
 	});
 
 	test("requires positive safe integer reminder durations", () => {
