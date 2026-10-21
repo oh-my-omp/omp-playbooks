@@ -230,7 +230,10 @@ export class Core implements CoreApi, K1Handler {
 			for (const launch of log.launches.values()) {
 				this.#maxLaunch = Math.max(this.#maxLaunch, idNumber(launch.id));
 				this.#launches.set(launch.id, { record: launch, pending: null, deadline: null, timer: undefined, generation: 0, judging: false });
+				// Dirty entries are ordered against new edits, so edit numbers continue above every persisted one.
+				for (const [, seq] of launch.dirty) this.#editSeq = Math.max(this.#editSeq, seq);
 			}
+			for (const entry of log.entries) if (entry.data.type === "block_edited") this.#editSeq = Math.max(this.#editSeq, entry.data.edit);
 		}
 		for (const doc of this.#docs.values()) for (const block of doc.blocks) this.#maxBlock = Math.max(this.#maxBlock, idNumber(block.id));
 		for (const doc of this.#docs.values()) if (doc.run?.status === "running") this.#scheduleReminder(doc.run.id, true);
@@ -650,16 +653,15 @@ export class Core implements CoreApi, K1Handler {
 		if (launch.record.dirty.length === 0) return;
 		if (launch.deadline !== null && launch.deadline > this.#now()) return;
 		const doc = this.#docs.get(launch.record.run)!;
-		const bodies = this.#contents(doc);
 		const maxSeq = Math.max(...launch.record.dirty.map(([, seq]) => seq));
 		const changed = launch.record.dirty.map(([block]) => block);
 		const generation = launch.generation;
 		launch.judging = true;
-		const fetches = await this.#launchFetches(launch, bodies);
+		const fetches = await this.#launchFetches(launch);
 		launch.judging = false;
 		if (generation !== launch.generation || !this.#isActive(launch) || launch.pending !== null) return;
 		// The same inputs `rebase` accepts: current contents and the Run's current results.
-		const result = this.#refs.compile(launch.record.blocks, this.#input(doc, fetches, bodies));
+		const result = this.#refs.compile(launch.record.blocks, this.#input(doc, fetches));
 		const baseline = launch.record.baselines.at(-1)!;
 		const dropUpTo = (): void => {
 			this.#setLaunch(launch, { ...launch.record, dirty: launch.record.dirty.filter(([, seq]) => seq > maxSeq) });
@@ -688,19 +690,28 @@ export class Core implements CoreApi, K1Handler {
 		if (launch.pending === null && launch.record.dirty.length > 0 && launch.deadline !== null && launch.deadline <= this.#now()) void this.#judge(launch);
 	}
 
-	/** The judgment fetch table of a Launch, extended with newly referenced targets (launch-events.md §3). */
-	async #launchFetches(launch: LaunchState, bodies: ReadonlyMap<BlockId, BlockContent>): Promise<Map<TargetKey, FetchOutcome>> {
-		const table = new Map(launch.record.fetches);
-		const added: [TargetKey, FetchOutcome][] = [];
-		for (const target of this.#refs.externalTargets(launch.record.blocks, bodies)) {
-			const key = this.#refs.targetKey(target);
-			if (table.has(key)) continue;
-			const outcome = this.#fetches.get(key) ?? (await this.#fetchTarget(target, false));
-			table.set(key, outcome);
-			added.push([key, outcome]);
+	/**
+	 * The judgment fetch table of a Launch, extended with every target its current closure references
+	 * (launch-events.md §3). Fetching yields to other requests that may edit the closure, so this repeats
+	 * until the contents at return need no target the table lacks.
+	 */
+	async #launchFetches(launch: LaunchState): Promise<Map<TargetKey, FetchOutcome>> {
+		const doc = this.#docs.get(launch.record.run)!;
+		for (;;) {
+			const table = new Map(launch.record.fetches);
+			const added: [TargetKey, FetchOutcome][] = [];
+			for (const target of this.#refs.externalTargets(launch.record.blocks, this.#contents(doc))) {
+				const key = this.#refs.targetKey(target);
+				if (table.has(key)) continue;
+				const outcome = this.#fetches.get(key) ?? (await this.#fetchTarget(target, false));
+				table.set(key, outcome);
+				added.push([key, outcome]);
+			}
+			if (added.length === 0) return table;
+			// A concurrent judgment or rebase may have recorded the same targets meanwhile.
+			const recorded = new Set(launch.record.fetches.map(([key]) => key));
+			this.#setLaunch(launch, { ...launch.record, fetches: [...launch.record.fetches, ...added.filter(([key]) => !recorded.has(key))] });
 		}
-		if (added.length > 0) this.#setLaunch(launch, { ...launch.record, fetches: [...launch.record.fetches, ...added] });
-		return table;
 	}
 
 	#closeLaunch(launch: LaunchState, by: LaunchCloser, origin: EntryOrigin): void {
@@ -1224,13 +1235,7 @@ export class Core implements CoreApi, K1Handler {
 		const run = launch.record.run;
 		const generation = launch.generation;
 		const accepted = this.#editSeq;
-		let fetches: Map<TargetKey, FetchOutcome>;
-		// Fetching yields to other requests; repeat until the closure needs no target the table lacks.
-		for (;;) {
-			fetches = await this.#launchFetches(launch, this.#contents(this.#docs.get(run)!));
-			const contents = this.#contents(this.#docs.get(run)!);
-			if (this.#refs.externalTargets(launch.record.blocks, contents).every(target => fetches.has(this.#refs.targetKey(target)))) break;
-		}
+		const fetches = await this.#launchFetches(launch);
 		const doc = this.#docs.get(run)!;
 		if (doc.run?.status !== "running") return fail("RunFinished", "Run 已结束");
 		if (launch.record.closed !== null) return fail("BadLaunch", "Launch 已关闭");
