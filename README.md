@@ -112,7 +112,7 @@ Every block needs `id`, `title`, `done` and the matching content fields. IDs are
 
 ### How a person edits
 
-1. Title, execution body, requirement: click the pencil, edit the text, then click "完成" (Done). `Esc` also commits these fields; it **does not undo**.
+1. Title, execution body, requirement: click "编辑标题" (Edit title), "编辑正文" (Edit body) or "编辑需求" (Edit requirement), edit the text, then click "完成" (Done); `Esc` also commits these fields and **does not undo**, while "放弃" (Discard) drops the current draft.
 2. Design: look at the rendered result, click "写修改 prompt" (write change prompt), state exactly what should change and how, then click "提交修改" (submit change) by hand. On the notice, the main session reads the block and revises `design`; it does not touch `requirement`.
 3. `Esc` in the change prompt **does not submit**. "放弃" (Discard) drops the current draft. An empty prompt, or submitting with no coordinator connected, is rejected and the draft stays in the editor.
 4. An `ask` in a design is drawn as single- or multiple-choice controls with the `*` recommended options selected. Change the selection and click "提交选择" (submit choice): the pane submits `针对问题「<question>」，选择：<options>` as the design block's change prompt, which enters the change log and notifies the main session like a hand-written one; when revising, the main session replaces the answered `ask` with the matching design decision. With no coordinator connected the submission is refused and the text stays in the change-prompt editor; the button is unavailable while the block is locked, another draft exists, the Run has finished or nothing is selected.
@@ -136,7 +136,7 @@ The above are `playbook_read` arguments; querying a Run's log also needs `run`. 
 | Run | "开始 Run" (Start Run) or `playbook_run start` copies the template and resets every `done` to `false`. After it finishes, its blocks can no longer be edited through cards or tools | Starting a Run starts no agent; finishing a Run does not require every block to be done |
 | Launch | Compiles a Run's execution blocks, freezes the prompt/orchestration code and creates a record; closed explicitly, by `playbook.result` when it finishes up, or when the Run finishes | `launch`/`bind` start no worker; writing a result with `playbook_timeline` does not close the Launch; a close record does not cancel the worker |
 
-A Run has its own block contents, change log and timeline. **After clicking "开始 Run", switch to that Run's tab at the top** before editing or launching; tool calls also pass the returned Run ID, for example `r1`. Read, edit, compile and check operations without `run` act on the template.
+A Run has its own block contents, change log and timeline. **Clicking "开始 Run" in the pane automatically switches to the new Run's tab**; when a Run is started through `playbook_run start`, edit or launch in that Run's tab and pass the returned Run ID (for example `r1`) to tool calls. Read, edit, compile and check operations without `run` act on the template.
 
 Clicking "启动" (Launch) on an execution block in a Run sends `launch_requested` to the coordinator. With several blocks ticked, the launch targets are combined in document order; design blocks cannot be launched, and an orchestration block can only be launched alone. The worker only starts working once the main session calls the execution tools.
 

@@ -54,9 +54,14 @@ function normalizedCompile(compiled: CompileResult) {
 	return unreachable(compiled);
 }
 
+/** A `((reference))` line directly under a Markdown table would be parsed as a table row; give it its own paragraph. */
+export function separateTableReferences(body: string): string {
+	return body.replace(/^([ \t]*\|[^\n]*)\n(?=[ \t]*\(\()/gm, "$1\n\n");
+}
+
 function chartableTables(body: string): number {
 	let count = 0;
-	for (const segment of splitTableCharts(body, false)) {
+	for (const segment of splitTableCharts(separateTableReferences(body), false)) {
 		switch (segment.kind) {
 			case "chart":
 				count++;
