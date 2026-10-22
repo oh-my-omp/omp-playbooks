@@ -153,5 +153,5 @@ export type ServerFrame = { readonly id: string; readonly ok: true; readonly res
 /** Socket path (contracts.md K1 交换). */
 export function socketPath(tmpdir: string, playbookAbsPath: string): string {
 	const hash = new Bun.CryptoHasher("sha256").update(playbookAbsPath).digest("hex");
-	return `${tmpdir.replace(/\/$/, "")}/tern-playbooks/${hash}.sock`;
+	return `${tmpdir.replace(/\/$/, "")}/omp-playbooks/${hash}.sock`;
 }

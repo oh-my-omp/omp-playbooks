@@ -52,7 +52,7 @@ function respond(socket: Socket, frame: Frame, result?: unknown): void {
 async function service(pane: string | undefined = "document-pane", existingDoc?: string) {
 	const doc = existingDoc ?? (await temporaryDirectory()) + "/book.yaml";
 	if (!existingDoc) await Bun.write(doc, "title: Book\nblocks: []\n");
-	await mkdir(tmpdir() + "/tern-playbooks", { recursive: true });
+	await mkdir(tmpdir() + "/omp-playbooks", { recursive: true });
 	const path = socketPath(tmpdir(), await realpath(doc));
 	const frames: Frame[] = [];
 	const sockets: Socket[] = [];

@@ -1,6 +1,6 @@
 schema = 1
-id = "tern-playbooks"
-name = "Tern Playbooks"
+id = "omp-playbooks"
+name = "Playbooks"
 version = "0.1.7"
 description = "Open a Playbook's document view in a pane."
 icon = "file"

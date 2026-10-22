@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // Document service entry, run inside a Tern pane:
-//   tern-playbook <playbook.yaml>           serve the document (one live service per document)
-//   tern-playbook --reveal <playbook.yaml>  show the running service's pane; exit 4 when none runs
+//   omp-playbook <playbook.yaml>           serve the document (one live service per document)
+//   omp-playbook --reveal <playbook.yaml>  show the running service's pane; exit 4 when none runs
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -19,7 +19,7 @@ import { startUi } from "./ui";
 const reveal = process.argv[2] === "--reveal";
 const file = reveal ? process.argv[3] : process.argv[2];
 if (!file) {
-	process.stderr.write("用法：tern-playbook [--reveal] <playbook.yaml>\n");
+	process.stderr.write("用法：omp-playbook [--reveal] <playbook.yaml>\n");
 	process.exit(2);
 }
 const templatePath = realpathSync(resolve(file));

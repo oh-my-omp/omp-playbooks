@@ -13,7 +13,7 @@ import { join, resolve } from "node:path";
 
 /** The Tern plugin directory shipped inside this package. */
 const TERN_PLUGIN_DIR = resolve(import.meta.dir, "../../tern-plugin");
-const TERN_PLUGIN_ID = "tern-playbooks";
+const TERN_PLUGIN_ID = "omp-playbooks";
 
 /** What the Tern side looked like after setup; only the last two need the operator's attention. */
 export type TernPluginState =
@@ -71,7 +71,7 @@ async function loadedVersion(): Promise<{ readonly ok: true; readonly version: s
 
 async function setup(): Promise<TernPluginState> {
 	if (Bun.which("tern") === null) {
-		throw new Error("Tern Playbooks needs Tern: no `tern` command on PATH. Install Tern (https://docs.stencil.so/tern/) and run the install again.");
+		throw new Error("omp-playbooks needs Tern: no `tern` command on PATH. Install Tern (https://docs.stencil.so/tern/) and run the install again.");
 	}
 	const wanted = await realpath(TERN_PLUGIN_DIR);
 	const pluginsDir = (await tern(["plugin", "dir"])).trim();

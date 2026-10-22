@@ -1,10 +1,10 @@
 {
-	"name": "tern-playbooks",
+	"name": "omp-playbooks",
 	"version": "0.1.7",
 	"private": true,
 	"type": "module",
 	"bin": {
-		"tern-playbook": "./src/service/main.ts"
+		"omp-playbook": "./src/service/main.ts"
 	},
 	"omp": {
 		"extensions": ["./src/extension/index.ts"]

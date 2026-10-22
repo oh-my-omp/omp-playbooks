@@ -1,8 +1,8 @@
-# Tern Playbooks
+# omp-playbooks
 
 [English](README.md) | 简体中文
 
-Tern Playbooks 把**设计、执行 prompt 和编排代码**放在一份可共同编辑的 Playbook 里。它由 omp 扩展和 Tern 文档服务组成：主会话通过 `playbook_*` 工具连接文档服务，人在旁边的 pane 中看卡片、改内容、提交修改要求。
+omp-playbooks 把**设计、执行 prompt 和编排代码**放在一份可共同编辑的 Playbook 里。它由 omp 扩展和 Tern 文档服务组成：主会话通过 `playbook_*` 工具连接文档服务，人在旁边的 pane 中看卡片、改内容、提交修改要求。
 
 设计和执行是分开的：设计块对应一个设计或业务单元，执行块通过引用组合所需的需求、设计面板、上下文和先前结果。一个执行块可以引用多个设计块，并不要求设计与 task 一一对应。
 
@@ -19,7 +19,7 @@ Tern Playbooks 把**设计、执行 prompt 和编排代码**放在一份可共�
 
 需要 [Bun](https://bun.sh)、omp 和 Tern。加载扩展的进程必须能从 `PATH` 找到 `tern`；启动文档服务的环境必须能执行 `bun`。使用 GitHub issue/PR 引用时还需要已认证的 `gh`。
 
-仓库是 [oh-my-omp/omp-playbooks](https://github.com/oh-my-omp/omp-playbooks)；安装后的 omp 包名和 Tern 插件 ID 仍是 `tern-playbooks`，下文的升级、卸载命令都用这个名字。
+仓库是 [oh-my-omp/omp-playbooks](https://github.com/oh-my-omp/omp-playbooks)；安装后的 omp 包名和 Tern 插件 ID 都是 `omp-playbooks`，下文的升级、卸载命令都用这个名字。
 
 ```sh
 omp plugin install 'https://github.com/oh-my-omp/omp-playbooks.git#main'
@@ -30,7 +30,7 @@ omp plugin install 'https://github.com/oh-my-omp/omp-playbooks.git#main'
 **拉取仓库或重启会话不会更新已安装的插件副本。** 已安装过旧实现时先更新：
 
 ```sh
-omp plugin upgrade tern-playbooks
+omp plugin upgrade omp-playbooks
 ```
 
 更新后启动新的 omp 会话；已运行的扩展和文档服务不会热替换。先妥善结束正在执行的工作，再关闭旧文档服务 pane，由新会话重新打开。`playbook_open` 会复用已有服务，不能借它强制换成新服务。每次推到 `main` 后，CI 把 `package.json` 和 `tern-plugin/plugin.toml` 的版本最后一位同时加一，所以版本号可以区分新旧代码。
@@ -38,8 +38,8 @@ omp plugin upgrade tern-playbooks
 卸载时分别移除两侧：
 
 ```sh
-omp plugin uninstall tern-playbooks
-tern plugin unlink tern-playbooks
+omp plugin uninstall omp-playbooks
+tern plugin unlink omp-playbooks
 ```
 
 打开文件有三条路径：

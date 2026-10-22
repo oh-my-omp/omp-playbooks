@@ -486,7 +486,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 		switch (value.kind) {
 			case "hello": void setTheme(value.dark ? "dark" : "light").then(result => {
 				if (!result.success) documentError = result.error ?? "主题初始化失败";
-				if (!opened) { tsp.open(SURFACE, "Tern Playbooks", ".pb-button { padding: 3px 8px; border-radius: 5px; background: var(--l1); color: var(--accent); } .pb-disabled { opacity: .4; }"); opened = true; }
+				if (!opened) { tsp.open(SURFACE, "Playbooks", ".pb-button { padding: 3px 8px; border-radius: 5px; background: var(--l1); color: var(--accent); } .pb-disabled { opacity: .4; }"); opened = true; }
 				redraw();
 			}); break;
 			case "event": event(value.event); break;
@@ -495,7 +495,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 	}
 	core.onChange(() => queueMicrotask(redraw));
 	tsp.onStatusChange(reportStatus);
-	tsp.start("tern-playbooks", input);
+	tsp.start("omp-playbooks", input);
 }
 
 function seconds(value: string): number | null | undefined {

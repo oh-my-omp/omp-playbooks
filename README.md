@@ -1,8 +1,8 @@
-# Tern Playbooks
+# omp-playbooks
 
 English | [简体中文](README.zh-CN.md)
 
-Tern Playbooks keeps **design, execution prompts and orchestration code** in one Playbook that people and agents edit together. It consists of an omp extension and a Tern document service: the main session connects to the document service through the `playbook_*` tools, while a person reads the cards, edits content and submits change requests in the pane beside it.
+omp-playbooks keeps **design, execution prompts and orchestration code** in one Playbook that people and agents edit together. It consists of an omp extension and a Tern document service: the main session connects to the document service through the `playbook_*` tools, while a person reads the cards, edits content and submits change requests in the pane beside it.
 
 Design and execution are separate. A design block covers one design or business unit; an execution block composes the requirements, design panels, context and earlier results it needs through references. One execution block can reference several design blocks; designs and tasks do not have to map one to one.
 
@@ -19,7 +19,7 @@ Design and execution are separate. A design block covers one design or business 
 
 You need [Bun](https://bun.sh), omp and Tern. The process that loads the extension must find `tern` on `PATH`; the environment that starts the document service must be able to run `bun`. GitHub issue/PR references also need an authenticated `gh`.
 
-The repository is [oh-my-omp/omp-playbooks](https://github.com/oh-my-omp/omp-playbooks); the installed omp package name and the Tern plugin ID are still `tern-playbooks`, and the upgrade and uninstall commands below use that name.
+The repository is [oh-my-omp/omp-playbooks](https://github.com/oh-my-omp/omp-playbooks); the installed omp package name and the Tern plugin ID are both `omp-playbooks`, which the upgrade and uninstall commands below use.
 
 ```sh
 omp plugin install 'https://github.com/oh-my-omp/omp-playbooks.git#main'
@@ -30,7 +30,7 @@ When the extension loads it checks for Tern and links the package's `tern-plugin
 **Pulling the repository or restarting a session does not update the installed plugin copy.** If an older version is installed, update it first:
 
 ```sh
-omp plugin upgrade tern-playbooks
+omp plugin upgrade omp-playbooks
 ```
 
 After updating, start a new omp session; running extensions and document services are not hot-swapped. Wind down any work in progress, then close the old document-service pane and let the new session open it again. `playbook_open` reuses an existing service, so it cannot be used to force a switch to the new one. After every push to `main`, CI increments the last version component in both `package.json` and `tern-plugin/plugin.toml`, so the version tells old and new code apart.
@@ -38,8 +38,8 @@ After updating, start a new omp session; running extensions and document service
 To uninstall, remove both sides:
 
 ```sh
-omp plugin uninstall tern-playbooks
-tern plugin unlink tern-playbooks
+omp plugin uninstall omp-playbooks
+tern plugin unlink omp-playbooks
 ```
 
 There are three ways to open a file:

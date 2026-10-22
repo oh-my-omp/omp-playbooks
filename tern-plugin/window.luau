@@ -1,10 +1,10 @@
 --!strict
--- Tern-side entry for Tern Playbooks (design/README.md S14, contracts.md K6).
+-- Tern-side entry for omp-playbooks (design/README.md S14, contracts.md K6).
 -- It shows a Playbook's document service, starting the service beside the focused pane
 -- when none runs. It never starts omp or any agent: the coordinator is the omp main
 -- session that calls the `playbook_*` tools.
 
--- The omp plugin `tern-playbooks` links this directory into Tern when it is installed, so the
+-- The omp plugin `omp-playbooks` links this directory into Tern when it is installed, so the
 -- document service entry sits next to it in the same omp plugin package.
 local MAIN = tern.plugin.dir .. "/../src/service/main.ts"
 -- `main.ts --reveal` exits 4 when no service listens for the document (contracts.md K6).
@@ -73,7 +73,7 @@ tern.command({
 			return
 		end
 		if not tern.fs.exists(MAIN) then
-			cx:toast("error", "找不到文档服务入口；请重新安装 omp 插件 tern-playbooks", MAIN)
+			cx:toast("error", "找不到文档服务入口；请重新安装 omp 插件 omp-playbooks", MAIN)
 			return
 		end
 		show(path)

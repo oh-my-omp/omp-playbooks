@@ -1,4 +1,4 @@
-// Domain model of Tern Playbooks. Every type here mirrors a definition in design/.
+// Domain model of omp-playbooks. Every type here mirrors a definition in design/.
 // Rules live in the design; comments name the owning section.
 
 /** `b<positive integer>` (README §定义). */
