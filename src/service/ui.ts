@@ -67,49 +67,60 @@ const VIEWS: readonly { readonly view: ChangeView; readonly label: string }[] = 
 
 /** TSP sheets reach only descendants of the region root, so every rule targets the `app` wrapper or nodes inside it. */
 const SURFACE_CSS = [
-	".pb-nav { position: sticky; top: 0; align-self: start; max-height: 100vh; }",
-	".pb-app { display: flex; flex-direction: column; height: 100%; min-height: 0; box-sizing: border-box; }",
-	".pb-top { display: flex; flex-direction: column; gap: 6px; padding: 10px 16px 10px; border-bottom: 1px solid var(--l2); background: var(--panel, transparent); }",
+	// The shell: one sans font, one spacing scale (4/8/12/16/24). The app fills the main region (which would
+	// otherwise scroll as one page), so the navigator and the detail each scroll on their own.
+	".pb-app { position: absolute; inset: 0; display: flex; flex-direction: column; min-height: 0; box-sizing: border-box; font-family: var(--sans); font-size: 13px; line-height: 1.5; color: var(--t1); }",
+	".pb-app .sf-text, .pb-app .sf-md, .pb-app .sf-badge, .pb-app .sf-input { font-family: var(--sans); }",
+	// Tern's Markdown sheet sets inline code to inherit the text face; code stays monospace here.
+	".pb-app code, .pb-app pre, .pb-app .sf-code { font-family: var(--mono) !important; }",
+	".pb-top { display: flex; flex-direction: column; gap: 8px; padding: 12px 24px; border-bottom: 1px solid var(--l2); background: var(--panel, transparent); }",
 	".pb-top-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }",
-	".pb-title { margin: 0; font-size: 17px; font-weight: 600; color: var(--t1); }",
+	".pb-title { margin: 0; font-size: 16px; font-weight: 600; line-height: 1.4; color: var(--t1); }",
 	".pb-spacer { flex: 1 1 auto; }",
-	".pb-body { display: grid; grid-template-columns: 280px minmax(0, 1fr); flex: 1 1 auto; min-height: 0; }",
-	".pb-nav { display: flex; flex-direction: column; gap: 2px; padding: 10px 8px; overflow-y: auto; min-height: 0; border-right: 1px solid var(--l2); }",
-	".pb-detail { display: flex; flex-direction: column; gap: 14px; padding: 14px 20px 40px; overflow-y: auto; min-height: 0; }",
-	".pb-nav-row { display: flex; align-items: flex-start; gap: 6px; }",
-	".pb-nav-item { display: flex; flex-direction: column; gap: 3px; padding: 6px 8px; border-radius: 6px; flex: 1 1 auto; min-width: 0; cursor: pointer; }",
+	".pb-body { display: grid; grid-template-columns: 264px minmax(0, 1fr); flex: 1 1 auto; min-height: 0; }",
+	".pb-nav { display: flex; flex-direction: column; gap: 4px; padding: 12px 8px; overflow-y: auto; overscroll-behavior: contain; min-height: 0; border-right: 1px solid var(--l2); }",
+	".pb-detail { display: flex; flex-direction: column; gap: 16px; padding: 0 24px 24px; overflow-y: auto; overscroll-behavior: contain; min-height: 0; }",
+	".pb-detail > .pb-block-title, .pb-detail > .pb-empty { margin-top: 16px; }",
+	".pb-detail-block { display: flex; flex-direction: column; gap: 16px; }",
+	".pb-nav-row { display: flex; align-items: flex-start; gap: 4px; }",
+	".pb-nav-row > .pb-choice { border-color: transparent; background: transparent; padding: 8px 4px; }",
+	".pb-nav-item { display: flex; flex-direction: column; gap: 4px; padding: 8px; border-radius: 6px; flex: 1 1 auto; min-width: 0; cursor: pointer; }",
 	".pb-nav-item:hover { background: var(--l1); }",
 	".pb-nav-active { background: rgb(from var(--accent) r g b / 12%); box-shadow: inset 2px 0 0 var(--accent); }",
-	".pb-nav-label { font-size: 11px; color: var(--t3); }",
-	".pb-nav-title { font-weight: 600; color: var(--t1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
-	".pb-nav-sep { height: 1px; background: var(--l2); margin: 6px 4px; }",
-	".pb-select-bar { display: flex; flex-direction: column; gap: 6px; padding: 8px; margin-top: 8px; border-radius: 6px; background: rgb(from var(--accent) r g b / 8%); border: 1px solid rgb(from var(--accent) r g b / 30%); }",
-	".pb-cite { padding: 4px 8px; border-radius: 6px; font-size: 13px; color: var(--t1); cursor: pointer; }",
-	".pb-cite:hover { background: var(--l1); }",
+	".pb-nav-label { font-size: 11px; line-height: 1.3; color: var(--t3); }",
+	".pb-nav-title { font-weight: 600; line-height: 1.4; color: var(--t1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+	".pb-nav-sep { height: 1px; background: var(--l2); margin: 8px 4px; }",
+	".pb-select-bar { display: flex; flex-direction: column; gap: 8px; padding: 8px; margin-top: 8px; border-radius: 6px; background: rgb(from var(--accent) r g b / 8%); border: 1px solid rgb(from var(--accent) r g b / 30%); }",
+	".pb-cite { padding: 4px 0; color: var(--t1); cursor: pointer; }",
+	".pb-cite:hover { color: var(--accent); }",
 	".pb-pinned { max-height: 420px; overflow: auto; padding: 4px; border-left: 3px solid rgb(from var(--accent) r g b / 50%); }",
 	".pb-chips { display: flex; flex-wrap: wrap; gap: 4px; }",
-	".pb-head { display: flex; flex-direction: column; gap: 6px; }",
-	".pb-block-title { margin: 0; font-size: 18px; font-weight: 600; color: var(--t1); cursor: text; }",
+	// The block head stays at the top of the detail while the block scrolls under it.
+	".pb-head { position: sticky; top: 0; z-index: 1; display: flex; flex-direction: column; gap: 8px; padding: 16px 0 12px; background: var(--page, var(--panel)); border-bottom: 1px solid var(--l2); }",
+	".pb-block-title { margin: 0; font-size: 18px; font-weight: 600; line-height: 1.4; color: var(--t1); cursor: text; }",
+	".pb-head .pb-choice { border-color: transparent; background: transparent; padding: 4px; }",
 	".pb-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }",
-	".pb-panel { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--l2); background: var(--card, transparent); }",
+	".pb-panel { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; border-radius: 8px; border: 1px solid var(--l2); background: var(--card, transparent); }",
 	".pb-panel-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }",
-	".pb-panel-title { font-size: 12px; font-weight: 600; color: var(--t2); letter-spacing: .02em; }",
-	".pb-request { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border-radius: 6px; background: var(--l1); }",
-	".pb-request-text { white-space: pre-wrap; color: var(--t1); font-size: 13px; line-height: 1.5; }",
+	".pb-panel-title { font-size: 12px; font-weight: 600; color: var(--t2); }",
+	".pb-request { display: flex; flex-direction: column; gap: 4px; padding: 8px 12px; border-radius: 6px; background: var(--l1); }",
+	".pb-request-text { white-space: pre-wrap; color: var(--t1); line-height: 1.5; }",
 	".pb-form-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }",
 	".pb-field { display: flex; flex-direction: column; gap: 4px; width: 260px; max-width: 100%; }",
 	".pb-field-wide { display: flex; flex-direction: column; gap: 4px; width: 100%; }",
-	".pb-button { display: inline-flex; align-items: center; justify-content: center; align-self: flex-start; width: auto; padding: 4px 11px; border-radius: 6px; border: 1px solid var(--l3, var(--l2)); background: var(--raise, var(--l1)); color: var(--t1); font-weight: 500; cursor: pointer; }",
+	".pb-button { display: inline-flex; align-items: center; justify-content: center; align-self: flex-start; width: auto; padding: 4px 12px; border-radius: 6px; border: 1px solid var(--l3, var(--l2)); background: var(--raise, var(--l1)); color: var(--t1); font-weight: 500; line-height: 1.5; cursor: pointer; }",
 	".pb-button-primary { background: rgb(from var(--accent) r g b / 16%); border-color: rgb(from var(--accent) r g b / 45%); color: var(--accent-ink, var(--accent)); font-weight: 600; }",
 	".pb-button-danger { background: rgb(from var(--bad) r g b / 12%); border-color: rgb(from var(--bad) r g b / 45%); color: var(--bad); }",
-	".pb-button-ghost { background: transparent; border-color: transparent; color: var(--t2); padding: 3px 8px; }",
+	".pb-button-ghost { background: transparent; border-color: transparent; color: var(--t2); padding: 4px 8px; }",
 	".pb-disabled { opacity: .42; cursor: default; }",
-	".pb-choice { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 6px; border: 1px solid var(--l2); background: var(--card, transparent); cursor: pointer; align-self: flex-start; }",
+	".pb-choice { display: inline-flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--l2); background: var(--card, transparent); cursor: pointer; align-self: flex-start; }",
 	".pb-choice-checked { border-color: rgb(from var(--accent) r g b / 45%); background: rgb(from var(--accent) r g b / 10%); color: var(--accent-ink, var(--t1)); }",
 	".pb-choice-disabled { opacity: .45; cursor: default; }",
-	".pb-timeline-entry { display: flex; flex-direction: column; gap: 3px; padding: 6px 10px; border-left: 2px solid var(--l3, var(--l2)); }",
-	".pb-empty { padding: 30px 0; color: var(--t3); }",
+	".pb-timeline-entry { display: flex; flex-direction: column; gap: 4px; padding: 8px 12px; border-left: 2px solid var(--l3, var(--l2)); }",
+	".pb-empty { padding: 32px 0; color: var(--t3); }",
 	".pb-doc { display: flex; flex-direction: column; gap: 8px; }",
+	// Checks and deletion close the block: one quiet footer instead of loose lines.
+	".pb-foot { display: flex; flex-direction: column; gap: 4px; padding-top: 12px; border-top: 1px solid var(--l2); color: var(--t3); }",
 	".am-draft { display: flex; flex-direction: column; gap: 14px; font-family: var(--sans); font-size: 14px; line-height: 1.55; color: var(--t1); }",
 	".am-draft .sf-md, .am-draft .sf-text { font-family: var(--sans); font-size: 14px; line-height: 1.55; }",
 	".am-title { margin: 0; font-size: 20px; font-weight: 600; line-height: 1.3; }",
@@ -554,11 +565,10 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 		if (request && request.tone !== "muted") chips.push(request);
 		const failed = (item.findings ? Object.values(item.findings).filter(Boolean).length : 0) + (item.report?.result.kind === "answers" ? Object.values(item.report.result.answers).filter(probability => probability >= 0.5).length : 0);
 		const report = item.report?.result;
-		chips.push(!item.findings ? { text: "检查计算中", tone: "muted" }
-			: failed ? { text: `检查 ${failed} 项不通过`, tone: "error" }
-			: report?.kind === "answers" ? { text: "检查通过", tone: "success" }
-			: report?.kind === "judge_unavailable" ? { text: "检查：模型不可用", tone: "warning" }
-			: { text: "检查：待模型判定", tone: "muted" });
+		// Only a check state that tells blocks apart is a chip: the usual "auto checks passed, model not asked" is the detail's footer.
+		if (item.findings && failed) chips.push({ text: `检查 ${failed} 项不通过`, tone: "error" });
+		else if (item.findings && report?.kind === "answers") chips.push({ text: "检查通过", tone: "success" });
+		else if (item.findings && report?.kind === "judge_unavailable") chips.push({ text: "检查：模型不可用", tone: "warning" });
 		return chips;
 	}
 	function chipRow(id: string, chips: readonly Chip[]): TspNode {
@@ -596,8 +606,12 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 				...(view.run && block.content.kind === "task" ? [button(`${prefix}.launch`, isOrchestration(block.content) ? "启动编排" : "启动", () => { if (view.run) showError(core.requestLaunch(view.run.id, [block.id]), `${prefix}.actions`); }, finished, "primary")] : []),
 				...(block.content.kind === "task" ? [button(`${prefix}.preview`, "预览", () => { void core.preview(ref, [block.id]).then(result => { previews.set(prefix, result); redraw(); }); })] : []),
 				button(`${prefix}.check`, "检查", () => showError(core.requestCheck(ref, [block.id]), `${prefix}.actions`)),
-				button(`${prefix}.pin`, pinned === block.id ? "取消参考" : "设为参考", () => { pinned = pinned === block.id ? null : block.id; redraw(); }, false, "ghost"),
-				...(editingTitle ? [] : [button(`${prefix}.title.pencil`, "改标题", () => startDraft(block.id, "title"), !canEdit, "ghost")]),
+				button(`${prefix}.pin`, pinned === block.id ? "取消参考" : "设为参考", () => { pinned = pinned === block.id ? null : block.id; redraw(); }),
+				...(editingTitle ? [] : [button(`${prefix}.title.pencil`, "改标题", () => startDraft(block.id, "title"), !canEdit)]),
+				// An empty requirement is not drawn as a panel; writing one starts from here.
+				...(block.content.kind === "design" && !block.content.requirement.trim() && !(item.lock.kind === "human" && item.lock.field === "requirement")
+					? [button(`${prefix}.requirement.pencil`, "写需求", () => startDraft(block.id, "requirement"), !canEdit)]
+					: []),
 			]),
 			editingTitle
 				? col(`${prefix}.title.edit`, [titleNode, row(`${prefix}.title.controls`, [button(`${prefix}.title.commit`, "保存标题", () => commit(block.id), false, "primary"), button(`${prefix}.title.discard`, "放弃", () => discardDraft(block.id, `${prefix}.title`), false, "ghost"), text(`${prefix}.title.hint`, "Enter 不换行；Esc 也会保存", "muted")])])
@@ -612,11 +626,15 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 		const reference = pinned !== null && pinned !== block.id ? view.blocks.find(other => other.block.id === pinned) : undefined;
 		if (reference) sections.push(pinnedPanel(reference));
 		const citing = view.blocks.flatMap(other => other.block.id === block.id ? [] : other.references.filter(found => found.reference.targetText === block.id).map(found => ({ other, text: found.reference.text })));
-		if (citing.length) sections.push(panel(`${prefix}.cited`, `被 ${new Set(citing.map(found => found.other.block.id)).size} 个块引用`, [], citing.map((found, index) => {
-			const id = `${prefix}.cited.${index}`;
-			actions.set(id, () => { current = { kind: "block", block: found.other.block.id }; redraw(); });
-			return { id, k: "el", p: { tag: "div", class: "pb-cite", text: `${found.other.block.id} · ${found.other.block.title.trim() || "未命名块"}　${found.text}`, actions: { click: "invoke" } } } satisfies TspNode;
-		})));
+		if (citing.length) {
+			const ids = [...new Set(citing.map(found => found.other.block.id))];
+			// Folded by default: the head names the citing blocks, the rows open them.
+			sections.push(section(`${prefix}.cited`, `被 ${ids.length} 个块引用：${ids.join("、")}`, citing.map((found, index) => {
+				const id = `${prefix}.cited.${index}`;
+				actions.set(id, () => { current = { kind: "block", block: found.other.block.id }; redraw(); });
+				return { id, k: "el", p: { tag: "div", class: "pb-cite", text: `${found.other.block.id} · ${found.other.block.title.trim() || "未命名块"}　${found.text}`, actions: { click: "invoke" } } } satisfies TspNode;
+			}), `${prefix}.cited`, true));
+		}
 		const pending = view.run ? launchPending(view, block.id) : null;
 		if (pending) sections.push(text(`${prefix}.pending`, `已在 ${clock(pending.at)} UTC 发出启动请求；之后还没有为此块创建的 Launch`, "accent"));
 		const latestPost = item.latestRecord?.data;
@@ -656,9 +674,9 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 			content.push(...bodyView);
 			sections.push(textField("body", isOrchestration(block.content) ? "编排代码" : "正文（发给 agent 的 prompt）", bodyView));
 		} else {
-			const requirementView = block.content.requirement.trim() ? [{ id: `${prefix}.requirement.view`, k: "md", p: { text: block.content.requirement } } satisfies TspNode] : [text(`${prefix}.requirement.empty`, "（还没有写需求）", "muted")];
+			const requirementView = block.content.requirement.trim() ? [{ id: `${prefix}.requirement.view`, k: "md", p: { text: block.content.requirement } } satisfies TspNode] : [];
 			content.push(...requirementView);
-			sections.push(textField("requirement", "需求（你写）", requirementView));
+			if (requirementView.length || (item.lock.kind === "human" && item.lock.field === "requirement")) sections.push(textField("requirement", "需求（你写）", requirementView));
 			const host = draftHost(block.id);
 			const answering = item.lock.kind === "human" && item.lock.field === "prompt" && !finished;
 			const drawn = renderDraft(block.content.design, { ...host, askControl: askControl(block.id, canEdit || answering) });
@@ -669,7 +687,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 			const state = requestState(view, item, history);
 			const writing = item.lock.kind === "human" && item.lock.field === "prompt";
 			const promptNotice = notices.get(`${prefix}.prompt`);
-			sections.push(box(`${prefix}.design`, "pb-doc", [text(`${prefix}.design.label`, "设计 · 协调者按你的修改要求修订", "muted"), ...(block.content.design.trim() ? drawn.nodes : [text(`${prefix}.design.empty`, "（协调者还没有写设计）", "muted")])]));
+			sections.push(box(`${prefix}.design`, "pb-doc", block.content.design.trim() ? drawn.nodes : [text(`${prefix}.design.empty`, "协调者还没有写设计", "muted")]));
 			if (drawn.diagnostics.length) sections.push(panel(`${prefix}.diagnostics`, `稿件问题 ${drawn.diagnostics.length}`, [], drawn.diagnostics.map((found, index) => text(`${prefix}.diagnostic.${index}`, `第 ${found.line} 行 · ${found.component} · ${found.message}`, found.severity === "error" ? "error" : "warning"))));
 			sections.push(panel(`${prefix}.requests`, "修改要求", [...(state ? [badge(`${prefix}.request.state`, state.text, state.tone)] : []), box(`${prefix}.requests.spacer`, "pb-spacer", []), ...(writing ? [] : [button(`${prefix}.prompt.pencil`, "写修改要求", () => startDraft(block.id, "prompt"), !canEdit, "primary")])], [
 				...(writing ? [draftField(block.id, "prompt"), row(`${prefix}.prompt.controls`, [button(`${prefix}.prompt.submit`, "提交给协调者", () => submitPrompt(block.id), false, "primary"), button(`${prefix}.prompt.discard`, "放弃", () => discardDraft(block.id, `${prefix}.prompt`), false, "ghost"), text(`${prefix}.prompt.hint`, "Esc 不会提交", "muted")])] : []),
@@ -704,15 +722,15 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 		const report = item.report?.result;
 		const failed = findings.filter(([, fails]) => fails).length + (report?.kind === "answers" ? Object.values(report.answers).filter(probability => probability >= 0.5).length : 0);
 		const checksHead = !item.findings ? "检查 · 计算中" : failed ? `检查 · ${failed} 项不通过` : report?.kind === "answers" ? "检查 · 全部通过" : "检查 · 自动检查通过，模型未判定";
-		sections.push(section(`${prefix}.checks`, checksHead, [
+		const checks = section(`${prefix}.checks`, checksHead, [
 			...(item.findings ? findings.map(([name, fails]) => text(`${prefix}.finding.${name}`, `${FINDING_LABELS[name]}：${fails ? "不通过" : "通过"}`, fails ? "error" : "success")) : [text(`${prefix}.finding.pending`, "未判定", "muted")]),
-			...(report?.kind === "answers" ? Object.entries(report.answers).map(([name, probability]) => text(`${prefix}.report.${name}`, `模型判定 ${name}：${probability >= 0.5 ? "不通过" : "通过"} · P(yes)=${probability}`, probability >= 0.5 ? "error" : "success")) : [text(`${prefix}.report`, report?.kind === "judge_unavailable" ? "模型判定：模型不可用" : "模型判定：未判定（点“请求检查”让协调者判定）", "muted")]),
-		], `${prefix}.checks`, failed === 0));
+			...(report?.kind === "answers" ? Object.entries(report.answers).map(([name, probability]) => text(`${prefix}.report.${name}`, `模型判定 ${name}：${probability >= 0.5 ? "不通过" : "通过"} · P(yes)=${probability}`, probability >= 0.5 ? "error" : "success")) : [text(`${prefix}.report`, report?.kind === "judge_unavailable" ? "模型判定：模型不可用" : "模型判定：未判定（点“检查”让协调者判定）", "muted")]),
+		], `${prefix}.checks`, failed === 0);
 		sections.push(...item.notices.map((notice, index) => text(`${prefix}.notice.${index}`, notice, "warning")));
-		sections.push(confirmDelete === block.id
+		const deletion = confirmDelete === block.id
 			? row(`${prefix}.delete.confirm`, [text(`${prefix}.delete.question`, `删除 ${block.id}？删除后不能在面板里恢复。`, "warning"), button(`${prefix}.delete.yes`, "确认删除", () => { confirmDelete = null; const error = core.deleteBlock(ref, block.id); if (error) return showError(error, `${prefix}.delete`); redraw(); }, false, "danger"), button(`${prefix}.delete.no`, "取消", () => { confirmDelete = null; redraw(); }, false, "ghost")])
-			: row(`${prefix}.more`, [button(`${prefix}.delete`, "删除此块…", () => { confirmDelete = block.id; redraw(); }, !unlocked || finished, "ghost")]));
-		sections.push(...inlineError(`${prefix}.delete`));
+			: row(`${prefix}.more`, [button(`${prefix}.delete`, "删除此块…", () => { confirmDelete = block.id; redraw(); }, !unlocked || finished, "ghost")]);
+		sections.push(box(`${prefix}.foot`, "pb-foot", [checks, deletion, ...inlineError(`${prefix}.delete`)]));
 
 		const md: string[] = [], images: string[] = [];
 		let chartNodes = 0;
