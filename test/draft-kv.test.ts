@@ -89,48 +89,51 @@ describe("kv syntax", () => {
 });
 
 describe("native kv rendering", () => {
-	test("groups ordinary entries into N-column rows with a final partial row", () => {
+	test("renders ordinary entries as ordered cells in one N-column grid", () => {
 		const result = renderKv(spec(["A: a", "B: b", "C: c", "D: d", "E: e", "F: f", "G: g"], "cols=3"), context);
 		expect(result.diagnostics).toEqual([]);
-		expect(result.nodes.map(node => node.k)).toEqual(["row", "row", "row"]);
-		expect(result.nodes.map(node => node.c?.length)).toEqual([3, 3, 1]);
-		expect(result.nodes.flatMap(node => node.c ?? []).map(node => node.p?.items)).toEqual(
-			["A", "B", "C", "D", "E", "F", "G"].map(key => [{ k: key, v: [{ t: key.toLowerCase() }] }]),
-		);
-		for (const node of result.nodes.flatMap(node => node.c ?? [])) {
-			expect(node.k).toBe("kv");
-			expect(node.p).toMatchObject({ layout: "grid", grow: 1, basis: 0 });
+		expect(result.nodes).toHaveLength(1);
+		const grid = result.nodes[0]!;
+		expect(grid).toMatchObject({ k: "el", p: { tag: "div", class: "am-kv am-kv-3" } });
+		expect(grid.c).toHaveLength(7);
+		expect(grid.c!.map(cell => cell.c?.[0]?.p?.text)).toEqual(["A", "B", "C", "D", "E", "F", "G"]);
+		for (const [index, cell] of grid.c!.entries()) {
+			expect(cell).toMatchObject({ k: "el", p: { tag: "div", class: "am-kv-cell" } });
+			expect(cell.c?.[0]).toMatchObject({ k: "el", p: { tag: "span", class: "am-kv-key" } });
+			expect(cell.c?.[1]).toMatchObject({ k: "text", p: { spans: [{ t: String.fromCharCode(97 + index) }] } });
 		}
 	});
-	test("flushes normal rows before each full-row strong item without reordering", () => {
-		const nodes = renderKv(spec(["A: a", "B: b", "* Title: wide", "C: c", "* Subtitle: second", "* End: last", "D: d"]), context).nodes;
-		expect(nodes.map(node => node.k)).toEqual(["row", "text", "row", "text", "text", "row"]);
-		expect(nodes.filter(node => node.k === "row").map(node => node.c?.length)).toEqual([2, 1, 1]);
-		expect(nodes.filter(node => node.k === "text").map(node => node.p?.spans)).toEqual([
-			[{ t: "Title: ", s: "strong" }, { t: "wide", s: "strong" }],
-			[{ t: "Subtitle: ", s: "strong" }, { t: "second", s: "strong" }],
-			[{ t: "End: ", s: "strong" }, { t: "last", s: "strong" }],
+	test("wide cells span the grid without reordering ordinary entries", () => {
+		const grid = renderKv(spec(["A: a", "B: b", "* Title: wide", "C: c", "* Subtitle: second", "* End: last", "D: d"]), context).nodes[0]!;
+		expect(grid.c!.map(cell => cell.c?.[0]?.p?.text)).toEqual(["A", "B", "Title", "C", "Subtitle", "End", "D"]);
+		expect(grid.c!.map(cell => cell.p?.class)).toEqual(["am-kv-cell", "am-kv-cell", "am-kv-cell am-kv-wide", "am-kv-cell", "am-kv-cell am-kv-wide", "am-kv-cell am-kv-wide", "am-kv-cell"]);
+		expect(grid.c!.filter(cell => cell.p?.class === "am-kv-cell am-kv-wide").map(cell => cell.c?.[1]?.p?.spans)).toEqual([
+			[{ t: "wide", s: "strong" }], [{ t: "second", s: "strong" }], [{ t: "last", s: "strong" }],
 		]);
 	});
 	test("parses Markdown values into spans while keeping source keys literal", () => {
-		const nodes = renderKv(spec(["Raw **Key**: **bold** *em* `code` ~~old~~"]), context).nodes;
-		expect(nodes[0]!.c![0]!.p?.items).toEqual([{ k: "Raw **Key**", v: [
+		const cell = renderKv(spec(["Raw **Key**: **bold** *em* `code` ~~old~~"]), context).nodes[0]!.c![0]!;
+		expect(cell.c?.[0]?.p?.text).toBe("Raw **Key**");
+		expect(cell.c?.[1]?.p?.spans).toEqual([
 			{ t: "bold", s: "strong" }, { t: " " }, { t: "em", s: "em" }, { t: " " },
 			{ t: "code", s: "code" }, { t: " " }, { t: "old", s: "del" },
-		] }]);
+		]);
 	});
 	test("keeps all wide value runs strong while preserving their inline Markdown styles", () => {
-		const nodes = renderKv(spec(["* Title: Text *em* `code` ~~old~~"]), context).nodes;
-		expect(nodes[0]!.p?.spans).toEqual([
-			{ t: "Title: ", s: "strong" }, { t: "Text ", s: "strong" }, { t: "em", s: "strong em" },
+		const cell = renderKv(spec(["* Title: Text *em* `code` ~~old~~"]), context).nodes[0]!.c![0]!;
+		expect(cell.c?.[1]?.p?.spans).toEqual([
+			{ t: "Text ", s: "strong" }, { t: "em", s: "strong em" },
 			{ t: " ", s: "strong" }, { t: "code", s: "strong code" }, { t: " ", s: "strong" }, { t: "old", s: "strong del" },
 		]);
 	});
-	test("renders one-column and wide-only content without empty rows", () => {
-		expect(renderKv(spec(["A: a", "B: b"], "cols=1"), context).nodes.map(node => node.c?.length)).toEqual([1, 1]);
-		expect(renderKv(spec(["* Title: t", "* Subtitle: s"]), context).nodes.map(node => node.k)).toEqual(["text", "text"]);
+	test("renders one-column and wide-only content without empty cells", () => {
+		const single = renderKv(spec(["A: a", "B: b"], "cols=1"), context).nodes[0]!;
+		expect(single.p?.class).toBe("am-kv am-kv-1");
+		expect(single.c).toHaveLength(2);
+		const wide = renderKv(spec(["* Title: t", "* Subtitle: s"]), context).nodes[0]!;
+		expect(wide.c!.map(cell => cell.p?.class)).toEqual(["am-kv-cell am-kv-wide", "am-kv-cell am-kv-wide"]);
 	});
-	test("uses globally unique context-prefixed IDs for rows and children, even with duplicate keys", () => {
+	test("uses globally unique context-prefixed IDs for cells and children, even with duplicate keys", () => {
 		const nodes = flatten(renderKv(spec(["A: 1", "A: 2", "* A: 3", "A: 4", "* A: 5", "A: 6"]), context).nodes);
 		const ids = nodes.map(node => node.id);
 		expect(new Set(ids).size).toBe(ids.length);

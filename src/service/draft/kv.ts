@@ -49,28 +49,14 @@ export function parseKv(input: FenceInput): Parsed<KvSpec> {
 }
 
 export function renderKv(spec: KvSpec, ctx: RenderContext): Rendered {
-	const nodes: TspNode[] = [];
-	let cells: TspNode[] = [];
-	const flush = (): void => {
-		if (cells.length === 0) return;
-		nodes.push({ id: `${ctx.id}.row.${nodes.length}`, k: "row", p: { gap: "md", align: "start" }, c: cells });
-		cells = [];
-	};
-	for (let index = 0; index < spec.items.length; index++) {
-		const item = spec.items[index]!;
-		if (item.kind === "wide") {
-			flush();
-			nodes.push({ id: `${ctx.id}.wide.${index}`, k: "text", p: {
-				spans: [{ t: `${item.key}: `, s: "strong" }, ...inlineSpans(item.value, "strong")],
-			} });
-		} else {
-			cells.push({ id: `${ctx.id}.item.${index}`, k: "kv", p: {
-				layout: "grid", grow: 1, basis: 0,
-				items: [{ k: item.key, v: inlineSpans(item.value) }],
-			} });
-			if (cells.length === spec.cols) flush();
-		}
-	}
-	flush();
-	return { nodes, diagnostics: [] };
+	// am's grammar: a bordered cell grid, muted label above its value; a `*` item spans the row with a stronger value.
+	const cells = spec.items.map((item, index): TspNode => ({
+		id: `${ctx.id}.item.${index}`, k: "el",
+		p: { tag: "div", class: item.kind === "wide" ? "am-kv-cell am-kv-wide" : "am-kv-cell" },
+		c: [
+			{ id: `${ctx.id}.item.${index}.key`, k: "el", p: { tag: "span", class: "am-kv-key", text: item.key } },
+			{ id: `${ctx.id}.item.${index}.value`, k: "text", p: { spans: inlineSpans(item.value, item.kind === "wide" ? "strong" : "") } },
+		],
+	}));
+	return { nodes: [{ id: `${ctx.id}.grid`, k: "el", p: { tag: "div", class: `am-kv am-kv-${spec.cols}` }, c: cells }], diagnostics: [] };
 }

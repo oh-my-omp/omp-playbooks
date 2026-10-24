@@ -22,6 +22,11 @@ import { parseTree, renderTree } from "./tree";
 
 /** Largest component body drawn; longer ones are a diagnostic instead of a stalled pane. */
 const MAX_FENCE_LINES = 1000;
+/**
+ * Components whose drawing keeps its natural size: their panel takes a full row of the reading column
+ * (am-panel-wide) instead of shrinking the drawing's labels into a grid cell.
+ */
+const DRAWINGS: Readonly<Record<string, true>> = { flow: true, er: true, sequence: true, tree: true, timeline: true, annot: true, svg: true };
 
 /** One parsed segment, ready to draw. `marked` components offer the before/changes/after views. */
 interface Built {
@@ -128,39 +133,27 @@ export function renderDraft(design: string, host: DraftHost): DraftRender {
 	});
 	const meta = document.meta;
 	const header: TspNode[] = [];
-	if (meta.title !== null) header.push({ id: `${host.id}.title`, k: "text", p: { spans: [{ t: meta.title, s: "strong" }] } });
-	if (meta.subtitle !== null) header.push({ id: `${host.id}.subtitle`, k: "text", p: { text: meta.subtitle, tone: "muted" } });
+	if (meta.title !== null) header.push({ id: `${host.id}.title`, k: "el", p: { tag: "h3", class: "am-title", text: meta.title } });
+	if (meta.subtitle !== null) header.push({ id: `${host.id}.subtitle`, k: "el", p: { tag: "p", class: "am-subtitle", text: meta.subtitle } });
 	if (meta.extra.length > 0) header.push({ id: `${host.id}.meta`, k: "kv", p: { layout: "inline", items: meta.extra.map(item => ({ k: item.key, v: item.value })) } });
 	const lead = segmentNodes(`${host.id}.lead`, document.lead);
 	// Node ids follow panel position, not panel ID: a draft may repeat an ID (a diagnostic) and Tern drops frames with duplicate ids.
 	const panel = (item: Panel, index: number): TspNode => {
-		const head = item.bare ? undefined : [item.id, item.title].filter(Boolean).join(" ") + (item.meta ? ` · ${item.meta}` : "");
 		const body = segmentNodes(`${host.id}.p${index}`, item.segments);
-		const sheet = meta.template === "sheet";
+		const span = Math.min(item.span ?? 1, meta.cols);
+		const wide = item.segments.some(segment => (segment.kind === "fence" && DRAWINGS[segment.name] === true) || segment.kind === "image");
+		const head: TspNode[] = item.bare ? [] : [{ id: `${host.id}.p${index}.head`, k: "el", p: { tag: "div", class: "am-panel-head" }, c: [
+			...(item.id ? [{ id: `${host.id}.p${index}.tile`, k: "el", p: { tag: "span", class: "am-panel-id", text: item.id } }] : []),
+			{ id: `${host.id}.p${index}.heading`, k: "el", p: { tag: "h4", class: "am-panel-heading", text: item.title } },
+			...(item.meta ? [{ id: `${host.id}.p${index}.meta`, k: "el", p: { tag: "span", class: "am-panel-meta", text: item.meta } }] : []),
+		] }];
 		return {
-			id: `${host.id}.p${index}.card`, k: "card",
-			p: { ...(head === undefined ? { variant: "bare" } : { head }), ...(sheet ? { grow: Math.min(item.span ?? 1, meta.cols), basis: 0 } : {}) },
-			c: [{ id: `${host.id}.p${index}.body`, k: "col", p: { gap: "sm" }, c: body }],
+			id: `${host.id}.p${index}.card`, k: "el",
+			p: { tag: "section", class: `am-panel am-span-${span}${item.bare ? " am-panel-bare" : ""}${wide ? " am-panel-wide" : ""}` },
+			c: [...head, { id: `${host.id}.p${index}.body`, k: "el", p: { tag: "div", class: "am-panel-body" }, c: body }],
 		};
 	};
-	// A sheet fills rows of `cols` columns; a panel's span takes that many columns (am's grid).
-	const rows: Panel[][] = [];
-	let used = meta.cols;
-	for (const item of document.panels) {
-		const span = Math.min(item.span ?? 1, meta.cols);
-		if (used + span > meta.cols) { rows.push([]); used = 0; }
-		rows.at(-1)!.push(item);
-		used += span;
-	}
 	const panels = document.panels.map(panel);
-	const byPanel = new Map(document.panels.map((item, index) => [item, panels[index]!]));
-	const grid: TspNode = meta.template === "sheet"
-		? { id: `${host.id}.panels`, k: "col", p: { gap: "sm" }, c: rows.map((items, index) => {
-			const spans = items.reduce((total, item) => total + Math.min(item.span ?? 1, meta.cols), 0);
-			// A short last row keeps the column width by padding with an empty growing spacer.
-			const pad: TspNode[] = spans < meta.cols ? [{ id: `${host.id}.row${index}.pad`, k: "spacer", p: { grow: meta.cols - spans, basis: 0 } }] : [];
-			return { id: `${host.id}.row${index}`, k: "row", p: { gap: "sm", align: "start" }, c: [...items.map(item => byPanel.get(item)!), ...pad] };
-		}) }
-		: { id: `${host.id}.panels`, k: "col", p: { gap: "sm" }, c: panels };
-	return { nodes: [...header, ...lead, ...(panels.length ? [grid] : [])], diagnostics: diagnostics.sort((a, b) => a.line - b.line) };
+	const grid: TspNode = { id: `${host.id}.panels`, k: "el", p: { tag: "div", class: meta.template === "sheet" ? `am-sheet am-cols-${meta.cols}` : "am-doc" }, c: panels };
+	return { nodes: [{ id: `${host.id}.doc`, k: "el", p: { tag: "article", class: "am-draft" }, c: [...header, ...lead, ...(panels.length ? [grid] : [])] }], diagnostics: diagnostics.sort((a, b) => a.line - b.line) };
 }
