@@ -54,13 +54,17 @@ export function parseCallout(input: FenceInput): Parsed<CalloutSpec> {
 }
 
 export function renderCallout(spec: CalloutSpec, ctx: RenderContext): Rendered {
-	const { head, tone } = presentation[spec.type];
+	const { head } = presentation[spec.type];
+	// A tinted block with a semantic start edge: the conclusion or warning is seen before it is read.
 	return {
 		nodes: [{
 			id: `${ctx.id}.card`,
-			k: "card",
-			p: { head: spec.title || head, tone },
-			c: [{ id: `${ctx.id}.body`, k: "md", p: { text: spec.body } }],
+			k: "el",
+			p: { tag: "div", class: `am-callout am-callout-${spec.type}` },
+			c: [
+				{ id: `${ctx.id}.head`, k: "el", p: { tag: "strong", class: "am-callout-title", text: spec.title || head } },
+				...(spec.body.trim() ? [{ id: `${ctx.id}.body`, k: "md", p: { text: spec.body } }] : []),
+			],
 		}],
 		diagnostics: [],
 	};

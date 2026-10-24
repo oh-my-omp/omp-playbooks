@@ -1501,7 +1501,7 @@ export class Core implements CoreApi, K1Handler {
 	pencil(ref: DocRef, id: BlockId, field: HumanField): string | null {
 		const target = this.#humanTarget(ref, id);
 		if (typeof target === "string") return target;
-		if (!humanFieldValid(target.block.content, field)) return target.block.content.kind === "task" ? "执行块没有这个字段" : "设计块的设计稿由协调者修改：请写修改 prompt";
+		if (!humanFieldValid(target.block.content, field)) return target.block.content.kind === "task" ? "执行块没有这个字段" : "设计块的设计稿由协调者修改：请写修改要求";
 		const lock = target.doc.locks.get(id);
 		if (lock?.kind !== "none") return lock?.kind === "coordinator" ? "协调者正在编辑" : "已在编辑";
 		if (this.#hasHumanDraft()) return "请先提交正在编辑的字段";
@@ -1533,8 +1533,8 @@ export class Core implements CoreApi, K1Handler {
 
 	/** Submit a design change request: journal it, then notify the coordinator. Refused (draft kept) without a coordinator or text. */
 	#submitRevision(doc: DocState, id: BlockId, prompt: string): string | null {
-		if (prompt.trim() === "") return "修改 prompt 是空的";
-		if (!this.#conn || this.#conn.session === null) return "没有协调者连接：修改 prompt 仍保留，协调者连接后再提交";
+		if (prompt.trim() === "") return "修改要求是空的";
+		if (!this.#conn || this.#conn.session === null) return "没有协调者连接：修改要求仍保留，协调者连接后再提交";
 		const revision: Revision = { seq: (doc.revisions.at(-1)?.seq ?? 0) + 1, at: this.#now(), block: id, prompt };
 		this.#store.appendRevision(doc.ref, revision);
 		doc.revisions.push(revision);

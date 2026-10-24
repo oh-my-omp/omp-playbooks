@@ -78,5 +78,5 @@ export function renderAsk(spec: AskSpec, ctx: RenderContext): Rendered {
 		}
 	}
 	children.push({ id: `${ctx.id}.mode`, k: "text", p: { spans: [{ t: spec.mode === "single" ? "单选" : "多选", s: "muted" }] } });
-	return { nodes: [{ id: `${ctx.id}.ask`, k: "col", p: { gap: 1 }, c: children }], diagnostics: [] };
+	return { nodes: [{ id: `${ctx.id}.ask`, k: "el", p: { tag: "div", class: "am-ask" }, c: children }], diagnostics: [] };
 }

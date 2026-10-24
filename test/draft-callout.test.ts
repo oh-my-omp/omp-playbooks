@@ -18,8 +18,8 @@ function context(id = "draft.callout"): RenderContext {
 	return {
 		id,
 		view: "changes",
-		svg() { throw new Error("Callout must use native card/Markdown nodes"); },
-		image() { throw new Error("Callout must use native card/Markdown nodes"); },
+		svg() { throw new Error("Callout must use native elements/Markdown nodes"); },
+		image() { throw new Error("Callout must use native elements/Markdown nodes"); },
 		readFile() { throw new Error("Callout must not read files"); },
 	};
 }
@@ -105,15 +105,18 @@ describe("callout diagnostics", () => {
 describe("callout rendering", () => {
 	const lines = ["", "**结论** $E=mc^2$", "", "$$", "\\int_0^1 x\\,dx=\\frac12", "$$", "", "- item", "  "];
 
-	for (const { type, head, tone } of variants) {
-		test(`renders ${type} as a titled card with untouched Markdown and math`, () => {
+	for (const { type, head } of variants) {
+		test(`renders ${type} with a semantic callout title and untouched Markdown and math`, () => {
 			const spec = parsed(input(type, lines));
 			const rendered = renderCallout(spec, context());
 			expect(spec.body).toBe(lines.join("\n"));
 			expect(rendered).toEqual({
 				nodes: [{
-					id: "draft.callout.card", k: "card", p: { head, tone },
-					c: [{ id: "draft.callout.body", k: "md", p: { text: lines.join("\n") } }],
+					id: "draft.callout.card", k: "el", p: { tag: "div", class: `am-callout am-callout-${type}` },
+					c: [
+						{ id: "draft.callout.head", k: "el", p: { tag: "strong", class: "am-callout-title", text: head } },
+						{ id: "draft.callout.body", k: "md", p: { text: lines.join("\n") } },
+					],
 				}],
 				diagnostics: [],
 			});
@@ -122,8 +125,8 @@ describe("callout rendering", () => {
 
 	test("uses the explicit title rather than the default heading", () => {
 		const rendered = renderCallout(parsed(input("warn Caution", [])), context());
-		expect(rendered.nodes[0]?.p).toEqual({ head: "Caution", tone: "warning" });
-		expect(rendered.nodes[0]?.c?.[0]?.p?.text).toBe("");
+		expect(rendered.nodes[0]?.p).toEqual({ tag: "div", class: "am-callout am-callout-warn" });
+		expect(rendered.nodes[0]?.c).toEqual([{ id: "draft.callout.head", k: "el", p: { tag: "strong", class: "am-callout-title", text: "Caution" } }]);
 	});
 
 	test("assigns unique namespaced ids to every node", () => {
@@ -137,7 +140,7 @@ describe("callout rendering", () => {
 			for (const child of node.c ?? []) visit(child);
 		}
 		for (const node of nodes) visit(node);
-		expect(ids).toHaveLength(4);
+		expect(ids).toHaveLength(6);
 		expect(new Set(ids).size).toBe(ids.length);
 		expect(ids.every(id => id.startsWith("panel.1.callout.1.") || id.startsWith("panel.1.callout.2."))).toBe(true);
 	});

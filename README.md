@@ -2,18 +2,18 @@
 
 English | [简体中文](README.zh-CN.md)
 
-omp-playbooks keeps **design, execution prompts and orchestration code** in one Playbook that people and agents edit together. It consists of an omp extension and a Tern document service: the main session connects to the document service through the `playbook_*` tools, while a person reads the cards, edits content and submits change requests in the pane beside it.
+omp-playbooks keeps **design, execution prompts and orchestration code** in one Playbook that people and agents edit together. It consists of an omp extension and a Tern document service: the main session connects to the document service through the `playbook_*` tools, while a person browses the blocks, edits content and submits change requests in the pane beside it.
 
 Design and execution are separate. A design block covers one design or business unit; an execution block composes the requirements, design panels, context and earlier results it needs through references. One execution block can reference several design blocks; designs and tasks do not have to map one to one.
 
 | Party | Responsible here for |
 |---|---|
-| Person | Editing requirements, execution bodies and titles directly; viewing the rendered design; submitting design change prompts and requesting launches or checks by hand |
+| Person | Editing requirements, execution bodies and titles directly; viewing the rendered design; submitting design change requests and requesting launches or checks by hand |
 | omp main session (coordinator) | Revising designs itself; calling tools to create Runs and compile prompts; deciding how to launch and orchestrate subagents, handle change notices and record results |
-| Document service | Storing documents, Runs, Launches and records; resolving references; drawing cards and design components; locking, running deterministic checks and notifying the coordinator |
+| Document service | Storing documents, Runs, Launches and records; resolving references; drawing the pane and design components; locking, running deterministic checks and notifying the coordinator |
 | Subagent | Executing the compiled prompt the coordinator hands it; it owns none of this Playbook's tools or UI |
 
-**Buttons are requests, not automatic executors.** "Submit change" hands the change prompt to the main session; "Launch" notifies the main session to execute; "Check" asks the main session to add the model judgment. The extension never revises a design, starts a worker or accepts a result on its own because a notice arrived.
+**Buttons are requests, not automatic executors.** "提交给协调者" (submit to coordinator) hands the change request to the main session; "启动" (Launch) notifies the main session to execute; "检查" (Check) asks the main session to add the model judgment. The extension never revises a design, starts a worker or accepts a result on its own because a notice arrived.
 
 ## Install and open
 
@@ -110,17 +110,36 @@ Every block needs `id`, `title`, `done` and the matching content fields. IDs are
 
 `done` is a flag that is set explicitly or ticked; it is not a design-approval state and is never derived from checks, subagent return values or Launch state. Existing files with only `body` blocks still work.
 
+### Pane layout
+
+The pane has two columns. The left column is the block navigator: each row shows a block's ID, type, title and state chips; in a Run, "Run 记录与时间线" (Run records and timeline) sits on top. The right column shows one thing at a time: a block, the Run's records and timeline, or a merged preview of several blocks. Clicking a navigator row opens that block; there is no long page to scroll.
+
+State chips state only facts the document service's data can prove; they never claim "handled" or "running", which no data ties to a particular request:
+
+| Chip | Meaning |
+|---|---|
+| `已完成`, `你在编辑`, `协调者编辑中` (done, you are editing, coordinator is editing) | The block's `done` and edit lock |
+| `已提交 #N，设计尚未改动`, `提交 #N 之后设计有改动` (submitted #N, design unchanged / design changed after #N) | Whether the design changed after the latest change request was submitted. The pane does not know whether the coordinator has "handled" that request. In the template this comparison holds only for the current service run |
+| `HH:MM 已请求启动` (launch requested at HH:MM) | A launch was requested and no Launch has been created from this block since |
+| `lN 等待绑定`, `lN 已绑定 X`, `lN 不活跃` (waiting for a worker, bound to X, inactive) | Open Launches started from this block |
+| `被 N 个未关闭 Launch 引用` (referenced by N open Launches) | Launches started from other blocks reference this one; editing it may send the coordinator change notices for them |
+| `有结果 · 待确认完成`, `有结果`, `失败` (result, awaiting done / result / failure) | The kind of the block's latest record; a result never turns into `done` by itself |
+| `检查计算中`, `检查 N 项不通过`, `检查通过`, `检查：待模型判定`, `检查：模型不可用` (computing, N failed, passed, awaiting model judgment, model unavailable) | The current state of the deterministic checks and the model judgment |
+
+The buttons in a block's top toolbar **act on that block only**: "已完成" (done), "启动" (Launch, execution blocks in a Run), "预览" (Preview), "检查" (Check), "设为参考" (pin as reference), "改标题" (edit title). An execution block with `agent` or `isolated` set shows them in the toolbar. To act on several blocks, tick them in the navigator; a selection bar listing the ticked IDs appears below the list, and its "一起启动" (launch together), "合并预览" (merged preview) and "一起检查" (check together) act on those blocks in document order.
+
+To read two blocks together, click "设为参考"; a reference row in an execution block also offers "设为参考，对照阅读" (pin to compare). The pinned block is shown read-only above whichever block is open, stays while you switch blocks, and "取消参考" (unpin) removes it. A design block lists "被 N 个块引用" (referenced by N blocks); clicking an entry opens the referencing block.
+
 ### How a person edits
 
-1. Title, execution body, requirement: click "编辑标题" (Edit title), "编辑正文" (Edit body) or "编辑需求" (Edit requirement), edit the text, then click "完成" (Done); `Esc` also commits these fields and **does not undo**, while "放弃" (Discard) drops the current draft.
-2. Design: look at the rendered result, click "写修改 prompt" (write change prompt), state exactly what should change and how, then click "提交修改" (submit change) by hand. On the notice, the main session reads the block and revises `design`; it does not touch `requirement`.
-3. `Esc` in the change prompt **does not submit**. "放弃" (Discard) drops the current draft. An empty prompt, or submitting with no coordinator connected, is rejected and the draft stays in the editor.
-4. An `ask` in a design is drawn as single- or multiple-choice controls with the `*` recommended options selected. Change the selection and click "提交选择" (submit choice): the pane submits `针对问题「<question>」，选择：<options>` as the design block's change prompt, which enters the change log and notifies the main session like a hand-written one; when revising, the main session replaces the answered `ask` with the matching design decision. With no coordinator connected the submission is refused and the text stays in the change-prompt editor; the button is unavailable while the block is locked, another draft exists, the Run has finished or nothing is selected.
-5. Within one service, templates and all Runs included, only one person's field draft can exist at a time. The edit lock covers the whole block; while a person is editing, the coordinator cannot write that block. While the coordinator holds the lock, "打断" (Interrupt) takes the block back.
+1. Title, execution body, requirement: click "改标题" (edit title, or the title itself), "编辑正文" (Edit body) or "编辑需求" (Edit requirement), edit the text, then click "保存" (Save; "保存标题" for the title). `Esc` also saves these fields and **does not undo**, while "放弃" (Discard) drops the current draft.
+2. Design: look at the rendered result, click "写修改要求" (write a change request), state exactly what should change and how, then click "提交给协调者" (submit to coordinator). On the notice, the main session reads the block and revises `design`; it does not touch `requirement`.
+3. `Esc` in a change request **does not submit**. An empty request, or submitting with no coordinator connected, is rejected and the draft stays in the editor.
+4. An `ask` in a design is drawn as single- or multiple-choice options with nothing selected; the `*` recommended options only carry a "建议" (suggested) tag. Picking an option writes one line `针对问题「<question>」，选择：<options>` into this block's change-request draft, opening the draft when there is none. Changing the pick replaces that line; clearing every option of a multiple choice removes it. The same draft can take further notes and answers to other asks; one click on "提交给协调者" then submits a single change request. When revising, the main session replaces each answered `ask` with the matching design decision. The options are unavailable while the coordinator holds the block, while any other draft exists (this block's own change-request draft excepted), or after the Run has finished.
+5. Within one service, templates and all Runs included, only one person's field draft can exist at a time. The edit lock covers the whole block; while a person is editing, the coordinator cannot write that block. Other blocks can still be opened from the navigator while editing; the draft stays with its block. While the coordinator holds the lock, "收回编辑权" (take the block back) does so.
+6. Deleting a block: click "删除此块…" (delete this block), then "确认删除" (confirm).
 
-With many blocks, "折叠" (fold) on a card's state row leaves only the state row (lock included), the title and notices; "全部折叠" / "全部展开" (fold all / unfold all) at the top act on every card of the current document. Folding changes only what is shown: checks and the view `playbook_check inspect` returns stay as when unfolded, and a draft in progress is kept for when the card opens again. An execution block with `agent` or `isolated` set shows them on its state row.
-
-A submitted prompt goes into an append-only change log; "修改记录" (change log) on the card is collapsed by default. It records **the person's change requests**, not design snapshots, design diffs or AI replies; an ordinary block read does not include it.
+A submitted request goes into an append-only change log, listed newest first with its line breaks in the design block's "修改要求" (change requests) section. It records **the person's change requests**, not design snapshots, design diffs or AI replies; an ordinary block read does not include it.
 
 ```json
 {"op":"revisions","block":"b1","after":0}
@@ -133,12 +152,14 @@ The above are `playbook_read` arguments; querying a Run's log also needs `run`. 
 | Object | Start and end | What never happens automatically |
 |---|---|---|
 | Template | The original YAML, copied by each Run | Changing the template does not update existing Runs |
-| Run | "开始 Run" (Start Run) or `playbook_run start` copies the template and resets every `done` to `false`. After it finishes, its blocks can no longer be edited through cards or tools | Starting a Run starts no agent; finishing a Run does not require every block to be done |
+| Run | "开始 Run" (Start Run) or `playbook_run start` copies the template and resets every `done` to `false`. After it finishes, its blocks can no longer be edited through the pane or tools | Starting a Run starts no agent; finishing a Run does not require every block to be done |
 | Launch | Compiles a Run's execution blocks, freezes the prompt/orchestration code and creates a record; closed explicitly, by `playbook.result` when it finishes up, or when the Run finishes | `launch`/`bind` start no worker; writing a result with `playbook_timeline` does not close the Launch; a close record does not cancel the worker |
 
 A Run has its own block contents, change log and timeline. **Clicking "开始 Run" in the pane automatically switches to the new Run's tab**; when a Run is started through `playbook_run start`, edit or launch in that Run's tab and pass the returned Run ID (for example `r1`) to tool calls. Read, edit, compile and check operations without `run` act on the template.
 
-Clicking "启动" (Launch) on an execution block in a Run sends `launch_requested` to the coordinator. With several blocks ticked, the launch targets are combined in document order; design blocks cannot be launched, and an orchestration block can only be launched alone. The worker only starts working once the main session calls the execution tools.
+Clicking "启动" (Launch) in an execution block's toolbar in a Run sends `launch_requested` to the coordinator for that block only. To combine several blocks into one launch, tick them in the navigator and click "一起启动" (launch together) in the selection bar; the targets are combined in document order, design blocks cannot be launched, and an orchestration block can only be launched alone. The worker only starts working once the main session calls the execution tools.
+
+A Run's record form, timeline and Launch records live under "Run 记录与时间线" in the navigator; when a status update comes due, both the navigator and the top bar say so, and "写状态更新" (write status update) in the top bar opens the form directly. Each block's detail also lists its history in this Run, its latest record, the open Launches started from it, and other Launches that reference it. After the coordinator records a result, the block shows "有结果 · 待确认完成" and a "标记已完成" (mark done) button for the person to use after checking.
 
 An execution block can reference several design blocks, and several execution blocks can be compiled into one Launch. A subagent receives the frozen text, not the UI, a live design page or any implicit Playbook context.
 
@@ -155,17 +176,17 @@ For `playbook.yaml`:
 | File | Content |
 |---|---|
 | `playbook.yaml` | Template |
-| `playbook.yaml.revisions.jsonl` | Template change-prompt history |
+| `playbook.yaml.revisions.jsonl` | Template change-request history |
 | `playbook.yaml.pb.jsonl` | Service ID allocation records |
 | `playbook.runs/r1.yaml` | The Run's blocks and run metadata |
 | `playbook.runs/r1.jsonl` | The Run's timeline and Launch records |
-| `playbook.runs/r1.revisions.jsonl` | The Run's change-prompt history |
+| `playbook.runs/r1.revisions.jsonl` | The Run's change-request history |
 
 For a `.yml` file the Run directory keeps the suffix, for example `example.yml.runs/`. Finishing a Run closes its Launch records, releases locks, discards uncommitted drafts and saves the finish time; it does not write back to the template and does not replace stopping agents that are still running.
 
 The timeline accepts `update`, `result`, `failure` and `retrospective`. A retrospective is written only after the Run finishes. `update_every` and `next` are positive integer seconds; when they come due it is only a notice, and no update is generated automatically. A result can be read through that block's `.result` reference only when it is associated with a `block`.
 
-The service checks the files on disk about once a second, and committed edits are written back to the YAML about a second later. Direct edits to the YAML content fields are loaded too, designs included; the editing split on the cards is not a file-system permission. Invalid YAML shows the parse error and keeps the last valid content; write-back resumes once the file is valid again. Disk changes do not commit a person's draft for them; a change to the same field is flagged, and clicking "完成" afterwards still applies the draft. Blocks of a finished Run are protected only on the UI/tool paths; the files on disk are not immutable.
+The service checks the files on disk about once a second, and committed edits are written back to the YAML about a second later. Direct edits to the YAML content fields are loaded too, designs included; the editing split in the pane is not a file-system permission. Invalid YAML shows the parse error and keeps the last valid content; write-back resumes once the file is valid again. Disk changes do not commit a person's draft for them; a change to the same field is flagged, and clicking "保存" (Save) afterwards still applies the draft. Blocks of a finished Run are protected only on the UI/tool paths; the files on disk are not immutable.
 
 ## References and compilation
 
@@ -198,8 +219,8 @@ The component format follows [answer-me-with-html](https://github.com/QingYunA/a
 ### Header and panels
 
 - The optional header must start on the first line, opened and closed with `---`; it supports only line-by-line `key: value`, not full YAML.
-- `template: sheet` is a grid and `doc` a single column. `cols` ranges 1–6, default 3. `title` and `subtitle` are supported; without a header `title`, if the first non-empty body line is `# Title`, it becomes the header title and is removed from the body; writing prose before the heading does not trigger this.
-- `## A Title {span=2 bare meta="note"}` starts a panel. `span` sets the column span, `bare` drops the card frame and `meta` shows extra text; panel height follows its content. `rows` is parsed but does not affect layout.
+- `template: sheet` lays panels in columns and `doc` in a single column. `cols` ranges 1–6, default 3, and caps the panels per row: a panel is at least 300px wide, and a panel holding a drawing (`flow`, `er`, `sequence`, `tree`, `timeline`, `annot`, `svg`, an image) at least 560px, so panels wrap when the pane is narrow and drawings keep their natural size. `title` and `subtitle` are supported; without a header `title`, if the first non-empty body line is `# Title`, it becomes the header title and is removed from the body; writing prose before the heading does not trigger this.
+- `## A Title {span=2 bare meta="note"}` starts a panel. `span` sets how many columns it takes (at most `cols`), `bare` drops the panel frame and `meta` shows extra text; panel height follows its content. `rows` is parsed but does not affect layout.
 - `lang` is ignored; `theme`, `mode` and `style` are ignored with a warning; other header keys are shown as text metadata.
 - A panel ID is a single uppercase letter and must be unique. The native text labels of some components support inline code, bold, italic and strikethrough; flow and ER labels show as plain text, and sequence labels have these marks removed and show as plain text. Do not treat component labels as a full Markdown renderer.
 
@@ -218,7 +239,7 @@ All of these are components **inside a design**. Execution bodies are not drawn 
 | `annot` | `annot`; body `结果可能[过期]{!读取前刷新}`, `# Title \| side note`, `> caption` |
 | `kv` | `kv cols=2`; `存储: Redis`, `*不变量: 一个源头` is a full-width item |
 | `callout` | `callout warn 缓存失效`; the body is Markdown; types `info/ok/warn/err` |
-| `ask` | `ask` or `ask multi`; the first line is the question, followed by 2–6 `* recommended \| note` or `- other \| note`; single choice needs exactly one recommended option; in the pane the options can be picked and submitted with "提交选择", see [How a person edits](#how-a-person-edits) |
+| `ask` | `ask` or `ask multi`; the first line is the question, followed by 2–6 `* recommended \| note` or `- other \| note`; single choice needs exactly one recommended option; in the pane a pick is written into the change-request draft, see [How a person edits](#how-a-person-edits) |
 | `diff` | `diff file=src/value.ts title="变更"`; paste a unified diff as the body, it is not loaded from `file`; supports `start`, `hl` |
 | `html` | `html`; structured tags such as `<section><h3>方案</h3><p><strong>结论</strong></p></section>`, converted to TSP; no web page runs |
 | `svg` | `svg`; a complete, static, safe `<svg>`, preferably with an explicit `viewBox` or `width`/`height` |
@@ -327,7 +348,7 @@ Python orchestration sets the **Python variables** `PLAYBOOK_DOC`, `PLAYBOOK_RUN
 
 ## Checks are not completion or approval
 
-Cards show the deterministic checks `compile`, `render_error` and `render_pending`; execution blocks also check `empty_expansion` and table charts, design blocks check `draft`. Checks do not prove a business design correct; apart from Launch constraints such as compile failures, a failed check does not gate a launch.
+A block's detail and its navigator row show the deterministic checks `compile`, `render_error` and `render_pending`; execution blocks also check `empty_expansion` and table charts, design blocks check `draft`. Checks do not prove a business design correct; apart from Launch constraints such as compile failures, a failed check does not gate a launch.
 
 `jev` is a separately reported model judgment:
 

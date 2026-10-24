@@ -32,6 +32,7 @@ class FakeCore implements CoreApi {
 	connected = false;
 	statuses: { ref: DocRef; block: BlockId; status: RenderStatus }[] = [];
 	history: readonly Revision[] = [];
+	revisionReads: { ref: DocRef; block: BlockId }[] = [];
 	template: DocView = { ref: template, title: "Playbook", run: null, blocks: [item(), item("b2", "Other")], timeline: [], lastUpdateAt: null, retrospective: false, errors: [] };
 	run: DocView = { ref: runRef, title: "Playbook", run: { id: "r1", name: "Incident", status: "running", startedAt: 1000, finishedAt: null, updateEvery: 60, updateDue: 2000 }, blocks: [item(), item("b2", "Other")], timeline: [{ seq: 1, at: 1000, origin: "coordinator", data: { type: "launch_created", launch: "l1", kind: "prompt", blocks: ["b1"] } }, { seq: 2, at: 2000, origin: "human", data: { type: "post", kind: "result", text: "Finished work", block: "b1", launch: "l1", quote: "message-a", session: "session-a" } }], lastUpdateAt: 1500, retrospective: false, errors: [] };
 	call(method: string, ...args: readonly unknown[]): null { this.calls.push({ method, args }); return null; }
@@ -42,7 +43,7 @@ class FakeCore implements CoreApi {
 	errors(): readonly string[] { return []; }
 	onChange(listener: (ref: DocRef | null) => void) { this.listener = listener; return () => {}; }
 	setRenderStatus(ref: DocRef, block: BlockId, status: RenderStatus): void { this.statuses.push({ ref, block, status }); }
-	revisions(ref: DocRef, block: BlockId): readonly Revision[] { this.call("revisions", ref, block); return this.history.filter(revision => revision.block === block); }
+	revisions(ref: DocRef, block: BlockId): readonly Revision[] { this.revisionReads.push({ ref, block }); return this.history.filter(revision => revision.block === block); }
 	change(ref: DocRef, block: BlockId, transform: (value: BlockView) => BlockView): void {
 		const next = { ...this.view(ref), blocks: this.view(ref).blocks.map(value => value.block.id === block ? transform(value) : value) };
 		if (ref.kind === "template") this.template = next; else this.run = next;
@@ -85,25 +86,27 @@ class FakeTsp implements TspSession {
 	order: string[] = [];
 	root: TspNode | null = null;
 	facts: FrameStatus = { blockError: false, documentError: false, pendingOverdue: false };
+	blockFacts = new Map<string, FrameStatus>();
 	frameWaiters: (() => void)[] = [];
 	nextFrame(): Promise<void> { const { promise, resolve } = Promise.withResolvers<void>(); this.frameWaiters.push(resolve); return promise; }
 	start(_app: string, onInput: (input: TspInput) => void) { this.input = onInput; }
 	open() { this.order.push("open"); }
 	blob(id: string, mime: string, bytes: Uint8Array) { expect(mime).toBe("image/svg+xml"); expect(bytes.length).toBeGreaterThan(0); this.order.push(`blob:${id}`); }
 	frame(ops: readonly FrameOp[], blocks: readonly string[]) { this.frames.push({ ops, blocks }); this.order.push("frame"); for (const op of ops) if (op[0] === "add") this.root = op[4]; for (const resolve of this.frameWaiters.splice(0)) resolve(); return this.frames.length; }
-	status(): FrameStatus { return this.facts; }
+	status(block: string): FrameStatus { return this.blockFacts.get(block) ?? this.facts; }
 	fullRedraw() {}
 	onStatusChange(listener: (blocks: readonly string[]) => void) { this.statusListener = listener; }
 	event(event: TspEvent) { this.input({ kind: "event", event }); }
 	click(id: string) { this.event({ ev: "action", id, act: "invoke" }); }
 	keys(bytes: string) { this.input({ kind: "keys", bytes }); }
+	selectTab(item: "template" | RunId) { this.event({ ev: "other", body: { ev: "select", id: "tabs", item } }); }
 	node(id: string): TspNode {
 		function find(node: TspNode): TspNode | undefined { if (node.id === id) return node; for (const child of node.c ?? []) { const match = find(child); if (match) return match; } }
 		const node = this.root && find(this.root); if (!node) throw new Error(`Missing ${id}`); return node;
 	}
 }
-async function fixture(core = new FakeCore()): Promise<{ core: FakeCore; tsp: FakeTsp }> {
-	const tsp = new FakeTsp(); startUi(core, tsp, process.cwd());
+async function fixture(core = new FakeCore(), tsp = new FakeTsp()): Promise<{ core: FakeCore; tsp: FakeTsp }> {
+	startUi(core, tsp, process.cwd());
 	const ready = tsp.nextFrame(); tsp.input({ kind: "hello", dark: true }); await ready;
 	expect(tsp.root).not.toBeNull(); return { core, tsp };
 }
@@ -117,7 +120,7 @@ describe("K4 form UI", () => {
 		expect(core.calls.map(call => call.method)).toEqual(["pencil", "setDraft"]);
 		tsp.keys("\x1b"); await tick();
 		expect(core.calls).toEqual([{ method: "pencil", args: [template, "b1", "title"] }, { method: "setDraft", args: [template, "b1", "Task!"] }, { method: "commit", args: [template, "b1"] }]);
-		expect(core.template.blocks[0]?.block.title).toBe("Task!"); expect(tsp.node("b1.title.view").p?.text).toBe("Task!");
+		expect(core.template.blocks[0]?.block.title).toBe("Task!"); expect(tsp.node("b1.title.heading").p?.text).toBe("Task!");
 	});
 	test("stale edits drop without writing and expose the exact notice", async () => {
 		const { core, tsp } = await fixture(); tsp.click("b1.title.pencil"); await tick(); tsp.keys("new");
@@ -161,42 +164,66 @@ describe("K4 form UI", () => {
 	test("editor ancestors have no click and other pencils/locked controls are unavailable", async () => {
 		const { core, tsp } = await fixture(); tsp.click("b1.body.pencil"); await tick();
 		function inspect(node: TspNode, parents: readonly TspNode[]): void { if (node.id === "b1.body") { expect(node.k).toBe("editor"); for (const ancestor of parents) expect(ancestor.p?.actions).toBeUndefined(); } node.c?.forEach(child => inspect(child, [...parents, node])); }
-		inspect(tsp.root!, []); expect(tsp.node("b2.title.pencil").p?.actions).toBeUndefined(); expect(tsp.node("b1.done").p?.disabled).toBe(true);
+		inspect(tsp.root!, []); expect(tsp.node("b1.done").p?.disabled).toBe(true);
+		tsp.click("nav.b2"); expect(tsp.node("b2.title.pencil").p?.actions).toBeUndefined(); tsp.click("nav.b1");
 		expect(core.statuses.filter(entry => entry.block === "b1").at(-1)?.status.chartNodes).toBe(1);
-		expect(core.statuses.filter(entry => entry.block === "b1").at(-1)?.status.view.images).toHaveLength(0);
+		expect(core.statuses.filter(entry => entry.block === "b1").at(-1)?.status.view.images).toHaveLength(1);
 		core.template = { ...core.template, blocks: [item("b1"), { ...item("b2"), lock: { kind: "coordinator", request: "request" } }] }; core.listener(template); await tick();
-		tsp.click("b2.interrupt"); expect(core.calls.at(-1)).toEqual({ method: "interrupt", args: [template, "b2"] }); expect(tsp.node("b2.delete").p?.actions).toBeUndefined();
+		tsp.click("nav.b2"); tsp.click("b2.interrupt"); expect(core.calls.at(-1)).toEqual({ method: "interrupt", args: [template, "b2"] }); expect(tsp.node("b2.delete").p?.actions).toBeUndefined();
 	});
-	test("all card actions route to Core with selected blocks in document order", async () => {
-		const { core, tsp } = await fixture(); tsp.event({ ev: "change", id: "b1.done", checked: true }); tsp.click("b1.insert"); tsp.click("b1.insert-design"); tsp.click("b1.delete"); tsp.click("b1.reference.0.refetch"); tsp.click("b1.preview"); await tick();
-		expect(core.calls).toEqual([{ method: "setDone", args: [template, "b1", true] }, { method: "insertBlock", args: [template, "b1", "task"] }, { method: "insertBlock", args: [template, "b1", "design"] }, { method: "deleteBlock", args: [template, "b1"] }, { method: "refetch", args: [template, "file:context.md"] }, { method: "preview", args: [template, ["b1"]] }]); expect(tsp.node("b1.compiled.text").p?.text).toBe("Compiled text"); expect(tsp.node("b1.compiled.length").p?.text).toBe("13 字符");
-		tsp.event({ ev: "other", body: { ev: "select", id: "tabs", item: "r1" } });
-		tsp.event({ ev: "change", id: "b2.selected", checked: true }); tsp.event({ ev: "change", id: "b1.selected", checked: true }); tsp.click("b2.launch"); tsp.click("b2.check"); tsp.click("b1.launch.l1.close");
-		expect(core.calls.slice(-3)).toEqual([{ method: "requestLaunch", args: ["r1", ["b1", "b2"]] }, { method: "requestCheck", args: [runRef, ["b1", "b2"]] }, { method: "closeLaunch", args: ["l1"] }]);
+	test("block actions ignore selection and selection actions use document order", async () => {
+		const { core, tsp } = await fixture();
+		tsp.event({ ev: "change", id: "b1.done", checked: true }); tsp.click("block.insert.task"); tsp.click("block.insert.design"); tsp.click("b1.delete"); tsp.click("b1.delete.yes"); tsp.click("b1.reference.0.refetch"); tsp.click("b1.preview"); await tick();
+		expect(core.calls.filter(call => call.method !== "revisions")).toEqual([{ method: "setDone", args: [template, "b1", true] }, { method: "insertBlock", args: [template, "b1", "task"] }, { method: "insertBlock", args: [template, "b1", "design"] }, { method: "deleteBlock", args: [template, "b1"] }, { method: "refetch", args: [template, "file:context.md"] }, { method: "preview", args: [template, ["b1"]] }]);
+		expect(tsp.node("b1.compiled.text").p?.text).toBe("Compiled text"); expect(tsp.node("b1.compiled.length").p?.text).toBe("13 字符");
+		core.run = { ...core.run, blocks: [...core.run.blocks, item("b3", "Third")] };
+		tsp.selectTab("r1");
+		tsp.event({ ev: "change", id: "b2.selected", checked: true }); tsp.event({ ev: "change", id: "b1.selected", checked: true });
+		tsp.click("nav.b3"); tsp.click("b3.launch"); tsp.click("b3.check"); tsp.click("b3.preview"); await tick();
+		expect(core.calls.filter(call => ["requestLaunch", "requestCheck", "preview"].includes(call.method)).slice(-3)).toEqual([
+			{ method: "requestLaunch", args: ["r1", ["b3"]] },
+			{ method: "requestCheck", args: [runRef, ["b3"]] },
+			{ method: "preview", args: [runRef, ["b3"]] },
+		]);
+		tsp.click("selection.launch"); tsp.click("selection.check"); tsp.click("selection.preview"); await tick();
+		expect(core.calls.filter(call => ["requestLaunch", "requestCheck", "preview"].includes(call.method)).slice(-3)).toEqual([
+			{ method: "requestLaunch", args: ["r1", ["b1", "b2"]] },
+			{ method: "requestCheck", args: [runRef, ["b1", "b2"]] },
+			{ method: "preview", args: [runRef, ["b1", "b2"]] },
+		]);
+		expect(tsp.node("selection.preview.text").p?.text).toBe("Compiled text");
+		expect(descendants(tsp.root!).filter(node => /^b\d+\.card$/.test(node.id))).toEqual([]);
+		expect(tsp.frames.at(-1)?.blocks).toEqual([]);
+		tsp.click("nav.b1"); tsp.click("b1.launch.l1.close");
+		expect(core.calls.at(-1)).toEqual({ method: "closeLaunch", args: ["l1"] });
 	});
 	test("Run forms, update reminder, timeline quotes, filter and full Launch record", async () => {
 		const { core, tsp } = await fixture(); tsp.event({ ev: "focus", id: "run.name" }); tsp.keys("Incident"); tsp.event({ ev: "focus", id: "run.every" }); tsp.keys("60"); tsp.click("run.start"); expect(core.calls.at(-1)).toEqual({ method: "startRun", args: ["Incident", 60] });
-		tsp.click("run.r1.open"); expect(tsp.node("run.due.time").p?.text).toContain("状态更新已到期"); expect(tsp.node("timeline.2.record.quote").p?.text).toBe("取自会话 session-a 的消息 message-a");
+		tsp.selectTab("r1"); tsp.click("nav.activity"); expect(tsp.node("run.due.time").p?.text).toContain("状态更新已到期"); expect(tsp.node("timeline.2.record.quote").p?.text).toBe("取自会话 session-a 的消息 message-a");
 		tsp.event({ ev: "change", id: "run.snooze.duration.300", checked: true }); tsp.click("run.snooze"); expect(core.calls.at(-1)).toEqual({ method: "snooze", args: ["r1", 300] });
 		tsp.event({ ev: "change", id: "post.block.b1", checked: true }); tsp.event({ ev: "focus", id: "post.text" }); tsp.keys("Status"); tsp.event({ ev: "focus", id: "post.next" }); tsp.keys("120"); tsp.click("post.submit"); expect(core.calls.at(-1)).toEqual({ method: "post", args: ["r1", "update", "Status", "b1", 120] });
 		tsp.click("timeline.1.launch"); expect(core.calls.at(-1)?.method).toBe("launchInfo"); expect(tsp.node("launch-info.l1.text").p?.text).toContain("Complete snapshot");
 		tsp.event({ ev: "change", id: "timeline.filter.post", checked: true }); expect(() => tsp.node("timeline.1")).toThrow(); expect(tsp.node("timeline.2")).toBeDefined(); tsp.click("run.finish"); expect(core.calls.at(-1)?.method).toBe("finishRun");
 	});
 	test("finished Run defaults to retrospective, disables mutation but keeps records enabled", async () => {
-		const { core, tsp } = await fixture(); core.run = { ...core.run, run: { ...core.run.run!, status: "finished", finishedAt: 3000, updateDue: null } }; tsp.click("run.r1.open");
-		expect(tsp.node("post.kind.retrospective").p?.checked).toBe(true); expect(tsp.node("b1.title.pencil").p?.actions).toBeUndefined(); expect(tsp.node("b1.done").p?.disabled).toBe(true); expect(tsp.node("b1.insert").p?.actions).toBeUndefined(); expect(tsp.node("b1.launch").p?.actions).toBeUndefined();
+		const { core, tsp } = await fixture(); core.run = { ...core.run, run: { ...core.run.run!, status: "finished", finishedAt: 3000, updateDue: null } }; tsp.selectTab("r1");
+		expect(tsp.node("b1.title.pencil").p?.actions).toBeUndefined(); expect(tsp.node("b1.done").p?.disabled).toBe(true); expect(tsp.node("block.insert.task").p?.actions).toBeUndefined(); expect(tsp.node("b1.launch").p?.actions).toBeUndefined();
+		tsp.click("nav.activity"); expect(tsp.node("post.kind.retrospective").p?.checked).toBe(true);
 		tsp.click("post.submit"); expect(core.calls.at(-1)).toEqual({ method: "post", args: ["r1", "retrospective", "", null, null] });
 	});
 	test("mixed orchestration selection cannot launch", async () => {
-		const { core, tsp } = await fixture(); core.run = { ...core.run, blocks: [item(), item("b2", "```js\nawait agent('work')\n```")] }; tsp.click("run.r1.open"); tsp.event({ ev: "change", id: "b1.selected", checked: true }); tsp.event({ ev: "change", id: "b2.selected", checked: true });
-		expect(tsp.node("b1.launch").p?.actions).toBeUndefined(); expect(tsp.node("b1.mixed").p?.text).toBe("编排块只能单独启动");
+		const { core, tsp } = await fixture(); core.run = { ...core.run, blocks: [item(), item("b2", "```js\nawait agent('work')\n```")] }; tsp.selectTab("r1"); tsp.event({ ev: "change", id: "b1.selected", checked: true }); tsp.event({ ev: "change", id: "b2.selected", checked: true });
+		expect(tsp.node("selection.launch").p?.actions).toBeUndefined(); tsp.click("selection.launch");
+		expect(core.calls.filter(call => call.method === "requestLaunch")).toEqual([]);
+		tsp.event({ ev: "change", id: "b1.selected", checked: false }); tsp.click("selection.launch");
+		expect(core.calls.filter(call => call.method === "requestLaunch")).toEqual([{ method: "requestLaunch", args: ["r1", ["b2"]] }]);
 	});
 	test("coordinator focus, graph blobs before frames, stable expansion keys and render status", async () => {
-		const { core, tsp } = await fixture(); expect(tsp.order.indexOf("frame")).toBeGreaterThan(tsp.order.findIndex(value => value.startsWith("blob:"))); expect(tsp.node("b1.reference.0").p).toMatchObject({ collapsed: true, collapsible: true, key: "0:((file:context.md))" });
+		const { core, tsp } = await fixture(); expect(tsp.order.indexOf("frame")).toBeGreaterThan(tsp.order.findIndex(value => value.startsWith("blob:"))); expect(tsp.node("b1.reference.0.body").p).toMatchObject({ collapsed: true, collapsible: true, key: "0:((file:context.md))" });
 		expect(tsp.order.some(value => value.startsWith("blob:"))).toBe(true);
 		expect(core.statuses.find(entry => entry.block === "b1")?.status.chartNodes).toBe(1); expect(core.statuses.find(entry => entry.block === "b1")?.status.view.images).toHaveLength(1);
-		tsp.facts = { blockError: true, documentError: false, pendingOverdue: true }; tsp.statusListener(["b1"]); expect(core.statuses.at(-1)?.status).toMatchObject({ blockError: true, pendingOverdue: true, chartNodes: 1 });
-		core.connected = true; core.listener(null); await tick(); tsp.click("coordinator.focus"); await tick(); expect(core.calls.map(call => call.method)).toEqual(["focusCoordinator"]);
+		tsp.facts = { blockError: true, documentError: false, pendingOverdue: true }; tsp.statusListener(["b1"]); expect(core.statuses.filter(entry => entry.block === "b1").at(-1)?.status).toMatchObject({ blockError: true, pendingOverdue: true, chartNodes: 1 });
+		core.connected = true; core.listener(null); await tick(); tsp.click("coordinator.focus"); await tick(); expect(core.calls.filter(call => call.method !== "revisions").map(call => call.method)).toEqual(["focusCoordinator"]);
 		const beforeTheme = tsp.order.filter(value => value.startsWith("blob:")).at(-1);
 		const themed = tsp.nextFrame(); tsp.event({ ev: "theme", dark: false }); await themed;
 		expect(tsp.order.filter(value => value.startsWith("blob:")).at(-1)).not.toBe(beforeTheme);
@@ -211,8 +238,9 @@ describe("K4 form UI", () => {
 		expect(() => tsp.node("b1.design.pencil")).toThrow();
 		expect(() => tsp.node("b1.body.pencil")).toThrow();
 		const nodes = descendants(tsp.node("b1.design"));
-		expect(nodes.find(node => node.k === "kv")?.p).toMatchObject({ items: [{ k: "Owner", v: [{ t: "Platform" }] }] });
-		expect(nodes.find(node => node.k === "card" && node.p?.head === "Review")).toBeDefined();
+		expect(nodes.find(node => node.p?.class === "am-kv am-kv-2")).toMatchObject({ k: "el", p: { tag: "div" } });
+		expect(nodes.find(node => node.p?.class === "am-kv-key")?.p?.text).toBe("Owner");
+		expect(nodes.find(node => node.p?.class === "am-callout-title")?.p?.text).toBe("Review");
 		expect(nodes.find(node => node.k === "md" && node.p?.text === "Keep writes atomic.")).toBeDefined();
 		const table = nodes.find(node => node.k === "table");
 		expect(table).toBeDefined();
@@ -262,7 +290,7 @@ describe("K4 form UI", () => {
 		const core = new FakeCore();
 		core.template = { ...core.template, blocks: [designItem("b1", "## A Broken\n\n```callout info Review\nKeep writes atomic.")] };
 		const { tsp } = await fixture(core);
-		expect(tsp.node("b1.diagnostics").k).toBe("section");
+		expect(tsp.node("b1.diagnostics")).toMatchObject({ k: "el", p: { tag: "div", class: "pb-panel" } });
 		expect(tsp.node("b1.diagnostic.0").p?.tone).toBe("error");
 		expect(tsp.node("b1.diagnostic.0").p?.text).toContain("第 3 行");
 		expect(tsp.node("b1.diagnostic.0").p?.text).toContain("draft");
@@ -280,11 +308,11 @@ describe("K4 form UI", () => {
 		core.connected = true;
 		core.template = { ...core.template, blocks: [designItem()] };
 		const { tsp } = await fixture(core);
-		expect(tsp.node("b1.prompt.pencil").p?.text).toBe("写修改 prompt");
+		expect(tsp.node("b1.prompt.pencil").p?.actions).toEqual({ click: "invoke" });
 		tsp.click("b1.prompt.pencil"); await tick();
 		expect(tsp.node("b1.prompt")).toMatchObject({ k: "editor", p: { text: "" } });
-		expect(tsp.node("b1.prompt.submit").p?.text).toBe("提交修改");
-		expect(tsp.node("b1.prompt.discard").p?.text).toBe("放弃");
+		expect(tsp.node("b1.prompt.submit").p?.actions).toEqual({ click: "invoke" });
+		expect(tsp.node("b1.prompt.discard").p?.actions).toEqual({ click: "invoke" });
 		tsp.keys("Explain failure recovery.");
 		expect(core.template.blocks[0]?.lock).toEqual({ kind: "human", field: "prompt", draft: "Explain failure recovery." });
 		tsp.click(`b1.prompt.${action}`); await tick();
@@ -339,48 +367,42 @@ describe("K4 form UI", () => {
 		tsp.keys(" for review.");
 		expect(core.template.blocks[0]?.lock).toEqual({ kind: "human", field: "prompt", draft: "Keep this request for review." });
 	});
-	test("revision history is fetched from Core and listed in a collapsed section", async () => {
+	test("revision history comes from Core, stays block-scoped and preserves newlines", async () => {
 		const core = new FakeCore();
 		core.run = { ...core.run, blocks: [designItem()] };
 		core.history = [
-			{ seq: 2, at: 1000, block: "b1", prompt: "Include recovery steps." },
+			{ seq: 2, at: 1000, block: "b1", prompt: "Include recovery steps.\nKeep blank lines.\n\nDo not flatten." },
 			{ seq: 4, at: 2000, block: "b1", prompt: "Explain retention." },
 			{ seq: 5, at: 3000, block: "b2", prompt: "Different block." },
 		];
 		const { tsp } = await fixture(core);
-		tsp.click("run.r1.open");
-		expect(core.calls).toContainEqual({ method: "revisions", args: [runRef, "b1"] });
-		expect(tsp.node("b1.revisions")).toMatchObject({ k: "section", p: { collapsed: true, collapsible: true } });
-		expect(tsp.node("b1.revision.2.text")).toMatchObject({ k: "md", p: { text: "Include recovery steps." } });
+		tsp.selectTab("r1");
+		expect(core.revisionReads).toContainEqual({ ref: runRef, block: "b1" });
+		expect(tsp.node("b1.revision.2.text")).toMatchObject({ k: "el", p: { tag: "div", text: core.history[0]!.prompt } });
 		expect(tsp.node("b1.revision.4.text").p?.text).toBe("Explain retention.");
 		expect(tsp.node("b1.revision.2.meta").p?.text).toContain("#2");
 		expect(tsp.node("b1.revision.4.meta").p?.text).toContain("1970-01-01 00:00:02");
-		expect(descendants(tsp.node("b1.revisions")).filter(node => node.k === "md").map(node => node.p?.text)).toEqual(["Include recovery steps.", "Explain retention."]);
 		expect(() => tsp.node("b1.revision.5.text")).toThrow();
 	});
-	test("a selected design block disables launches even from a task card", async () => {
+	test("design selections cannot launch but do not disable a task's own launch", async () => {
 		const core = new FakeCore();
 		core.run = { ...core.run, blocks: [item(), designItem("b2")] };
 		const { tsp } = await fixture(core);
-		tsp.click("run.r1.open");
-		expect(tsp.node("b1.launch").p?.actions).toEqual({ click: "invoke" });
-		expect(tsp.node("b2.launch").p?.actions).toBeUndefined();
+		tsp.selectTab("r1");
 		tsp.event({ ev: "change", id: "b1.selected", checked: true });
 		tsp.event({ ev: "change", id: "b2.selected", checked: true });
-		expect(tsp.node("b1.launch").p).toMatchObject({ attrs: { "aria-disabled": true } });
-		expect(tsp.node("b1.launch").p?.actions).toBeUndefined();
-		expect(tsp.node("b2.launch").p?.actions).toBeUndefined();
-		tsp.click("b1.launch"); tsp.click("b2.launch");
+		expect(tsp.node("selection.launch").p?.actions).toBeUndefined();
+		tsp.click("selection.launch");
 		expect(core.calls.filter(call => call.method === "requestLaunch")).toHaveLength(0);
-		tsp.event({ ev: "change", id: "b2.selected", checked: false });
+		expect(tsp.node("b1.launch").p?.actions).toEqual({ click: "invoke" });
 		tsp.click("b1.launch");
 		expect(core.calls.filter(call => call.method === "requestLaunch")).toEqual([{ method: "requestLaunch", args: ["r1", ["b1"]] }]);
+		tsp.click("nav.b2"); expect(() => tsp.node("b2.launch")).toThrow();
 	});
 });
 
-// #11: ask selection submits a change request; execution contract badges; folding keeps checks.
 const askDesign = "## A Cache\n\n```ask\nWhich cache?\n* Redis | keeps data\n- Memcached | no disk\n```\n";
-function choice(tsp: FakeTsp, index: number | "submit"): TspNode {
+function choice(tsp: FakeTsp, index: number): TspNode {
 	return tsp.node(`b1.design.view.p0.0.choice.${index}`);
 }
 async function realCore(design: string, coordinator: boolean) {
@@ -401,59 +423,135 @@ async function realCore(design: string, coordinator: boolean) {
 	return { core, store, tsp, events, stop: () => { core.stop(); rmSync(directory, { recursive: true, force: true }); } };
 }
 
-describe("ask selection, execution contract badges and card folding", () => {
-	test("an ask starts at its suggestion; the chosen option is journaled and sent to the coordinator", async () => {
-		const f = await realCore(askDesign, true);
+describe("ask drafts, navigator and execution contract", () => {
+	test("navigator mounts one block, preserves its draft across navigation and reports exact per-block summaries", async () => {
+		const core = new FakeCore();
+		core.template = { ...core.template, blocks: [
+			{ ...item("b1", "First body."), references: [] },
+			designItem("b2", "Second body."),
+		] };
+		const tsp = new FakeTsp();
+		const lastFrameFacts = { blockError: true, documentError: false, pendingOverdue: true };
+		tsp.blockFacts.set("b2", lastFrameFacts);
+		await fixture(core, tsp);
+		const cards = () => descendants(tsp.root!).filter(node => /^b\d+\.card$/.test(node.id)).map(node => node.id);
+		const summary = (block: BlockId) => core.statuses.filter(entry => entry.block === block).at(-1)?.status;
+		expect(cards()).toEqual(["b1.card"]);
+		expect(tsp.frames.at(-1)?.blocks).toEqual(["b1"]);
+		expect(summary("b1")).toEqual({ ...tsp.facts, chartNodes: 0, draftErrors: 0, view: { md: ["Task", "First body."], images: [] } });
+		expect(summary("b2")).toEqual({ ...lastFrameFacts, chartNodes: 0, draftErrors: 0, view: { md: ["Storage design", requirement, "Second body."], images: [] } });
+		const before = summary("b2");
+		tsp.click("b1.body.pencil"); await tick(); tsp.keys(" More.");
+		const draft = core.template.blocks[0]!.lock;
+		tsp.click("nav.b2");
+		expect(cards()).toEqual(["b2.card"]);
+		expect(tsp.frames.at(-1)?.blocks).toEqual(["b2"]);
+		expect(tsp.frames.at(-1)?.ops.at(-1)).toEqual(["focus", null]);
+		expect(core.template.blocks[0]!.lock).toEqual(draft);
+		expect(() => tsp.node("b1.body")).toThrow();
+		tsp.click("nav.b1");
+		expect(tsp.node("b1.body")).toMatchObject({ k: "editor", p: { text: "First body. More." } });
+		const at = core.statuses.length;
+		const frameAt = tsp.frames.length;
+		core.listener(template); await tick();
+		expect(tsp.frames.slice(frameAt).every(frame => frame.blocks.length === 1 && frame.blocks[0] === "b1")).toBe(true);
+		expect(core.statuses.slice(at).map(entry => entry.block)).toEqual(["b1", "b2"]);
+		expect(summary("b2")).toEqual(before);
+		core.change(template, "b2", value => ({ ...value, block: { ...value.block, title: "Updated while unmounted" } }));
+		core.listener(template); await tick();
+		expect(summary("b2")).toEqual({ ...lastFrameFacts, chartNodes: 0, draftErrors: 0, view: { md: ["Updated while unmounted", requirement, "Second body."], images: [] } });
+		expect(cards()).toEqual(["b1.card"]);
+		expect(tsp.frames.at(-1)?.blocks).toEqual(["b1"]);
+	});
+
+	test("pins are read-only, survive navigation, and local references and cited rows navigate correctly", async () => {
+		const core = new FakeCore();
+		const citingTask = (id: BlockId): BlockView => {
+			const value = item(id, "Use ((b1)).");
+			return { ...value, references: [{
+				...value.references[0]!, external: false,
+				reference: { text: "((b1))", targetText: "b1", expressionText: null, offset: 4 },
+				expansion: { kind: "Ok", text: requirement, sources: [] },
+			}] };
+		};
+		core.template = { ...core.template, blocks: [designItem("b1", askDesign), citingTask("b2"), citingTask("b3")] };
+		const { tsp } = await fixture(core);
+		expect(tsp.node("b1.cited.0").p?.actions).toEqual({ click: "invoke" });
+		expect(tsp.node("b1.cited.1").p?.actions).toEqual({ click: "invoke" });
+		tsp.click("b1.pin"); tsp.click("nav.b2");
+		const reference = tsp.node("pin.b1");
+		expect(descendants(reference).some(node => node.k === "editor" || node.k === "input" || node.p?.tag === "input")).toBe(false);
+		expect(descendants(reference).filter(node => node.p?.actions).map(node => node.id)).toEqual(["pin.b1.open", "pin.b1.unpin"]);
+		expect(tsp.node("b2.card").c!.findIndex(node => node.id === "pin.b1")).toBeLessThan(tsp.node("b2.card").c!.findIndex(node => node.id === "b2.body.panel"));
+		tsp.click("nav.b3"); expect(tsp.node("pin.b1")).toBeDefined();
+		tsp.click("pin.b1.unpin"); expect(() => tsp.node("pin.b1")).toThrow();
+		tsp.click("nav.b2"); tsp.click("b2.reference.0.pin"); expect(tsp.node("pin.b1")).toBeDefined();
+		tsp.click("b2.body.pencil"); await tick(); tsp.keys(" More context."); tsp.click("b2.body.commit"); await tick();
+		expect(core.template.blocks[1]!.block.content).toEqual({ kind: "task", body: "Use ((b1)). More context." });
+		expect(core.template.blocks[0]!.block.content).toEqual(designItem("b1", askDesign).block.content);
+		tsp.click("pin.b1.open"); expect(tsp.node("b1.card")).toBeDefined();
+		tsp.click("b1.cited.1"); expect(tsp.node("b3.card")).toBeDefined(); expect(tsp.node("pin.b1")).toBeDefined();
+		tsp.click("nav.b1"); tsp.click("b1.pin"); tsp.click("nav.b2"); expect(() => tsp.node("pin.b1")).toThrow();
+	});
+
+	test("ask starts unchecked, replaces its draft answer and submits two answers and free text once", async () => {
+		const second = "\n```ask\nWhich policy?\n* LRU\n- FIFO\n```\n";
+		const f = await realCore(askDesign + second, true);
 		try {
-			expect(choice(f.tsp, 0).p).toMatchObject({ type: "radio", checked: true, value: "Redis" });
-			expect(choice(f.tsp, 1).p).toMatchObject({ type: "radio", checked: false, value: "Memcached" });
+			expect([0, 1].map(index => choice(f.tsp, index).p?.checked)).toEqual([false, false]);
+			expect(f.tsp.node("b1.design.view.p0.1.choice.0").p?.checked).toBe(false);
+			expect(f.tsp.node("b1.design.view.p0.1.choice.1").p?.checked).toBe(false);
+			expect(choice(f.tsp, 0).p).toMatchObject({ tag: "input", type: "radio", value: "Redis" });
+			f.tsp.event({ ev: "change", id: "b1.design.view.p0.0.choice.0", checked: true }); await tick();
+			expect(f.core.view(template).blocks[0]!.lock).toEqual({ kind: "human", field: "prompt", draft: "针对问题「Which cache?」，选择：Redis" });
+			f.tsp.keys("\nKeep writes durable.");
 			f.tsp.event({ ev: "change", id: "b1.design.view.p0.0.choice.1", checked: true }); await tick();
 			expect(choice(f.tsp, 0).p?.checked).toBe(false);
 			expect(choice(f.tsp, 1).p?.checked).toBe(true);
-			f.tsp.click("b1.design.view.p0.0.choice.submit"); await tick();
-			expect(f.store.readRevisions(template).map(revision => revision.prompt)).toEqual(["针对问题「Which cache?」，选择：Memcached"]);
+			expect(choice(f.tsp, 1).p?.disabled).toBe(false);
+			f.tsp.event({ ev: "change", id: "b1.design.view.p0.1.choice.1", checked: true }); await tick();
+			const prompt = "针对问题「Which cache?」，选择：Memcached\nKeep writes durable.\n针对问题「Which policy?」，选择：FIFO";
+			expect(f.core.view(template).blocks[0]!.lock).toEqual({ kind: "human", field: "prompt", draft: prompt });
+			expect(f.store.readRevisions(template)).toEqual([]);
+			expect(f.events).toEqual([]);
+			f.tsp.click("b1.prompt.submit"); await tick();
+			expect(f.store.readRevisions(template).map(revision => revision.prompt)).toEqual([prompt]);
 			expect(f.events).toEqual([{ event: "revision_requested", data: { block: "b1", revision: 1 } }]);
 			expect(f.core.view(template).blocks[0]!.lock).toEqual({ kind: "none" });
-			expect(descendants(f.tsp.node("b1.revisions")).filter(node => node.k === "md").map(node => node.p?.text)).toEqual(["针对问题「Which cache?」，选择：Memcached"]);
+			expect(f.tsp.node("b1.revision.1.text")).toMatchObject({ k: "el", p: { tag: "div", text: prompt } });
 		} finally { f.stop(); }
 	});
 
 	test("without a coordinator the refused choice stays in the block's prompt draft and the error is shown", async () => {
 		const f = await realCore(askDesign, false);
 		try {
-			f.tsp.click("b1.design.view.p0.0.choice.submit"); await tick();
+			f.tsp.event({ ev: "change", id: "b1.design.view.p0.0.choice.0", checked: true }); await tick();
+			f.tsp.click("b1.prompt.submit"); await tick();
 			expect(f.store.readRevisions(template)).toEqual([]);
 			expect(f.core.view(template).blocks[0]!.lock).toEqual({ kind: "human", field: "prompt", draft: "针对问题「Which cache?」，选择：Redis" });
 			expect(f.tsp.node("b1.prompt").p?.text).toBe("针对问题「Which cache?」，选择：Redis");
-			expect(f.tsp.node("error.0").p?.text).toBe("没有协调者连接：修改 prompt 仍保留，协调者连接后再提交");
-			expect(choice(f.tsp, "submit").p).toMatchObject({ attrs: { "aria-disabled": true } });
+			expect(f.tsp.node("error.0").p?.text).toContain("没有协调者连接");
+			expect(choice(f.tsp, 0).p?.disabled).toBe(false);
 		} finally { f.stop(); }
 	});
 
-	test("multi keeps an emptied choice across redraws, disables submit, and resets when the ask's options change", async () => {
-		const core = new FakeCore();
+	test("multi answers use option order and removing the last answer keeps free text without committing", async () => {
 		const multi = "## A Cache\n\n```ask multi\nWhich stores?\n* Redis\n* Postgres\n- Memcached\n```\n";
-		core.template = { ...core.template, blocks: [designItem("b1", multi)] };
-		const { tsp } = await fixture(core);
-		expect([0, 1, 2].map(index => choice(tsp, index).p?.checked)).toEqual([true, true, false]);
-		expect(choice(tsp, 0).p?.type).toBe("checkbox");
-		tsp.event({ ev: "change", id: "b1.design.view.p0.0.choice.0", checked: false });
-		tsp.event({ ev: "change", id: "b1.design.view.p0.0.choice.1", checked: false });
-		core.listener(template); await tick();
-		expect([0, 1, 2].map(index => choice(tsp, index).p?.checked)).toEqual([false, false, false]);
-		expect(choice(tsp, "submit").p).toMatchObject({ attrs: { "aria-disabled": true } });
-		tsp.click("b1.design.view.p0.0.choice.submit");
-		expect(core.calls.filter(call => call.method === "pencil")).toEqual([]);
-		tsp.event({ ev: "change", id: "b1.design.view.p0.0.choice.2", checked: true });
-		tsp.click("b1.design.view.p0.0.choice.submit"); await tick();
-		expect(core.calls.filter(call => ["pencil", "setDraft", "commit"].includes(call.method))).toEqual([
-			{ method: "pencil", args: [template, "b1", "prompt"] },
-			{ method: "setDraft", args: [template, "b1", "针对问题「Which stores?」，选择：Memcached"] },
-			{ method: "commit", args: [template, "b1"] },
-		]);
-		core.change(template, "b1", () => designItem("b1", multi.replace("- Memcached", "* SQLite")));
-		core.listener(template); await tick();
-		expect([0, 1, 2].map(index => choice(tsp, index).p?.checked)).toEqual([true, true, true]);
+		const f = await realCore(multi, true);
+		try {
+			expect([0, 1, 2].map(index => choice(f.tsp, index).p?.checked)).toEqual([false, false, false]);
+			expect(choice(f.tsp, 0).p?.type).toBe("checkbox");
+			f.tsp.click("b1.prompt.pencil"); await tick(); f.tsp.keys("Keep this explanation.\n\nAnd this paragraph.");
+			f.tsp.event({ ev: "change", id: "b1.design.view.p0.0.choice.2", checked: true });
+			f.tsp.event({ ev: "change", id: "b1.design.view.p0.0.choice.0", checked: true }); await tick();
+			expect(f.core.view(template).blocks[0]!.lock).toEqual({ kind: "human", field: "prompt", draft: "Keep this explanation.\n\nAnd this paragraph.\n针对问题「Which stores?」，选择：Redis、Memcached" });
+			f.tsp.event({ ev: "change", id: "b1.design.view.p0.0.choice.2", checked: false });
+			f.tsp.event({ ev: "change", id: "b1.design.view.p0.0.choice.0", checked: false }); await tick();
+			expect(f.core.view(template).blocks[0]!.lock).toEqual({ kind: "human", field: "prompt", draft: "Keep this explanation.\n\nAnd this paragraph." });
+			expect([0, 1, 2].map(index => choice(f.tsp, index).p?.checked)).toEqual([false, false, false]);
+			expect(f.store.readRevisions(template)).toEqual([]);
+			expect(f.events).toEqual([]);
+		} finally { f.stop(); }
 	});
 
 	test("ask controls are unavailable while the block is locked, another draft exists, or the Run has finished", async () => {
@@ -461,11 +559,17 @@ describe("ask selection, execution contract badges and card folding", () => {
 		core.template = { ...core.template, blocks: [{ ...designItem("b1", askDesign), lock: { kind: "coordinator", request: "q1" } }] };
 		core.run = { ...core.run, run: { ...core.run.run!, status: "finished", finishedAt: 3000, updateDue: null }, blocks: [designItem("b1", askDesign)] };
 		const { tsp } = await fixture(core);
-		expect(choice(tsp, "submit").p).toMatchObject({ attrs: { "aria-disabled": true } });
 		expect(choice(tsp, 0).p?.disabled).toBe(true);
-		tsp.click("run.r1.open");
-		expect(choice(tsp, "submit").p).toMatchObject({ attrs: { "aria-disabled": true } });
-		tsp.click("b1.design.view.p0.0.choice.submit");
+		tsp.event({ ev: "change", id: "b1.design.view.p0.0.choice.0", checked: true });
+		expect(core.calls.filter(call => call.method === "pencil")).toEqual([]);
+		core.template = { ...core.template, blocks: [designItem("b1", askDesign), { ...item("b2"), lock: { kind: "human", field: "body", draft: "Other draft" } }] };
+		core.listener(template); await tick();
+		expect(choice(tsp, 0).p?.disabled).toBe(true);
+		tsp.event({ ev: "change", id: "b1.design.view.p0.0.choice.0", checked: true });
+		expect(core.calls.filter(call => call.method === "pencil")).toEqual([]);
+		tsp.selectTab("r1");
+		expect(choice(tsp, 0).p?.disabled).toBe(true);
+		tsp.event({ ev: "change", id: "b1.design.view.p0.0.choice.0", checked: true });
 		expect(core.calls.filter(call => call.method === "pencil")).toEqual([]);
 	});
 
@@ -476,49 +580,9 @@ describe("ask selection, execution contract badges and card folding", () => {
 		const { tsp } = await fixture(core);
 		expect(tsp.node("b1.agent")).toMatchObject({ k: "badge", p: { text: "agent: task:mid" } });
 		expect(tsp.node("b1.isolated")).toMatchObject({ k: "badge", p: { text: "isolated: false" } });
+		tsp.click("nav.b2");
 		expect(() => tsp.node("b2.agent")).toThrow();
 		expect(() => tsp.node("b2.isolated")).toThrow();
-	});
-
-	test("folding hides a card's body and design but keeps state, title and identical render status", async () => {
-		const core = new FakeCore();
-		core.template = { ...core.template, blocks: [item("b1"), designItem("b2")] };
-		const { tsp } = await fixture(core);
-		const lastStatus = (block: BlockId) => core.statuses.filter(status => status.block === block).at(-1)?.status;
-		const open = { b1: lastStatus("b1"), b2: lastStatus("b2") };
-		expect(open.b1?.chartNodes).toBe(1);
-		expect(open.b2?.view.md.length).toBeGreaterThan(0);
-		tsp.click("b1.fold");
-		expect(tsp.node("b1.card").c?.map(node => node.id)).toEqual(["b1.state", "b1.title.view", "b1.notice.0"]);
-		expect(tsp.node("b1.fold").p?.text).toBe("展开");
-		expect(() => tsp.node("b1.body.view.0")).toThrow();
-		expect(tsp.node("b2.design")).toBeDefined();
-		tsp.click("cards.collapse");
-		expect(tsp.node("b2.card").c?.map(node => node.id)).toEqual(["b2.state", "b2.title.view"]);
-		expect(lastStatus("b1")).toEqual(open.b1);
-		expect(lastStatus("b2")).toEqual(open.b2);
-		tsp.click("cards.expand");
-		expect(tsp.node("b1.body.view.0")).toBeDefined();
-		expect(tsp.node("b2.design")).toBeDefined();
-		expect(tsp.node("b1.fold").p?.text).toBe("折叠");
-		tsp.click("b2.fold");
-		tsp.event({ ev: "other", body: { ev: "select", id: "tabs", item: "r1" } });
-		tsp.event({ ev: "other", body: { ev: "select", id: "tabs", item: "template" } });
-		expect(tsp.node("b2.design")).toBeDefined();
-	});
-
-	test("a card with an open draft folds too: its editor unmounts, focus leaves it, and the draft returns on opening", async () => {
-		const { core, tsp } = await fixture();
-		tsp.click("b1.body.pencil"); await tick();
-		expect(tsp.frames.at(-1)?.ops.at(-1)).toEqual(["focus", "b1.body"]);
-		tsp.click("b1.fold");
-		expect(tsp.node("b1.card").c?.map(node => node.id)).toEqual(["b1.state", "b1.title.view", "b1.notice.0"]);
-		expect(tsp.node("b1.lock").p?.text).toBe("人正在编辑");
-		expect(tsp.node("b1.fold").p?.text).toBe("展开");
-		expect(tsp.frames.at(-1)?.ops.at(-1)).toEqual(["focus", null]);
-		tsp.click("b1.fold");
-		expect(tsp.node("b1.body").p?.text).toBe(core.template.blocks[0]!.lock.kind === "human" ? core.template.blocks[0]!.lock.draft : "");
-		expect(tsp.node("b1.body").k).toBe("editor");
 	});
 
 	test("title, body and requirement editors expose discard buttons that drop drafts without mutating blocks", async () => {
@@ -538,32 +602,16 @@ describe("ask selection, execution contract badges and card folding", () => {
 		tsp.click("b1.body.discard"); await tick();
 		expect(core.template.blocks[0]!.block.content).toEqual({ kind: "task", body });
 
-		tsp.click("b2.requirement.pencil"); await tick();
+		tsp.click("nav.b2"); tsp.click("b2.requirement.pencil"); await tick();
 		tsp.keys(" discarded");
 		tsp.click("b2.requirement.discard"); await tick();
 		expect(core.template.blocks[1]!.block.content).toEqual({ kind: "design", requirement, design });
 	});
 
-	test("folding while editing title preserves b1.title.view with the current draft and distinguishes block types in card head", async () => {
-		const core = new FakeCore();
-		core.template = { ...core.template, blocks: [item("b1"), designItem("b2"), { ...item("b3", "```js\nawait playbook.agent({ run: 'r1', blocks: ['b1'] })\n```"), block: { id: "b3", title: "", done: false, content: { kind: "task", body: "```js\nawait playbook.agent({ run: 'r1', blocks: ['b1'] })\n```" } } }] };
-		const { tsp } = await fixture(core);
-		expect(tsp.node("b1.card").p?.head).toContain("执行块");
-		expect(tsp.node("b2.card").p?.head).toContain("设计块");
-		expect(tsp.node("b3.card").p?.head).toContain("编排块");
-		expect(tsp.node("b3.card").p?.head).toContain("未命名块");
-
-		tsp.click("b1.title.pencil"); await tick();
-		tsp.keys(" Draft");
-		tsp.click("b1.fold");
-		expect(tsp.node("b1.card").c?.map(node => node.id)).toEqual(["b1.state", "b1.title.view", "b1.notice.0"]);
-		expect(tsp.node("b1.title.view").p?.text).toBe("Task Draft");
-	});
-
 	test("inserting a block and starting a Run with real Core auto-focuses the new block title and switches to the new Run", async () => {
 		const f = await realCore(askDesign, true);
 		try {
-			f.tsp.click("b1.insert"); await tick();
+			f.tsp.click("block.insert.task"); await tick();
 			expect(f.core.view(template).blocks.map(entry => entry.block.id)).toEqual(["b1", "b2"]);
 			expect(f.core.view(template).blocks[1]!.lock).toEqual({ kind: "human", field: "title", draft: "" });
 			expect(f.tsp.frames.at(-1)?.ops.at(-1)).toEqual(["focus", "b2.title"]);
@@ -573,7 +621,7 @@ describe("ask selection, execution contract badges and card folding", () => {
 			f.tsp.keys("LiveRun");
 			f.tsp.click("run.start"); await tick();
 			expect(f.tsp.node("tabs").p?.active).toBe("r1");
-			expect(f.tsp.node("heading").p?.text).toBe("# LiveRun");
+			expect(f.tsp.node("heading").p?.text).toBe("LiveRun");
 		} finally { f.stop(); }
 	});
 
@@ -587,18 +635,17 @@ describe("ask selection, execution contract badges and card folding", () => {
 			closed: closed ? { at: 4000, by: "human" } : null,
 		});
 		const { tsp } = await fixture(core);
-		tsp.click("run.r1.open");
+		tsp.selectTab("r1"); tsp.click("nav.activity");
 		tsp.click("timeline.1.launch");
 		expect(tsp.node("launch-info.l1.text").p?.text).toContain('"closed": null');
 		closed = true;
-		tsp.click("b1.launch.l1.close");
+		tsp.click("nav.b1"); tsp.click("b1.launch.l1.close"); tsp.click("nav.activity");
 		core.listener(runRef); await tick();
 		expect(tsp.node("launch-info.l1.text").p?.text).toContain('"by": "human"');
 
 		tsp.event({ ev: "change", id: "post.kind.failure", checked: true });
 		tsp.event({ ev: "change", id: "post.block.b1", checked: true });
 		core.run = { ...core.run, run: { ...core.run.run!, status: "finished", finishedAt: 5000, updateDue: null } };
-		tsp.click("run.finish");
 		core.listener(runRef); await tick();
 		expect(tsp.node("post.kind.retrospective").p?.checked).toBe(true);
 		expect(tsp.node("post.block.none").p?.checked).toBe(true);
@@ -609,7 +656,8 @@ describe("ask selection, execution contract badges and card folding", () => {
 	test("coordinator connection clears disconnected action error while preserving Tern render error", async () => {
 		const f = await realCore(askDesign, false);
 		try {
-			f.tsp.click("b1.design.view.p0.0.choice.submit"); await tick();
+			f.tsp.event({ ev: "change", id: "b1.design.view.p0.0.choice.0", checked: true }); await tick();
+			f.tsp.click("b1.prompt.submit"); await tick();
 			expect(f.tsp.node("error.0").p?.text).toContain("没有协调者连接");
 			f.tsp.event({ ev: "error", msg: "Rejected SVG" });
 			expect(f.tsp.node("error.0").p?.text).toBe("Rejected SVG");

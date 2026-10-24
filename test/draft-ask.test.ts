@@ -134,6 +134,7 @@ describe("ask rendering without controls (the checks' hidden pass)", () => {
 	test("shows the question, accent suggestion badge, ordinary options, muted notes and single-choice explanation", () => {
 		const rendered = renderAsk(value(parseAsk(input(example))), context);
 		expect(rendered.diagnostics).toEqual([]);
+		expect(rendered.nodes[0]).toMatchObject({ k: "el", p: { tag: "div", class: "am-ask" } });
 		const nodes = descendants(rendered.nodes);
 		expect(node(nodes, "question").p).toEqual({ spans: [{ t: "Which cache do we use?", s: "strong" }] });
 		expect(node(nodes, "option.0.label").p).toEqual({ spans: [{ t: "Redis", s: "accent" }] });
@@ -168,7 +169,7 @@ describe("ask rendering without controls (the checks' hidden pass)", () => {
 		expect(new Set(nodes.map(candidate => candidate.id)).size).toBe(nodes.length);
 		for (const candidate of nodes) {
 			expect(candidate.id.startsWith(`${context.id}.`)).toBe(true);
-			expect(["col", "row", "text", "badge"]).toContain(candidate.k);
+			expect(["el", "col", "row", "text", "badge"]).toContain(candidate.k);
 			for (const property of ["act", "actions", "checked", "value", "onChange", "onClick"]) {
 				expect(candidate.p).not.toHaveProperty(property);
 			}
@@ -186,9 +187,9 @@ describe("ask rendering without controls (the checks' hidden pass)", () => {
 	test("with an askControl hook, the UI's controls replace the static option list and receive the parsed ask", () => {
 		const spec = value(parseAsk(input(example)));
 		const calls: { id: string; spec: AskSpec }[] = [];
-		const control: TspNode = { id: "panel.cache.choice.submit", k: "el", p: { tag: "button" } };
+		const control: TspNode = { id: "panel.cache.choice.0", k: "el", p: { tag: "input", type: "radio" } };
 		const nodes = descendants(renderAsk(spec, { ...context, askControl: (id, given) => { calls.push({ id, spec: given }); return [control]; } }).nodes);
 		expect(calls).toEqual([{ id: "panel.cache.choice", spec }]);
-		expect(nodes.map(candidate => candidate.id)).toEqual(["panel.cache.ask", "panel.cache.question", "panel.cache.choice.submit", "panel.cache.mode"]);
+		expect(nodes.map(candidate => candidate.id)).toEqual(["panel.cache.ask", "panel.cache.question", "panel.cache.choice.0", "panel.cache.mode"]);
 	});
 });

@@ -21,10 +21,43 @@ describe("renderDraft", () => {
 		expect(new Set(all).size).toBe(all.length);
 	});
 
-	test("a sheet lays panels in rows of cols, a span taking that many columns", () => {
+	test("a sheet uses semantic panels with column spans inside an article", () => {
 		const drawn = renderDraft("---\ncols: 2\n---\n## A One\nx\n## B Two {span=2}\ny\n## C Three\nz\n", host);
-		const grid = drawn.nodes.find(node => node.id === "b1.design.view.panels")!;
-		expect(grid.c!.map(row => row.c!.filter(cell => cell.k === "card").length)).toEqual([1, 1, 1]);
+		expect(drawn.nodes[0]).toMatchObject({ k: "el", p: { tag: "article", class: "am-draft" } });
+		const grid = flattenNodes(drawn.nodes).find(node => node.id === "b1.design.view.panels")!;
+		expect(grid).toMatchObject({ k: "el", p: { tag: "div", class: "am-sheet am-cols-2" } });
+		expect(grid.c!.map(panel => panel.p)).toEqual([
+			{ tag: "section", class: "am-panel am-span-1" },
+			{ tag: "section", class: "am-panel am-span-2" },
+			{ tag: "section", class: "am-panel am-span-1" },
+		]);
+	});
+
+	test.each([
+		["flow", "```flow\nA -> B\n```"],
+		["er", "```er\nUser\n```"],
+		["sequence", "```sequence\nA -> B: request\n```"],
+		["tree", "```tree\nRoot\n  First child\n  Second child\n```"],
+		["timeline", "```timeline\nNow | Release\n```"],
+		["annot", "```annot\nRead [this]{note}.\n```"],
+		["svg", '```svg\n<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="10" height="10"/></svg>\n```'],
+		["image", "![Diagram](example.png)"],
+	])("%s drawings occupy wide panels without widening adjacent prose panels", (_kind, source) => {
+		const drawn = renderDraft(`---\ncols: 2\n---\n## A Drawing\n${source}\n\n## B Prose\nKeep this readable.\n`, {
+			...host, context: { ...host.context, readFile: path => ({ ok: true, path, bytes: new Uint8Array([1, 2, 3]) }) },
+		});
+		expect(drawn.diagnostics).toEqual([]);
+		const grid = flattenNodes(drawn.nodes).find(node => node.id === "b1.design.view.panels")!;
+		expect(grid.c?.[0]).toMatchObject({ k: "el", p: { tag: "section", class: "am-panel am-span-1 am-panel-wide" } });
+		expect(flattenNodes([grid.c![0]!]).some(node => node.k === "image")).toBe(true);
+		expect(grid.c?.[1]).toMatchObject({ k: "el", p: { tag: "section", class: "am-panel am-span-1" } });
+	});
+
+	test("doc drafts use a document container rather than a sheet grid", () => {
+		const drawn = renderDraft("---\ntemplate: doc\n---\n## A Explanation\nPlain text.\n", host);
+		expect(drawn.diagnostics).toEqual([]);
+		expect(drawn.nodes[0]).toMatchObject({ k: "el", p: { tag: "article", class: "am-draft" } });
+		expect(flattenNodes(drawn.nodes).find(node => node.id === "b1.design.view.panels")).toMatchObject({ k: "el", p: { tag: "div", class: "am-doc" } });
 	});
 
 	test.each(["flow", "typescript"])("a %s fence over 1000 lines is diagnosed and not drawn, without hiding other panels", language => {
