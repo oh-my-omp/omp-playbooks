@@ -317,11 +317,12 @@ function resultTargets(roots: readonly BlockId[], contents: ReadonlyMap<BlockId,
 
 /** A design block as prompt text: both parts by default, or what `selectors` pick (requirement, design, panels). */
 function selectDesign(content: Extract<BlockContent, { kind: "design" }>, selectors: readonly Selector[]): Selection {
-	if (selectors.length === 0) return { ok: true, text: `<requirement>\n${content.requirement}\n</requirement>\n\n<design>\n${content.design}\n</design>` };
+	// An empty requirement is not a requirement: the agent gets no empty <requirement> element.
+	if (selectors.length === 0) return { ok: true, text: [...(content.requirement.trim() ? [`<requirement>\n${content.requirement}\n</requirement>`] : []), `<design>\n${content.design}\n</design>`].join("\n\n") };
 	const selected: string[] = [];
 	for (const selector of selectors) {
 		switch (selector.kind) {
-			case "requirement": selected.push(content.requirement); break;
+			case "requirement": if (content.requirement.trim()) selected.push(content.requirement); break;
 			case "design": selected.push(content.design); break;
 			case "panel": {
 				const panel = panelText(content.design, selector.id);

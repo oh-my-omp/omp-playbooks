@@ -113,23 +113,38 @@ async function fixture(core = new FakeCore(), tsp = new FakeTsp()): Promise<{ co
 const tick = () => Promise.resolve();
 
 describe("K4 form UI", () => {
-	test("pencil → native input → Esc owns draft through Core and leaves blank clicks alone", async () => {
+	test("pencil → native input → Esc keeps the draft, Enter saves the title and says so", async () => {
 		const { core, tsp } = await fixture(); tsp.click("b1.title.pencil"); await tick();
 		expect(tsp.node("b1.title").k).toBe("input"); expect(tsp.frames.at(-1)?.ops.at(-1)).toEqual(["focus", "b1.title"]);
 		tsp.event({ ev: "edit", id: "b1.title", from: 4, to: 4, text: "!", cursor: 5, len: 4 }); tsp.click("main");
 		expect(core.calls.map(call => call.method)).toEqual(["pencil", "setDraft"]);
-		tsp.keys("\x1b"); await tick();
-		expect(core.calls).toEqual([{ method: "pencil", args: [template, "b1", "title"] }, { method: "setDraft", args: [template, "b1", "Task!"] }, { method: "commit", args: [template, "b1"] }]);
+		tsp.keys("\x1b"); tsp.keys("\x1b[27u"); await tick();
+		expect(core.calls.map(call => call.method)).toEqual(["pencil", "setDraft"]);
+		expect(core.template.blocks[0]?.lock).toEqual({ kind: "human", field: "title", draft: "Task!" });
+		// The navigator keeps the committed title while the draft is open.
+		expect(tsp.node("nav.b1.title").p?.text).toBe("Task");
+		tsp.keys("\r"); await tick();
+		expect(core.calls.at(-1)).toEqual({ method: "commit", args: [template, "b1"] });
 		expect(core.template.blocks[0]?.block.title).toBe("Task!"); expect(tsp.node("b1.title.heading").p?.text).toBe("Task!");
+		expect(tsp.node("nav.b1.title").p?.text).toBe("Task!");
+		expect(tsp.node("b1.title.notice").p).toMatchObject({ text: "已保存" });
+	});
+	test("Ctrl+Enter saves a multi-line field; plain Enter is a new line", async () => {
+		const { core, tsp } = await fixture(); tsp.click("b1.body.pencil"); await tick();
+		tsp.keys("x"); tsp.keys("\r"); tsp.keys("y"); await tick();
+		expect(core.template.blocks[0]?.lock).toMatchObject({ kind: "human", field: "body", draft: `${body}x\ny` });
+		tsp.keys("\x1b[13;5u"); await tick();
+		expect(core.calls.at(-1)).toEqual({ method: "commit", args: [template, "b1"] });
+		expect(tsp.node("b1.body.notice").p).toMatchObject({ text: "已保存" });
 	});
 	test("stale edits drop without writing and expose the exact notice", async () => {
 		const { core, tsp } = await fixture(); tsp.click("b1.title.pencil"); await tick(); tsp.keys("new");
 		tsp.event({ ev: "edit", id: "b1.title", from: 0, to: 4, text: "stale", cursor: 5, len: 4 });
 		expect(core.calls.filter(call => call.method === "setDraft")).toHaveLength(1); expect(tsp.node("b1.title.notice").p?.text).toBe("一次输入因文本已变化未应用"); expect(tsp.node("b1.title").p?.text).toBe("Tasknew");
 	});
-	test("an edit arriving after Esc committed the field is not silently lost", async () => {
+	test("an edit arriving after Enter committed the title is not silently lost", async () => {
 		const { core, tsp } = await fixture(); tsp.click("b1.title.pencil"); await tick();
-		tsp.keys("\x1b"); await tick();
+		tsp.keys("\r"); await tick();
 		tsp.event({ ev: "edit", id: "b1.title", from: 0, to: 4, text: "replacement", cursor: 11, len: 4 }); await tick();
 		expect(core.calls.filter(call => call.method === "setDraft")).toHaveLength(0);
 		expect(tsp.node("b1.title.notice").p?.text).toBe("一次输入因文本已变化未应用");
@@ -142,23 +157,25 @@ describe("K4 form UI", () => {
 		tsp.event({ ev: "undo", id: "b1.title" }); expect(core.calls.at(-1)?.args.at(-1)).toBe("Task");
 		tsp.click("b1.title.commit"); expect(core.calls.at(-1)?.method).toBe("commit");
 	});
-	test("text keys arriving after Esc committed the field are not silently lost", async () => {
+	test("text keys arriving after Ctrl+Enter committed the field are not silently lost", async () => {
 		const { core, tsp } = await fixture(); tsp.click("b1.body.pencil"); await tick();
-		tsp.keys("\x1b"); await tick();
+		tsp.keys("\x1b[13;5u"); await tick();
 		tsp.keys("late text"); await tick();
 		expect(core.calls.filter(call => call.method === "setDraft")).toHaveLength(0);
 		expect(tsp.node("b1.body.notice").p?.text).toBe("一次输入因文本已变化未应用");
 	});
-	test("navigation keys after a commit change no text and show nothing", async () => {
+	test("navigation keys after a commit change no text and show only the save", async () => {
 		const { tsp } = await fixture(); tsp.click("b1.body.pencil"); await tick();
-		tsp.keys("\x1b"); await tick(); tsp.keys("\x1b[D"); await tick();
-		expect(() => tsp.node("b1.body.notice")).toThrow("Missing b1.body.notice");
+		tsp.keys("\x1b[13;5u"); await tick(); tsp.keys("\x1b[D"); await tick();
+		expect(tsp.node("b1.body.notice").p?.text).toBe("未修改");
 	});
-	test("coalesced pty reads and split paste preserve text before Esc, including kitty keys", async () => {
+	test("coalesced pty reads and split paste preserve text around Esc, including kitty keys", async () => {
 		const { core, tsp } = await fixture(); tsp.click("b1.title.pencil"); await tick();
 		tsp.keys("\x1b[200~pa"); tsp.keys("ste\x1b[201~");
-		tsp.keys("\x1b[33u"); tsp.keys(" end\x1b"); await tick();
-		expect(core.template.blocks[0]?.block.title).toBe("Taskpaste! end");
+		tsp.keys("\x1b[33u"); tsp.keys(" end\x1b"); tsp.keys(" more"); await tick();
+		expect(core.template.blocks[0]?.lock).toEqual({ kind: "human", field: "title", draft: "Taskpaste! end more" });
+		tsp.keys("\x1b[13u"); await tick();
+		expect(core.template.blocks[0]?.block.title).toBe("Taskpaste! end more");
 		expect(core.calls.at(-1)?.method).toBe("commit");
 	});
 	test("editor ancestors have no click and other pencils/locked controls are unavailable", async () => {
@@ -198,12 +215,18 @@ describe("K4 form UI", () => {
 		expect(core.calls.at(-1)).toEqual({ method: "closeLaunch", args: ["l1"] });
 	});
 	test("Run forms, update reminder, timeline quotes, filter and full Launch record", async () => {
-		const { core, tsp } = await fixture(); tsp.event({ ev: "focus", id: "run.name" }); tsp.keys("Incident"); tsp.event({ ev: "focus", id: "run.every" }); tsp.keys("60"); tsp.click("run.start"); expect(core.calls.at(-1)).toEqual({ method: "startRun", args: ["Incident", 60] });
+		const { core, tsp } = await fixture(); tsp.event({ ev: "focus", id: "run.name" }); tsp.keys("Incident"); tsp.event({ ev: "focus", id: "run.every" }); tsp.keys("60"); tsp.keys("\r"); expect(core.calls.at(-1)).toEqual({ method: "startRun", args: ["Incident", 60] });
 		tsp.selectTab("r1"); tsp.click("nav.activity"); expect(tsp.node("run.due.time").p?.text).toContain("状态更新已到期"); expect(tsp.node("timeline.2.record.quote").p?.text).toBe("取自会话 session-a 的消息 message-a");
 		tsp.event({ ev: "change", id: "run.snooze.duration.300", checked: true }); tsp.click("run.snooze"); expect(core.calls.at(-1)).toEqual({ method: "snooze", args: ["r1", 300] });
 		tsp.event({ ev: "change", id: "post.block.b1", checked: true }); tsp.event({ ev: "focus", id: "post.text" }); tsp.keys("Status"); tsp.event({ ev: "focus", id: "post.next" }); tsp.keys("120"); tsp.click("post.submit"); expect(core.calls.at(-1)).toEqual({ method: "post", args: ["r1", "update", "Status", "b1", 120] });
 		tsp.click("timeline.1.launch"); expect(core.calls.at(-1)?.method).toBe("launchInfo"); expect(tsp.node("launch-info.l1.text").p?.text).toContain("Complete snapshot");
-		tsp.event({ ev: "change", id: "timeline.filter.post", checked: true }); expect(() => tsp.node("timeline.1")).toThrow(); expect(tsp.node("timeline.2")).toBeDefined(); tsp.click("run.finish"); expect(core.calls.at(-1)?.method).toBe("finishRun");
+		tsp.event({ ev: "change", id: "timeline.filter.post", checked: true }); expect(() => tsp.node("timeline.1")).toThrow(); expect(tsp.node("timeline.2")).toBeDefined();
+		// 结束 Run asks first and says what finishing does; 取消 leaves the Run running.
+		const before = core.calls.length;
+		tsp.click("run.finish"); expect(core.calls.slice(before).map(call => call.method)).not.toContain("finishRun");
+		expect(tsp.node("run.finish.question").p?.text).toContain("已在运行的 agent 不会被停止");
+		tsp.click("run.finish.no"); expect(() => tsp.node("run.finish.question")).toThrow();
+		tsp.click("run.finish"); tsp.click("run.finish.yes"); expect(core.calls.at(-1)?.method).toBe("finishRun");
 	});
 	test("finished Run defaults to retrospective, disables mutation but keeps records enabled", async () => {
 		const { core, tsp } = await fixture(); core.run = { ...core.run, run: { ...core.run.run!, status: "finished", finishedAt: 3000, updateDue: null } }; tsp.selectTab("r1");
@@ -399,6 +422,38 @@ describe("K4 form UI", () => {
 		expect(core.calls.filter(call => call.method === "requestLaunch")).toEqual([{ method: "requestLaunch", args: ["r1", ["b1"]] }]);
 		tsp.click("nav.b2"); expect(() => tsp.node("b2.launch")).toThrow();
 	});
+	test("an unanswered launch request disables 启动 until a Launch is created from the block", async () => {
+		const core = new FakeCore();
+		core.run = { ...core.run, timeline: [{ seq: 1, at: 1000, origin: "human", data: { type: "event_sent", event: "launch_requested", data: { run: "r1", blocks: ["b2"] } } }], blocks: [item(), { ...item("b2", "Other"), launches: [] }] };
+		const { tsp } = await fixture(core);
+		tsp.selectTab("r1"); tsp.click("nav.b2");
+		expect(tsp.node("b2.launch").p).toMatchObject({ text: "已请求启动", attrs: { "aria-disabled": true } });
+		tsp.click("b2.launch"); expect(core.calls.filter(call => call.method === "requestLaunch")).toEqual([]);
+		core.run = { ...core.run, timeline: [...core.run.timeline, { seq: 2, at: 2000, origin: "coordinator", data: { type: "launch_created", launch: "l2", kind: "prompt", blocks: ["b2"] } }], blocks: [item(), { ...item("b2", "Other"), launches: [{ id: "l2", active: true, session: "s", agents: [] }] }] };
+		core.listener(runRef); await tick();
+		expect(tsp.node("b2.launch").p).toMatchObject({ text: "启动", actions: { click: "invoke" } });
+	});
+	test("an empty block is marked in the navigator; writing it removes the mark", async () => {
+		const core = new FakeCore();
+		core.template = { ...core.template, blocks: [item(), { ...designItem("b2"), block: { id: "b2", title: "", done: false, content: { kind: "design", requirement: "", design: "" } } }] };
+		const { tsp } = await fixture(core);
+		const chips = (id: BlockId) => descendants(tsp.node(`nav.${id}.chips`)).map(node => node.p?.text).filter(Boolean);
+		expect(chips("b2")).toContain("空块"); expect(chips("b1")).not.toContain("空块");
+		core.template = { ...core.template, blocks: [item(), designItem("b2")] };
+		core.listener(template); await tick();
+		expect(chips("b2")).not.toContain("空块");
+	});
+	test("a new record is related to the block opened last, from a short list that expands", async () => {
+		const core = new FakeCore();
+		core.run = { ...core.run, blocks: [item(), item("b2", "Other"), item("b3", "Third"), item("b4", "Fourth")].map(entry => entry.block.id === "b1" ? entry : { ...entry, launches: [], latestRecord: null }) };
+		const { tsp } = await fixture(core);
+		tsp.selectTab("r1"); tsp.click("nav.b3"); tsp.click("nav.activity");
+		expect(tsp.node("post.block.b3").p?.checked).toBe(true);
+		expect(() => tsp.node("post.block.b2")).toThrow();
+		tsp.click("post.block.more"); expect(tsp.node("post.block.b2").p?.checked).toBe(false);
+		tsp.event({ ev: "focus", id: "post.text" }); tsp.keys("Note"); tsp.click("post.submit");
+		expect(core.calls.at(-1)).toEqual({ method: "post", args: ["r1", "update", "Note", "b3", null] });
+	});
 });
 
 const askDesign = "## A Cache\n\n```ask\nWhich cache?\n* Redis | keeps data\n- Memcached | no disk\n```\n";
@@ -514,7 +569,9 @@ describe("ask drafts, navigator and execution contract", () => {
 			expect(f.core.view(template).blocks[0]!.lock).toEqual({ kind: "human", field: "prompt", draft: prompt });
 			expect(f.store.readRevisions(template)).toEqual([]);
 			expect(f.events).toEqual([]);
-			f.tsp.click("b1.prompt.submit"); await tick();
+			// Each answered ask says it is only a draft and offers the one submit for the whole draft.
+			expect(f.tsp.node("b1.design.view.p0.0.choice.chosen.badge").p?.text).toBe("仅在草稿中，未提交");
+			f.tsp.click("b1.design.view.p0.1.choice.submit"); await tick();
 			expect(f.store.readRevisions(template).map(revision => revision.prompt)).toEqual([prompt]);
 			expect(f.events).toEqual([{ event: "revision_requested", data: { block: "b1", revision: 1 } }]);
 			expect(f.core.view(template).blocks[0]!.lock).toEqual({ kind: "none" });

@@ -90,7 +90,10 @@ const SURFACE_CSS = [
 	".pb-nav-label { font-size: 11px; line-height: 1.3; color: var(--t3); }",
 	".pb-nav-title { font-weight: 600; line-height: 1.4; color: var(--t1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
 	".pb-nav-sep { height: 1px; background: var(--l2); margin: 8px 4px; }",
-	".pb-select-bar { display: flex; flex-direction: column; gap: 8px; padding: 8px; margin-top: 8px; border-radius: 6px; background: rgb(from var(--accent) r g b / 8%); border: 1px solid rgb(from var(--accent) r g b / 30%); }",
+	// Pinned to the navigator's bottom edge, so ticking a block shows its actions without scrolling the list.
+	".pb-select-bar { position: sticky; bottom: 0; z-index: 1; display: flex; flex-direction: column; gap: 8px; padding: 8px; margin-top: 8px; border-radius: 6px; background: var(--card, var(--panel)); border: 1px solid rgb(from var(--accent) r g b / 40%); box-shadow: 0 -4px 12px rgb(from var(--t1) r g b / 8%); }",
+	".pb-select-actions { display: flex; flex-wrap: wrap; gap: 4px; }",
+	".pb-select-actions .pb-button { padding: 4px 8px; }",
 	".pb-cite { padding: 4px 0; color: var(--t1); cursor: pointer; }",
 	".pb-cite:hover { color: var(--accent); }",
 	".pb-pinned { max-height: 420px; overflow: auto; padding: 4px; border-left: 3px solid rgb(from var(--accent) r g b / 50%); }",
@@ -121,6 +124,7 @@ const SURFACE_CSS = [
 	".pb-doc { display: flex; flex-direction: column; gap: 8px; }",
 	// Checks and deletion close the block: one quiet footer instead of loose lines.
 	".pb-foot { display: flex; flex-direction: column; gap: 4px; padding-top: 12px; border-top: 1px solid var(--l2); color: var(--t3); }",
+	".pb-confirm { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; border-radius: 8px; border: 1px solid rgb(from var(--bad) r g b / 40%); background: rgb(from var(--bad) r g b / 6%); }",
 	".am-draft { display: flex; flex-direction: column; gap: 14px; font-family: var(--sans); font-size: 14px; line-height: 1.55; color: var(--t1); }",
 	".am-draft .sf-md, .am-draft .sf-text { font-family: var(--sans); font-size: 14px; line-height: 1.55; }",
 	".am-title { margin: 0; font-size: 20px; font-weight: 600; line-height: 1.3; }",
@@ -276,6 +280,8 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 	let actionError: ActionError | null = null;
 	let current: Current | null = null;
 	let confirmDelete: BlockId | null = null;
+	/** The Run whose 结束 Run is waiting for confirmation. */
+	let confirmFinish: RunId | null = null;
 	/** A block shown read-only above whichever block is open, for reading two blocks together. */
 	let pinned: BlockId | null = null;
 	let runName = "";
@@ -284,6 +290,12 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 	let postNext = "";
 	let postKind: RecordKind = "update";
 	let postBlock: BlockId | null = null;
+	/** The person picked the related block; until then it follows the last opened block. */
+	let postBlockChosen = false;
+	/** The related-block picker lists every block instead of the usual few. */
+	let allPostBlocks = false;
+	/** The block opened last in this view, the default subject of a new record. */
+	let lastBlock: BlockId | null = null;
 	let postKindChosen = false;
 	let filter: EntryData["type"] | "all" = "all";
 	let snoozeAfter = 900;
@@ -297,7 +309,8 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 	const selected = new Set<BlockId>();
 	const carets = new Map<string, Caret>();
 	const undo = new Map<string, UndoStep[]>();
-	const notices = new Map<string, string>();
+	/** A field's last outcome next to it: a refused late input, or the save that just happened. UI state only. */
+	const notices = new Map<string, { readonly text: string; readonly tone: "warning" | "success" }>();
 	const previews = new Map<string, CompileResult>();
 	const summaries = new Map<BlockId, Summary>();
 	const actions = new Map<string, () => void>();
@@ -380,7 +393,11 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 					] },
 				] };
 			});
-			return [col(`${id}.options`, options), text(`${id}.chosen`, chosen.length ? `已写入下方修改要求：${chosen.join("、")}。可继续补充，一次提交。` : "选择会写入下方修改要求草稿，不会立即发出", "muted")];
+			// A pick is only a draft line: say so next to the question and offer the submit right there.
+			const status = chosen.length
+				? row(`${id}.chosen`, [badge(`${id}.chosen.badge`, "仅在草稿中，未提交", "warning"), text(`${id}.chosen.text`, `已写入下方修改要求：${chosen.join("、")}`, "muted"), button(`${id}.submit`, "提交修改要求", () => submitPrompt(block), !editable, "primary")])
+				: text(`${id}.chosen`, "选择会写入下方修改要求草稿，不会立即发出", "muted");
+			return [col(`${id}.options`, options), status];
 		};
 	}
 	/** Put an ask's answer into the block's change-request draft as one line, opening the draft when needed. */
@@ -432,7 +449,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 		return [core.view({ kind: "template" }), ...core.runs().map(run => core.view({ kind: "run", run: run.id }))].some(doc => doc.blocks.some(item => item.lock.kind === "human"));
 	}
 	function resetRecordForm(): void {
-		postKind = "retrospective"; postBlock = null; postKindChosen = false; postNext = "";
+		postKind = "retrospective"; postBlock = null; postBlockChosen = false; postKindChosen = false; postNext = "";
 	}
 
 	function showError(error: string | null, anchor: string | null = null): void {
@@ -550,6 +567,9 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 		const chips: Chip[] = [];
 		const block = item.block;
 		if (block.done) chips.push({ text: "已完成", tone: "success" });
+		// A block with nothing written yet says so, instead of passing for a real item of the plan.
+		const empty = block.content.kind === "design" ? !block.content.requirement.trim() && !block.content.design.trim() : !block.content.body.trim();
+		if (empty && item.lock.kind !== "human") chips.push({ text: "空块", tone: "warning" });
 		if (item.lock.kind === "coordinator") chips.push({ text: "协调者编辑中", tone: "warning" });
 		if (item.lock.kind === "human") chips.push({ text: "你在编辑", tone: "accent" });
 		if (view.run) {
@@ -603,7 +623,10 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 				check(`${prefix}.done`, "已完成", block.done, !unlocked || finished, done => { showError(core.setDone(ref, block.id, done), `${prefix}.state`); }),
 				...(item.lock.kind === "coordinator" ? [text(`${prefix}.lock`, "协调者正在编辑这个块", "warning"), button(`${prefix}.interrupt`, "收回编辑权", () => showError(core.interrupt(ref, block.id), `${prefix}.state`), finished, "danger")] : []),
 				box(`${prefix}.toolbar.spacer`, "pb-spacer", []),
-				...(view.run && block.content.kind === "task" ? [button(`${prefix}.launch`, isOrchestration(block.content) ? "启动编排" : "启动", () => { if (view.run) showError(core.requestLaunch(view.run.id, [block.id]), `${prefix}.actions`); }, finished, "primary")] : []),
+				...(view.run && block.content.kind === "task" ? [launchPending(view, block.id) && !rootLaunches(view, item).length
+					// A request the coordinator has not answered yet is not sent twice.
+					? button(`${prefix}.launch`, "已请求启动", () => undefined, true, "primary")
+					: button(`${prefix}.launch`, isOrchestration(block.content) ? "启动编排" : "启动", () => { if (view.run) showError(core.requestLaunch(view.run.id, [block.id]), `${prefix}.actions`); }, finished, "primary")] : []),
 				...(block.content.kind === "task" ? [button(`${prefix}.preview`, "预览", () => { void core.preview(ref, [block.id]).then(result => { previews.set(prefix, result); redraw(); }); })] : []),
 				button(`${prefix}.check`, "检查", () => showError(core.requestCheck(ref, [block.id]), `${prefix}.actions`)),
 				button(`${prefix}.pin`, pinned === block.id ? "取消参考" : "设为参考", () => { pinned = pinned === block.id ? null : block.id; redraw(); }),
@@ -614,9 +637,9 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 					: []),
 			]),
 			editingTitle
-				? col(`${prefix}.title.edit`, [titleNode, row(`${prefix}.title.controls`, [button(`${prefix}.title.commit`, "保存标题", () => commit(block.id), false, "primary"), button(`${prefix}.title.discard`, "放弃", () => discardDraft(block.id, `${prefix}.title`), false, "ghost"), text(`${prefix}.title.hint`, "Enter 不换行；Esc 也会保存", "muted")])])
+				? col(`${prefix}.title.edit`, [titleNode, row(`${prefix}.title.controls`, [button(`${prefix}.title.commit`, "保存标题", () => commit(block.id), false, "primary"), button(`${prefix}.title.discard`, "放弃", () => discardDraft(block.id, `${prefix}.title`), false, "ghost"), text(`${prefix}.title.hint`, "Enter 保存；Esc 不保存也不丢弃", "muted")])])
 				: { id: `${prefix}.title.heading`, k: "el", p: { tag: "h2", class: "pb-block-title", text: block.title.trim() || "未命名块（点击填写标题）", ...(canEdit ? { actions: { click: "invoke" } } : {}) } },
-			...(notices.get(`${prefix}.title`) ? [text(`${prefix}.title.notice`, notices.get(`${prefix}.title`)!, "warning")] : []),
+			...(notices.get(`${prefix}.title`) ? [text(`${prefix}.title.notice`, notices.get(`${prefix}.title`)!.text, notices.get(`${prefix}.title`)!.tone)] : []),
 			...inlineError(`${prefix}.title`),
 			...inlineError(`${prefix}.state`),
 		]);
@@ -638,7 +661,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 		const pending = view.run ? launchPending(view, block.id) : null;
 		if (pending) sections.push(text(`${prefix}.pending`, `已在 ${clock(pending.at)} UTC 发出启动请求；之后还没有为此块创建的 Launch`, "accent"));
 		const latestPost = item.latestRecord?.data;
-		if (view.run && !finished && !block.done && latestPost?.type === "post" && latestPost.kind === "result") sections.push(row(`${prefix}.confirm`, [text(`${prefix}.confirm.text`, `协调者已记录结果（#${item.latestRecord!.seq}）。核对后标记完成：`, "success"), button(`${prefix}.confirm.done`, "标记已完成", () => showError(core.setDone(ref, block.id, true), `${prefix}.state`), !unlocked, "primary")]));
+		const awaitingDone = view.run && !finished && !block.done && latestPost?.type === "post" && latestPost.kind === "result";
 		const ownLaunches = view.run ? rootLaunches(view, item) : [];
 		if (view.run && ownLaunches.length) sections.push(panel(`${prefix}.launches`, `从此块启动、未关闭的 Launch ${ownLaunches.length}`, [], ownLaunches.map(launch => row(`${prefix}.launch.${launch.id}`, [
 			badge(`${prefix}.launch.${launch.id}.badge`, launch.id, "accent"),
@@ -647,21 +670,22 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 		]))));
 		const impact = view.run ? item.launches.filter(launch => !ownLaunches.includes(launch)) : [];
 		if (impact.length) sections.push(text(`${prefix}.impact`, `被未关闭的 Launch 引用：${impact.map(launch => `${launch.id}（从 ${view.timeline.flatMap(entry => entry.data.type === "launch_created" && entry.data.launch === launch.id ? entry.data.blocks : []).join("、")} 启动）`).join("，")}`, "neutral"));
-		if (view.run && item.latestRecord) sections.push(panel(`${prefix}.latest`, "最近记录", [], [record(`${prefix}.latest.view`, item.latestRecord)]));
+		// The latest record sits right under the head; a result waiting for the person carries the button that closes it.
+		if (view.run && item.latestRecord) sections.push(panel(`${prefix}.latest`, awaitingDone ? `协调者已记录结果（#${item.latestRecord.seq}），核对后标记完成` : "最近记录", awaitingDone ? [box(`${prefix}.latest.spacer`, "pb-spacer", []), button(`${prefix}.confirm.done`, "标记已完成", () => showError(core.setDone(ref, block.id, true), `${prefix}.state`), !unlocked, "primary")] : [], [record(`${prefix}.latest.view`, item.latestRecord)]));
 		const preview = previews.get(prefix);
-		if (preview) sections.push(panel(`${prefix}.compiled`, "发给 agent 的内容", [text(`${prefix}.compiled.length`, preview.kind === "Ok" ? `${preview.text.length} 字符` : "编译失败", preview.kind === "Ok" ? "muted" : "error"), box(`${prefix}.compiled.spacer`, "pb-spacer", []), button(`${prefix}.compiled.close`, "收起", () => { previews.delete(prefix); redraw(); }, false, "ghost")], [
+		const compiled: TspNode[] = preview ? [panel(`${prefix}.compiled`, "发给 agent 的内容", [text(`${prefix}.compiled.length`, preview.kind === "Ok" ? `${preview.text.length} 字符` : "编译失败", preview.kind === "Ok" ? "muted" : "error"), box(`${prefix}.compiled.spacer`, "pb-spacer", []), button(`${prefix}.compiled.close`, "收起", () => { previews.delete(prefix); redraw(); }, false, "ghost")], [
 			{ id: `${prefix}.compiled.text`, k: "code", p: { text: compileText(preview), lang: "text", wrap: true, max: { h: "24lines" } } },
 			...(preview.kind === "Ok" ? [text(`${prefix}.compiled.sources`, sourcesText(preview.sources), "muted")] : []),
-		]));
+		])] : [];
 
 		const textField = (name: "body" | "requirement", title: string, view: TspNode[]): TspNode => {
 			const editing = item.lock.kind === "human" && item.lock.field === name;
 			const notice = notices.get(`${prefix}.${name}`);
 			return panel(`${prefix}.${name}.panel`, title, editing
-				? [button(`${prefix}.${name}.commit`, "保存", () => commit(block.id), false, "primary"), button(`${prefix}.${name}.discard`, "放弃", () => discardDraft(block.id, `${prefix}.${name}`), false, "ghost"), text(`${prefix}.${name}.hint`, "Esc 也会保存", "muted")]
+				? [button(`${prefix}.${name}.commit`, "保存", () => commit(block.id), false, "primary"), button(`${prefix}.${name}.discard`, "放弃", () => discardDraft(block.id, `${prefix}.${name}`), false, "ghost"), text(`${prefix}.${name}.hint`, "Ctrl+Enter 保存；Esc 不保存也不丢弃", "muted")]
 				: [button(`${prefix}.${name}.pencil`, `编辑${LABELS[name]}`, () => startDraft(block.id, name), !canEdit, "ghost")], [
 				...(editing ? [draftField(block.id, name)] : view),
-				...(notice ? [text(`${prefix}.${name}.notice`, notice, "warning")] : []),
+				...(notice ? [text(`${prefix}.${name}.notice`, notice.text, notice.tone)] : []),
 				...inlineError(`${prefix}.${name}`),
 			]);
 		};
@@ -672,7 +696,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 		if (block.content.kind === "task") {
 			const bodyView = block.content.body.trim() ? rendered(`${prefix}.body.view`, block.content.body) : rendered(`${prefix}.body.view`, block.content.body).concat(text(`${prefix}.body.empty`, "（还没有写正文）", "muted"));
 			content.push(...bodyView);
-			sections.push(textField("body", isOrchestration(block.content) ? "编排代码" : "正文（发给 agent 的 prompt）", bodyView));
+			sections.push(textField("body", isOrchestration(block.content) ? "编排代码" : "正文（发给 agent 的 prompt）", bodyView), ...compiled);
 		} else {
 			const requirementView = block.content.requirement.trim() ? [{ id: `${prefix}.requirement.view`, k: "md", p: { text: block.content.requirement } } satisfies TspNode] : [];
 			content.push(...requirementView);
@@ -690,8 +714,8 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 			sections.push(box(`${prefix}.design`, "pb-doc", block.content.design.trim() ? drawn.nodes : [text(`${prefix}.design.empty`, "协调者还没有写设计", "muted")]));
 			if (drawn.diagnostics.length) sections.push(panel(`${prefix}.diagnostics`, `稿件问题 ${drawn.diagnostics.length}`, [], drawn.diagnostics.map((found, index) => text(`${prefix}.diagnostic.${index}`, `第 ${found.line} 行 · ${found.component} · ${found.message}`, found.severity === "error" ? "error" : "warning"))));
 			sections.push(panel(`${prefix}.requests`, "修改要求", [...(state ? [badge(`${prefix}.request.state`, state.text, state.tone)] : []), box(`${prefix}.requests.spacer`, "pb-spacer", []), ...(writing ? [] : [button(`${prefix}.prompt.pencil`, "写修改要求", () => startDraft(block.id, "prompt"), !canEdit, "primary")])], [
-				...(writing ? [draftField(block.id, "prompt"), row(`${prefix}.prompt.controls`, [button(`${prefix}.prompt.submit`, "提交给协调者", () => submitPrompt(block.id), false, "primary"), button(`${prefix}.prompt.discard`, "放弃", () => discardDraft(block.id, `${prefix}.prompt`), false, "ghost"), text(`${prefix}.prompt.hint`, "Esc 不会提交", "muted")])] : []),
-				...(promptNotice ? [text(`${prefix}.prompt.notice`, promptNotice, "warning")] : []),
+				...(writing ? [draftField(block.id, "prompt"), row(`${prefix}.prompt.controls`, [button(`${prefix}.prompt.submit`, "提交给协调者", () => submitPrompt(block.id), false, "primary"), button(`${prefix}.prompt.discard`, "放弃", () => discardDraft(block.id, `${prefix}.prompt`), false, "ghost"), text(`${prefix}.prompt.hint`, "Ctrl+Enter 提交；Esc 不提交也不丢弃", "muted")])] : []),
+				...(promptNotice ? [text(`${prefix}.prompt.notice`, promptNotice.text, promptNotice.tone)] : []),
 				...inlineError(`${prefix}.prompt`),
 				...(history.length
 					? [...history].reverse().map(revision => box(`${prefix}.revision.${revision.seq}`, "pb-request", [text(`${prefix}.revision.${revision.seq}.meta`, `#${revision.seq} · ${time(revision.at)}`, "muted"), { id: `${prefix}.revision.${revision.seq}.text`, k: "el", p: { tag: "div", class: "pb-request-text", text: revision.prompt } }]))
@@ -754,7 +778,8 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 			check(`${block.id}.selected`, "", selected.has(block.id), false, checked => { if (checked) selected.add(block.id); else selected.delete(block.id); redraw(); }),
 			box(id, `pb-nav-item${active ? " pb-nav-active" : ""}`, [
 				{ id: `${id}.label`, k: "el", p: { tag: "span", class: "pb-nav-label", text: `${block.id} · ${blockKindLabel(block.content)}` } },
-				{ id: `${id}.title`, k: "el", p: { tag: "span", class: "pb-nav-title", text: (item.lock.kind === "human" && item.lock.field === "title" ? item.lock.draft : block.title).trim() || "未命名块" } },
+				// The navigator shows the committed title: an unsaved title draft lives only in its editor.
+				{ id: `${id}.title`, k: "el", p: { tag: "span", class: "pb-nav-title", text: block.title.trim() || "未命名块" } },
 				chipRow(`${id}.chips`, blockChips(view, item)),
 			], { actions: { click: "invoke" } }),
 		]);
@@ -768,12 +793,12 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 		const mixed = picked.length > 1 && picked.some(item => isOrchestration(item.block.content));
 		const reason = design ? "设计块不能启动：在执行块中引用它" : mixed ? "编排块只能单独启动" : null;
 		return [box("selection", "pb-select-bar", [
-			text("selection.label", `已选 ${ids.join("、")}：下面的按钮作用于这 ${ids.length} 块`, "accent"),
-			row("selection.actions", [
-				...(view.run ? [button("selection.launch", `一起启动 (${ids.length})`, () => { if (view.run) showError(core.requestLaunch(view.run.id, ids), "selection"); }, finished || reason !== null, "primary")] : []),
+			text("selection.label", `已选 ${ids.join("、")}`, "accent"),
+			box("selection.actions", "pb-select-actions", [
+				...(view.run ? [button("selection.launch", "一起启动", () => { if (view.run) showError(core.requestLaunch(view.run.id, ids), "selection"); }, finished || reason !== null, "primary")] : []),
 				button("selection.preview", "合并预览", () => { void core.preview(ref, ids).then(result => { previews.set("selection", result); current = { kind: "selection" }; redraw(); }); }),
-				button("selection.check", `一起检查 (${ids.length})`, () => showError(core.requestCheck(ref, ids), "selection")),
-				button("selection.clear", "取消选择", () => { selected.clear(); redraw(); }, false, "ghost"),
+				button("selection.check", "一起检查", () => showError(core.requestCheck(ref, ids), "selection")),
+				button("selection.clear", "取消", () => { selected.clear(); redraw(); }, false, "ghost"),
 			]),
 			...(view.run && reason ? [text("selection.reason", reason, "warning")] : []),
 			...inlineError("selection"),
@@ -810,6 +835,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 	function activity(view: DocView): TspNode[] {
 		const run = view.run!;
 		if (!postKindChosen) postKind = run.status === "finished" && !view.retrospective ? "retrospective" : "update";
+		if (!postBlockChosen && postKind !== "retrospective") postBlock = lastBlock !== null && view.blocks.some(item => item.block.id === lastBlock) ? lastBlock : null;
 		const kinds: readonly RecordKind[] = run.status === "finished" ? ["update", "result", "failure", "retrospective"] : ["update", "result", "failure"];
 		const titles = new Map<string, string>(view.blocks.map(item => [item.block.id, item.block.title.trim()]));
 		const retrospective = postKind === "retrospective";
@@ -820,7 +846,16 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 			{ id: "activity.title", k: "el", p: { tag: "h2", class: "pb-block-title", text: "Run 记录与时间线" } },
 			panel("post", retrospective ? "写复盘" : "写记录", [], [
 				labeled("post.kind", "类别", choices("post.kind", kinds, postKind, kind => { postKind = kind; postKindChosen = true; }, false, kind => RECORD_LABELS[kind]), true),
-				labeled("post.block", "关联块", choices("post.block", ["none", ...view.blocks.map(item => item.block.id)], postBlock ?? "none", value => { postBlock = view.blocks.find(item => item.block.id === value)?.block.id ?? null; }, false, value => value === "none" ? "不关联块" : `${value}${titles.get(value) ? ` · ${titles.get(value)}` : ""}`), true),
+				labeled("post.block", "关联块", (() => {
+					// The last opened block is the usual subject; blocks with something going on come next; the rest on request.
+					const busy = view.blocks.filter(item => rootLaunches(view, item).length || launchPending(view, item.block.id) || item.latestRecord).map(item => item.block.id);
+					const short = [...new Set([...(lastBlock ? [lastBlock] : []), ...(postBlock ? [postBlock] : []), ...busy])].filter(id => view.blocks.some(item => item.block.id === id));
+					const values = ["none", ...(allPostBlocks ? view.blocks.map(item => item.block.id) : short)];
+					return col("post.block.pick", [
+						choices("post.block", values, postBlock ?? "none", value => { postBlock = view.blocks.find(item => item.block.id === value)?.block.id ?? null; postBlockChosen = true; }, false, value => value === "none" ? "不关联块" : `${value}${titles.get(value) ? ` · ${titles.get(value)}` : ""}`),
+						...(view.blocks.length > short.length ? [button("post.block.more", allPostBlocks ? "只看常用块" : `更多块（共 ${view.blocks.length} 个）`, () => { allPostBlocks = !allPostBlocks; redraw(); }, false, "ghost")] : []),
+					]);
+				})(), true),
 				labeled("post.text", retrospective ? "复盘内容" : "正文", formField("post.text", () => postText, value => { postText = value; }, retrospective ? "结果、问题与改进" : "记录正文", true), true),
 				...(postKind === "update" ? [labeled("post.next", "下次更新间隔（秒，可选）", formField("post.next", () => postNext, value => { postNext = value; }, "留空沿用 Run 的间隔"))] : []),
 				button("post.submit", retrospective ? "写复盘" : "写记录", () => {
@@ -885,14 +920,26 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 				...(running ? [badge("run.running", `未关闭 Launch 的块 ${running}`, "accent")] : []),
 				text("run.status", `开始 ${time(run.startedAt)}${run.finishedAt === null ? "" : ` · 结束 ${time(run.finishedAt)}`}`, "muted"),
 				box("run.spacer", "pb-spacer", []),
-				button("run.finish", "结束 Run", () => {
-					const error = core.finishRun(run.id);
-					if (error) return showError(error, "run.finish");
-					if (!view.retrospective) resetRecordForm();
-					current = { kind: "activity" };
-				}, run.status === "finished", "danger"),
+				...(confirmFinish === run.id && run.status === "running" ? [] : [button("run.finish", "结束 Run", () => { confirmFinish = run.id; redraw(); }, run.status === "finished", "danger")]),
 				...inlineError("run.finish"),
 			]));
+			if (confirmFinish === run.id && run.status === "running") {
+				const drafts = view.blocks.filter(item => item.lock.kind === "human").length;
+				const open = view.blocks.reduce((count, item) => count + rootLaunches(view, item).length, 0);
+				rows.push(box("run.finish.confirm", "pb-confirm", [
+					text("run.finish.question", `结束「${run.name}」？完成 ${done}/${view.blocks.length}。会关闭 ${open} 个未关闭的 Launch 记录${drafts ? `、丢弃 ${drafts} 份未提交的草稿` : ""}，结束后块不能再编辑；已在运行的 agent 不会被停止。`, "warning"),
+					row("run.finish.choices", [
+						button("run.finish.yes", "确认结束", () => {
+							confirmFinish = null;
+							const error = core.finishRun(run.id);
+							if (error) return showError(error, "run.finish");
+							if (!view.retrospective) resetRecordForm();
+							current = { kind: "activity" };
+						}, false, "danger"),
+						button("run.finish.no", "取消", () => { confirmFinish = null; redraw(); }, false, "ghost"),
+					]),
+				]));
+			}
 			if (run.updateDue !== null) rows.push(box("run.due", "pb-top-row", [
 				text("run.due.time", `${overdue ? "状态更新已到期" : "下次状态更新"}：${time(run.updateDue)}`, overdue ? "warning" : "muted"),
 				...(overdue ? [button("run.due.write", "写状态更新", () => { current = { kind: "activity" }; postKind = "update"; postKindChosen = true; redraw(); }, false, "primary")] : []),
@@ -907,15 +954,29 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 	function commit(block: BlockId): void {
 		const lock = core.view(ref).blocks.find(item => item.block.id === block)?.lock;
 		const fieldId = lock?.kind === "human" ? `${block}.${lock.field}` : null;
+		const before = lock?.kind === "human" ? core.view(ref).blocks.find(item => item.block.id === block)?.block : undefined;
 		const error = core.commit(ref, block);
 		if (error) return showError(error, fieldId);
+		const after = core.view(ref).blocks.find(item => item.block.id === block)?.block;
+		if (fieldId) notices.set(fieldId, JSON.stringify(before) === JSON.stringify(after) ? { text: "未修改", tone: "success" } : { text: "已保存", tone: "success" });
 		committed = fieldId;
 		focus = null;
 		redraw();
 	}
+	/**
+	 * Enter/Ctrl+Enter on the focused input: a field draft is saved (a change request submitted), the
+	 * Run form starts the Run. Inputs with no such action ignore it.
+	 */
+	function saveFocused(): void {
+		if (focus === "run.name" || focus === "run.every") return startRun();
+		const editing = core.view(ref).blocks.find(item => item.lock.kind === "human" && focus === `${item.block.id}.${item.lock.field}`);
+		if (!editing || editing.lock.kind !== "human") return;
+		if (editing.lock.field === "prompt") submitPrompt(editing.block.id);
+		else commit(editing.block.id);
+	}
 	function switchView(next: DocRef): void {
-		ref = next; selected.clear(); previews.clear(); info.clear(); summaries.clear(); focus = null; actionError = null; current = null; confirmDelete = null; pinned = null;
-		postText = ""; postNext = ""; postBlock = null; postKindChosen = false; filter = "all";
+		ref = next; selected.clear(); previews.clear(); info.clear(); summaries.clear(); focus = null; actionError = null; current = null; confirmDelete = null; confirmFinish = null; pinned = null;
+		postText = ""; postNext = ""; postBlock = null; postBlockChosen = false; allPostBlocks = false; lastBlock = null; postKindChosen = false; filter = "all";
 		redraw();
 	}
 	function startRun(): void {
@@ -942,6 +1003,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 		if (current?.kind === "activity" && !view.run) current = null;
 		if (current?.kind === "selection" && !previews.has("selection")) current = null;
 		current ??= view.blocks[0] ? { kind: "block", block: view.blocks[0].block.id } : view.run ? { kind: "activity" } : null;
+		if (current?.kind === "block") lastBlock = current.block;
 		const hasDraft = anyDraft();
 		// The record form follows a Run that finishes while shown: once, and before the form is drawn.
 		if (view.run) {
@@ -1007,7 +1069,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 	}
 	/** contracts.md K4 错误: input for a field that was committed before the input arrived is shown, never silently dropped. */
 	function late(id: string): void {
-		notices.set(id, "一次输入因文本已变化未应用");
+		notices.set(id, { text: "一次输入因文本已变化未应用", tone: "warning" });
 		redraw();
 	}
 	function edit(event: Extract<TspEvent, { ev: "edit" }>): void {
@@ -1017,7 +1079,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 			return;
 		}
 		const currentText = value.text();
-		if (event.len !== currentText.length) { notices.set(event.id, "一次输入因文本已变化未应用"); redraw(); return; }
+		if (event.len !== currentText.length) { notices.set(event.id, { text: "一次输入因文本已变化未应用", tone: "warning" }); redraw(); return; }
 		applyText(event.id, currentText.slice(0, event.from) + event.text + currentText.slice(event.to), event.cursor);
 	}
 	let keyBuffer = "";
@@ -1048,15 +1110,15 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 		if (kitty) {
 			if (kitty[3] === "3") return; // Key release is not a second edit.
 			const code = Number(kitty[1]), modifiers = Number(kitty[2] ?? 1) - 1;
+			// Ctrl+Enter saves (or, for a change request, submits) the field being edited.
+			if (code === 13 && modifiers === 4) { saveFocused(); return; }
 			if (modifiers > 1 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return;
 			bytes = code === 13 ? "\r" : String.fromCodePoint(code);
 		}
-		if (bytes === ESC || bytes === "\x1b[27u") {
-			// Esc finishes a field edit; a change request is only sent by its button.
-			const editing = core.view(ref).blocks.find(item => item.lock.kind === "human");
-			if (editing && !(editing.lock.kind === "human" && editing.lock.field === "prompt")) commit(editing.block.id);
-			return;
-		}
+		// Esc neither saves nor discards: the draft stays in Core and its editor keeps the focus.
+		if (bytes === ESC || bytes === "\x1b[27u") return;
+		// Enter in a single-line input acts: the title saves, the Run form starts the Run.
+		if ((bytes === "\r" || bytes === "\n") && focus !== null && fields.get(focus)?.multiline === false && (focus.endsWith(".title") || focus === "run.name" || focus === "run.every")) { saveFocused(); return; }
 		const value = focus === null ? undefined : fields.get(focus);
 		if (focus === null || !value) {
 			const changesText = bytes === "\x7f" || bytes === "\b" || bytes === `${ESC}[3~` || bytes.startsWith(`${ESC}[200~`) || !/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(bytes);

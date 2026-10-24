@@ -194,6 +194,12 @@ describe("design block references", () => {
 			sources: [{ kind: "block", target: "b3", expression: null }],
 		});
 	});
+	test("an empty requirement compiles to nothing: no empty <requirement>, no blank selection", () => {
+		const blank: BlockContent = { kind: "design", requirement: "  \n", design };
+		const run = (reference: string) => references.compile(["b1"], input([["b1", task(reference)], ["b3", blank]]));
+		expect(run("((b3))")).toMatchObject({ kind: "Ok", text: `<design>\n${design}\n</design>` });
+		expect(run("((b3 | requirement, panel(A)))")).toMatchObject({ kind: "Ok", text: panelA });
+	});
 	for (const [expression, expected] of [
 		["requirement", requirement],
 		["design", design],
