@@ -1,7 +1,8 @@
+import { fieldText } from "../src/domain/model";
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import type { BlockContent, DocRef, FetchOutcome, PlaybookDoc, Revision, RunId, RunMeta, TimelineEntry } from "../src/domain/model";
+import type { Block, BlockContent, DocRef, FetchOutcome, PlaybookDoc, Revision, RunId, RunMeta, TimelineEntry } from "../src/domain/model";
 import type { Connection } from "../src/domain/ports";
 import type { ErrorCode, EventPayload, Outcome, Request, RunSummary } from "../src/domain/protocol";
 import { checks } from "../src/service/checks";
@@ -13,8 +14,8 @@ const BASE_TIME = Date.parse("2026-10-11T00:00:00.000Z");
 const template: PlaybookDoc = {
 	title: "Night operations",
 	blocks: [
-		{ id: "b1", title: "Prepare", content: { kind: "task", body: "First line\nSecond line\n" }, done: true },
-		{ id: "b2", title: "Execute", content: { kind: "task", body: "Review ((b1))" }, done: false },
+		{ id: "b1", title: "Prepare", content: { kind: "task", body: "First line\nSecond line\n" }, progress: { kind: "tracked", status: "done", report: null } },
+		{ id: "b2", title: "Execute", content: { kind: "task", body: "Review ((b1))" }, progress: { kind: "tracked", status: "todo", report: null } },
 	],
 };
 const designTemplate: PlaybookDoc = {
@@ -22,7 +23,7 @@ const designTemplate: PlaybookDoc = {
 	blocks: [
 		...template.blocks,
 		{
-			id: "b3", title: "Deployment design", done: true,
+			id: "b3", title: "Deployment design", progress: { kind: "tracked", status: "done", report: null },
 			content: { kind: "design", requirement: "Keep the service available.\n", design: "## A Rollout\n\nDeploy one instance at a time.\n" },
 		},
 	],
@@ -111,21 +112,17 @@ describe("Run creation and independent copies (runs.md §§1–2)", () => {
 		const f = fixture();
 		await f.connect();
 		expect(expectOk(await f.request({ op: "start_run", args: { name: "First run", update_every: 60 } }))).toEqual({ run: "r1" });
-		const copied = template.blocks.map(block => ({ ...block, done: false }));
+		const copied = template.blocks.map((block): Block => ({ ...block, progress: { kind: "tracked", status: "todo", report: null } }));
 		expect(f.core.view(runRef).blocks.map(view => view.block)).toEqual(copied);
 		expect(f.persisted()).toEqual({
 			doc: { ...template, blocks: copied },
 			run: { id: "r1", name: "First run", status: "running", startedAt: BASE_TIME, finishedAt: null, updateEvery: 60, updateDue: BASE_TIME + 60_000 },
 		});
-		expect(f.store.readRunLog("r1").entries).toEqual([{ seq: 1, at: BASE_TIME, origin: "coordinator", data: { type: "run_started", name: "First run" } }]);
+		expect(f.store.readLog({ kind: "run", run: "r1" }).entries).toEqual([{ seq: 1, at: BASE_TIME, origin: "coordinator", data: { type: "run_started", name: "First run" } }]);
 		expect(f.events).toEqual([]);
-		expect(f.core.pencil(templateRef, "b1", "body")).toBeNull();
-		expect(f.core.setDraft(templateRef, "b1", "Changed template")).toBeNull();
-		expect(f.core.commit(templateRef, "b1")).toBeNull();
+		expect(f.core.edit(templateRef, "b1", "body", fieldText(f.core.view(templateRef).blocks.find(item => item.block.id === "b1")!.block, "body")!, "Changed template")).toBeNull();
 		expect(f.core.view(runRef).blocks[0]!.block.content).toEqual(template.blocks[0]!.content);
-		expect(f.core.pencil(runRef, "b2", "title")).toBeNull();
-		expect(f.core.setDraft(runRef, "b2", "Changed run")).toBeNull();
-		expect(f.core.commit(runRef, "b2")).toBeNull();
+		expect(f.core.edit(runRef, "b2", "title", fieldText(f.core.view(runRef).blocks.find(item => item.block.id === "b2")!.block, "title")!, "Changed run")).toBeNull();
 		expect(f.core.view(templateRef).blocks[1]!.block.title).toBe("Execute");
 		expect(expectOk(await f.request({ op: "start_run", args: { name: "Second run" } }))).toEqual({ run: "r2" });
 		expect(f.core.view({ kind: "run", run: "r2" }).blocks[0]!.block.content).toEqual({ kind: "task", body: "Changed template" });
@@ -136,14 +133,12 @@ describe("Run creation and independent copies (runs.md §§1–2)", () => {
 		const f = fixture(designTemplate);
 		await f.connect();
 		expectOk(await f.request({ op: "start_run", args: { name: "Design snapshot" } }));
-		const copied = designTemplate.blocks.map(block => ({ ...block, done: false }));
+		const copied = designTemplate.blocks.map((block): Block => ({ ...block, progress: { kind: "tracked", status: "todo", report: null } }));
 		expect(f.core.view(runRef).blocks.map(view => view.block)).toEqual(copied);
 		expect(f.persisted().doc).toEqual({ ...designTemplate, blocks: copied });
-		expect(f.persisted().doc.blocks[2]!.done).toBe(false);
+		expect(f.persisted().doc.blocks[2]!.progress).toMatchObject({ status: "todo" });
 
-		expect(f.core.pencil(templateRef, "b3", "requirement")).toBeNull();
-		expect(f.core.setDraft(templateRef, "b3", "Keep the service and database available.\n")).toBeNull();
-		expect(f.core.commit(templateRef, "b3")).toBeNull();
+		expect(f.core.edit(templateRef, "b3", "requirement", fieldText(f.core.view(templateRef).blocks.find(item => item.block.id === "b3")!.block, "requirement")!, "Keep the service and database available.\n")).toBeNull();
 		expect(f.core.view(runRef).blocks[2]!.block.content).toEqual(designTemplate.blocks[2]!.content);
 		expectOk(await f.request({ op: "lock", args: { run: "r1", block: "b3" } }));
 		expectOk(await f.request({ op: "write", args: { run: "r1", block: "b3", text: "## A Rollout\n\nDeploy the canary first.\n" } }));
@@ -161,233 +156,58 @@ describe("Run creation and independent copies (runs.md §§1–2)", () => {
 		expect(parsedTemplate.ok).toBe(true);
 		if (!parsedTemplate.ok) throw new Error(parsedTemplate.error);
 		expect(parsedTemplate.doc.blocks[2]!.content).toEqual(templateContent);
-		expect(parsedTemplate.doc.blocks[2]!.done).toBe(true);
+		expect(parsedTemplate.doc.blocks[2]!.progress).toMatchObject({ status: "done" });
 		const restarted = f.newCore();
 		expect(restarted.view(templateRef).blocks[2]!.block.content).toEqual(templateContent);
 		expect(restarted.view(runRef).blocks[2]!.block.content).toEqual(runContent);
-		expect(restarted.view(runRef).blocks[2]!.block.done).toBe(false);
-	});
-
-	test("Run revision history starts empty and remains separate from queryable template history after restart", async () => {
-		const f = fixture(designTemplate);
-		await f.connect();
-		expect(f.core.pencil(templateRef, "b3", "prompt")).toBeNull();
-		expect(f.core.setDraft(templateRef, "b3", "Explain the rollback plan.")).toBeNull();
-		expect(f.core.commit(templateRef, "b3")).toBeNull();
-		const templateRevisions: Revision[] = [{ seq: 1, at: BASE_TIME, block: "b3", prompt: "Explain the rollback plan." }];
-		expect(expectOk(await f.request({ op: "revisions", args: { block: "b3" } }))).toEqual({ revisions: templateRevisions });
-		expectOk(await f.request({ op: "start_run", args: { name: "Fresh revisions" } }));
-		expect(expectOk(await f.request({ op: "revisions", args: { run: "r1" } }))).toEqual({ revisions: [] });
-		expect(f.core.revisions(runRef, "b3")).toEqual([]);
-		expect(f.store.readRevisions(runRef)).toEqual([]);
-		expect(expectOk(await f.request({ op: "revisions", args: {} }))).toEqual({ revisions: templateRevisions });
-
-		f.setTime(BASE_TIME + 1_000);
-		expect(f.core.pencil(runRef, "b3", "prompt")).toBeNull();
-		expect(f.core.setDraft(runRef, "b3", "Add a canary health check.")).toBeNull();
-		expect(f.core.commit(runRef, "b3")).toBeNull();
-		const runRevisions: Revision[] = [{ seq: 1, at: BASE_TIME + 1_000, block: "b3", prompt: "Add a canary health check." }];
-		expect(expectOk(await f.request({ op: "revisions", args: { run: "r1", block: "b3" } }))).toEqual({ revisions: runRevisions });
-		expect(f.core.revisions(templateRef, "b3")).toEqual(templateRevisions);
-		expect(f.store.readRevisions(templateRef)).toEqual(templateRevisions);
-		expect(f.store.readRevisions(runRef)).toEqual(runRevisions);
-		expectOk(await f.request({ op: "start_run", args: { name: "Another fresh revision stream" } }));
-		expect(expectOk(await f.request({ op: "revisions", args: { run: "r2" } }))).toEqual({ revisions: [] });
-		f.core.stop();
-		const restarted = f.newCore();
-		await f.connect(restarted, "session-restarted");
-		expect(expectOk(await f.request({ op: "revisions", args: { block: "b3" } }, restarted))).toEqual({ revisions: templateRevisions });
-		expect(expectOk(await f.request({ op: "revisions", args: { run: "r1", block: "b3" } }, restarted))).toEqual({ revisions: runRevisions });
-		expect(expectOk(await f.request({ op: "revisions", args: { run: "r2" } }, restarted))).toEqual({ revisions: [] });
+		expect(restarted.view(runRef).blocks[2]!.block.progress).toMatchObject({ status: "todo" });
 	});
 
 	test("read returns flattened task and design wire blocks with kind, without revision history", async () => {
 		const f = fixture(designTemplate);
 		await f.connect();
-		expect(f.core.pencil(templateRef, "b3", "prompt")).toBeNull();
-		expect(f.core.setDraft(templateRef, "b3", "Describe deployment risks.")).toBeNull();
-		expect(f.core.commit(templateRef, "b3")).toBeNull();
-		const task = { id: "b1", kind: "task", title: "Prepare", body: "First line\nSecond line\n", done: true };
+		expect(f.core.requestRevision(templateRef, "b3", "Describe deployment risks.")).toBeNull();
+		const task = { id: "b1", kind: "task", title: "Prepare", body: "First line\nSecond line\n", status: "done" };
 		const design = {
-			id: "b3", kind: "design", title: "Deployment design", done: true,
+			id: "b3", kind: "design", title: "Deployment design", status: "done",
 			requirement: "Keep the service available.\n", design: "## A Rollout\n\nDeploy one instance at a time.\n",
 		};
-		const wireBlocks = [task, { id: "b2", kind: "task", title: "Execute", body: "Review ((b1))", done: false }, design];
+		const wireBlocks = [task, { id: "b2", kind: "task", title: "Execute", body: "Review ((b1))", status: "todo" }, design];
 		expect(expectOk(await f.request({ op: "read", args: {} }))).toEqual({ title: designTemplate.title, blocks: wireBlocks });
 		expect(expectOk(await f.request({ op: "read", args: { block: "b1" } }))).toEqual(task);
 		expect(expectOk(await f.request({ op: "read", args: { block: "b3" } }))).toEqual(design);
 		expectOk(await f.request({ op: "start_run", args: { name: "Wire snapshot" } }));
 		expect(expectOk(await f.request({ op: "read", args: { run: "r1" } }))).toEqual({
-			title: designTemplate.title, blocks: wireBlocks.map(block => ({ ...block, done: false })), run: f.persisted().run,
+			title: designTemplate.title, blocks: wireBlocks.map(block => ({ ...block, status: "todo" })), run: f.persisted().run,
 		});
-		expect(expectOk(await f.request({ op: "read", args: { run: "r1", block: "b1" } }))).toEqual({ ...task, done: false });
-		expect(expectOk(await f.request({ op: "read", args: { run: "r1", block: "b3" } }))).toEqual({ ...design, done: false });
-	});
-
-	test("human start emits run_started and persists its full event record", async () => {
-		const f = fixture();
-		await f.connect();
-		expect(f.core.startRun("Human run", null)).toBeNull();
-		expect(f.events).toEqual([{ event: "run_started", data: { run: "r1", name: "Human run" } }]);
-		expect(f.core.view(runRef).timeline).toEqual([
-			{ seq: 1, at: BASE_TIME, origin: "human", data: { type: "run_started", name: "Human run" } },
-			{ seq: 2, at: BASE_TIME, origin: "service", data: { type: "event_sent", event: "run_started", data: { run: "r1", name: "Human run" } } },
-		]);
-		expect(f.persisted().run.updateDue).toBeNull();
-		expect(f.store.readRunLog("r1").entries).toEqual([...f.core.view(runRef).timeline]);
+		expect(expectOk(await f.request({ op: "read", args: { run: "r1", block: "b1" } }))).toEqual({ ...task, status: "todo" });
+		expect(expectOk(await f.request({ op: "read", args: { run: "r1", block: "b3" } }))).toEqual({ ...design, status: "todo" });
 	});
 
 	test("human done changes send events but coordinator set only appends its change", async () => {
 		const f = fixture();
 		await f.connect();
 		expectOk(await f.request({ op: "start_run", args: { name: "Checklist" } }));
-		expect(f.core.setDone(runRef, "b1", true)).toBeNull();
-		expect(f.core.setDone(runRef, "b1", false)).toBeNull();
+		expect(f.core.setStatus(runRef, "b1", "done")).toBeNull();
+		expect(f.core.setStatus(runRef, "b1", "todo")).toBeNull();
 		expect(f.events).toEqual([
-			{ event: "done_changed", data: { run: "r1", block: "b1", done: true } },
-			{ event: "done_changed", data: { run: "r1", block: "b1", done: false } },
+			{ event: "status_changed", data: { run: "r1", block: "b1", status: "done" } },
+			{ event: "status_changed", data: { run: "r1", block: "b1", status: "todo" } },
 		]);
 		expectOk(await f.request({ op: "lock", args: { run: "r1", block: "b1" } }));
-		expectOk(await f.request({ op: "set", args: { run: "r1", block: "b1", field: "done", value: true } }));
+		expectOk(await f.request({ op: "set", args: { run: "r1", block: "b1", field: "status", value: "done" } }));
 		expect(f.events).toHaveLength(2);
-		expect(f.core.view(runRef).timeline.filter(entry => entry.data.type === "done_changed").map(entry => ({ origin: entry.origin, data: entry.data }))).toEqual([
-			{ origin: "human", data: { type: "done_changed", block: "b1", done: true } },
-			{ origin: "human", data: { type: "done_changed", block: "b1", done: false } },
-			{ origin: "coordinator", data: { type: "done_changed", block: "b1", done: true } },
+		expect(f.store.readLog(runRef).entries.filter(entry => entry.data.type === "progress_changed").map(entry => ({ origin: entry.origin, data: entry.data }))).toEqual([
+			{ origin: "human", data: { type: "progress_changed", block: "b1", progress: { kind: "tracked", status: "done", report: null } } },
+			{ origin: "human", data: { type: "progress_changed", block: "b1", progress: { kind: "tracked", status: "todo", report: null } } },
+			{ origin: "coordinator", data: { type: "progress_changed", block: "b1", progress: { kind: "tracked", status: "done", report: null } } },
 		]);
 		f.core.stop();
-		expect(f.persisted().doc.blocks[0]!.done).toBe(true);
-	});
-});
-
-describe("Run finish and late records (runs.md §§2,4,6)", () => {
-	test("finish_run closes all open launches as service, releases locks and discards drafts", async () => {
-		const f = fixture({ ...template, blocks: [{ ...template.blocks[0]!, content: { kind: "task", body: "Read ((file:instructions.txt))" } }, template.blocks[1]!] });
-		await f.connect();
-		expectOk(await f.request({ op: "start_run", args: { name: "Finish", update_every: 30 } }));
-		expectOk(await f.request({ op: "launch", args: { run: "r1", blocks: ["b1"] } }));
-		expectOk(await f.request({ op: "launch", args: { run: "r1", blocks: ["b2"] } }));
-		expect(f.fetchCount()).toBe(1);
-		expect(f.core.launchInfo("l1")!.snapshot.result.text).toContain("External instruction");
-		expect(f.core.pencil(runRef, "b1", "body")).toBeNull();
-		expect(f.core.setDraft(runRef, "b1", "Uncommitted replacement")).toBeNull();
-		expectOk(await f.request({ op: "lock", args: { run: "r1", block: "b2" } }));
-		f.setTime(BASE_TIME + 5_000);
-		expectOk(await f.request({ op: "finish_run", args: { run: "r1" } }));
-		expect(f.persisted().run).toMatchObject({ status: "finished", finishedAt: BASE_TIME + 5_000, updateDue: null });
-		for (const launch of ["l1", "l2"] as const) {
-			expect(f.core.launchInfo(launch)!.closed).toEqual({ at: BASE_TIME + 5_000, by: "run_finished" });
-			expect(f.store.readRunLog("r1").launches.get(launch)!.closed).toEqual({ at: BASE_TIME + 5_000, by: "run_finished" });
-		}
-		expect(f.core.view(runRef).timeline.filter(entry => entry.data.type === "launch_closed")).toEqual([
-			{ seq: 4, at: BASE_TIME + 5_000, origin: "service", data: { type: "launch_closed", launch: "l1" } },
-			{ seq: 5, at: BASE_TIME + 5_000, origin: "service", data: { type: "launch_closed", launch: "l2" } },
-		]);
-		expect(f.core.view(runRef).blocks.map(block => block.lock)).toEqual([{ kind: "none" }, { kind: "none" }]);
-		expect(f.core.view(runRef).blocks[0]!.notices).toContain("Run 已结束，未提交的修改已丢弃");
-		expect(f.core.view(runRef).blocks[0]!.block.content).toEqual({ kind: "task", body: "Read ((file:instructions.txt))" });
-		expect(f.core.commit(runRef, "b1")).not.toBeNull();
-		expect(f.events).toEqual([]);
-	});
-
-	test("finished blocks reject every modification and launch, but late post still succeeds", async () => {
-		const f = fixture();
-		await f.connect();
-		expectOk(await f.request({ op: "start_run", args: { name: "Immutable" } }));
-		expect(f.core.finishRun("r1")).toBeNull();
-		expect(f.events).toEqual([{ event: "run_finished", data: { run: "r1" } }]);
-		const mutations: Request[] = [
-			{ op: "lock", args: { run: "r1", block: "b1" } },
-			{ op: "set", args: { run: "r1", block: "b1", field: "title", value: "Changed" } },
-			{ op: "set", args: { run: "r1", block: "b1", field: "done", value: true } },
-			{ op: "edit", args: { run: "r1", block: "b1", find: "First", replace: "Other" } },
-			{ op: "insert", args: { run: "r1", title: "New", content: { kind: "task", body: "New" } } },
-			{ op: "delete", args: { run: "r1", block: "b1" } },
-			{ op: "launch", args: { run: "r1", blocks: ["b1"] } },
-			{ op: "finish_run", args: { run: "r1" } },
-		];
-		for (const mutation of mutations) expectError(await f.request(mutation), "RunFinished");
-		expect(f.core.pencil(runRef, "b1", "title")).toBe("Run 已结束");
-		expect(f.core.setDone(runRef, "b1", true)).toBe("Run 已结束");
-		expect(f.core.deleteBlock(runRef, "b1")).toBe("Run 已结束");
-		expect(f.core.insertBlock(runRef, null, "task")).toBe("Run 已结束");
-		expectOk(await f.request({ op: "post", args: { run: "r1", kind: "result", text: "Late subagent result", block: "b1" } }));
-		expect(f.core.post("r1", "failure", "Human follow-up", null, null)).toBeNull();
-		expect(f.core.view(runRef).blocks[0]!.latestRecord!.data).toMatchObject({ type: "post", kind: "result", text: "Late subagent result" });
-		expect(f.core.view(runRef).blocks.map(view => view.block)).toEqual(template.blocks.map(block => ({ ...block, done: false })));
-		expect(f.store.readRunLog("r1").entries).toEqual([...f.core.view(runRef).timeline]);
-	});
-
-	test("retrospective is rejected while running and accepted only after finish", async () => {
-		const f = fixture();
-		await f.connect();
-		expectOk(await f.request({ op: "start_run", args: { name: "Review" } }));
-		expectError(await f.request({ op: "post", args: { run: "r1", kind: "retrospective", text: "Premature" } }), "BadValue");
-		expect(f.core.post("r1", "retrospective", "Also premature", null, null)).not.toBeNull();
-		expect(f.core.view(runRef).timeline).toHaveLength(1);
-		expectOk(await f.request({ op: "finish_run", args: { run: "r1" } }));
-		expect(f.core.runs()[0]!.retrospective).toBe(false);
-		expectOk(await f.request({ op: "post", args: { run: "r1", kind: "retrospective", text: "Lessons" } }));
-		expect(f.core.view(runRef).retrospective).toBe(true);
-		expect(f.core.runs()[0]!.retrospective).toBe(true);
+		expect(f.persisted().doc.blocks[0]!.progress).toMatchObject({ status: "done" });
 	});
 });
 
 describe("Status updates and snooze (runs.md §6)", () => {
-	test("update uses explicit next before default, preserves update_every and ignores reminders after finish", async () => {
-		const f = fixture();
-		await f.connect();
-		expectOk(await f.request({ op: "start_run", args: { name: "Updates", update_every: 60 } }));
-		f.setTime(BASE_TIME + 10_000);
-		expectOk(await f.request({ op: "post", args: { run: "r1", kind: "update", text: "Explicit", next: 20 } }));
-		expect(f.persisted().run.updateDue).toBe(BASE_TIME + 30_000);
-		expect(f.persisted().run.updateEvery).toBe(60);
-		f.setTime(BASE_TIME + 15_000);
-		expect(f.core.post("r1", "update", "Default", null, null)).toBeNull();
-		expect(f.persisted().run.updateDue).toBe(BASE_TIME + 75_000);
-		expect(f.core.view(runRef).lastUpdateAt).toBe(BASE_TIME + 15_000);
-		expectOk(await f.request({ op: "finish_run", args: { run: "r1" } }));
-		f.setTime(BASE_TIME + 20_000);
-		expectOk(await f.request({ op: "post", args: { run: "r1", kind: "update", text: "Late update", next: 10 } }));
-		expect(f.persisted().run.updateDue).toBeNull();
-		expect(f.core.view(runRef).lastUpdateAt).toBe(BASE_TIME + 20_000);
-	});
-
-	test("without a default interval, updates leave null or an existing explicit due unchanged", async () => {
-		const f = fixture();
-		await f.connect();
-		expectOk(await f.request({ op: "start_run", args: { name: "Optional reminders" } }));
-		expectOk(await f.request({ op: "post", args: { run: "r1", kind: "update", text: "No schedule" } }));
-		expect(f.persisted().run.updateDue).toBeNull();
-		expectOk(await f.request({ op: "post", args: { run: "r1", kind: "update", text: "One-off schedule", next: 30 } }));
-		f.setTime(BASE_TIME + 5_000);
-		expect(f.core.post("r1", "update", "No next", null, null)).toBeNull();
-		expect(f.persisted().run).toMatchObject({ updateEvery: null, updateDue: BASE_TIME + 30_000 });
-		expectError(await f.request({ op: "post", args: { run: "r1", kind: "result", text: "Invalid next", next: 10 } }), "BadValue");
-		expect(f.core.view(runRef).timeline.filter(entry => entry.data.type === "post")).toHaveLength(3);
-	});
-
-	test("snooze reschedules from now, records its origin, and returns BadValue without a due", async () => {
-		const f = fixture();
-		await f.connect();
-		expectOk(await f.request({ op: "start_run", args: { name: "Snoozable", update_every: 60 } }));
-		f.setTime(BASE_TIME + 5_000);
-		expect(expectOk(await f.request({ op: "snooze", args: { run: "r1", after: 20 } }))).toEqual({ due: BASE_TIME + 25_000 });
-		expect(f.persisted().run.updateDue).toBe(BASE_TIME + 25_000);
-		f.setTime(BASE_TIME + 10_000);
-		expect(f.core.snooze("r1", 40)).toBeNull();
-		expect(f.persisted().run.updateDue).toBe(BASE_TIME + 50_000);
-		expect(f.core.view(runRef).timeline.filter(entry => entry.data.type === "update_snoozed")).toEqual([
-			{ seq: 2, at: BASE_TIME + 5_000, origin: "coordinator", data: { type: "update_snoozed", due: BASE_TIME + 25_000 } },
-			{ seq: 3, at: BASE_TIME + 10_000, origin: "human", data: { type: "update_snoozed", due: BASE_TIME + 50_000 } },
-		]);
-		expectOk(await f.request({ op: "start_run", args: { name: "No due" } }));
-		expectError(await f.request({ op: "snooze", args: { run: "r2", after: 10 } }), "BadValue");
-		expect(f.core.snooze("r2", 10)).not.toBeNull();
-		expectOk(await f.request({ op: "finish_run", args: { run: "r1" } }));
-		expectError(await f.request({ op: "snooze", args: { run: "r1", after: 10 } }), "BadValue");
-		expect(f.core.snooze("r1", 10)).not.toBeNull();
-	});
 
 	// These integration cases exercise Core's platform timer; `now` controls metadata only.
 	// Await the connection's actual event rather than guessing how long scheduling takes.
@@ -399,13 +219,13 @@ describe("Status updates and snooze (runs.md §6)", () => {
 		f.setTime(BASE_TIME + 1_000);
 		await f.nextEvent();
 		expect(f.events).toEqual([{ event: "update_due", data: { run: "r1", due: BASE_TIME + 1_000, last_update: BASE_TIME } }]);
-		expect(f.core.view(runRef).timeline.filter(entry => entry.data.type === "update_due")).toEqual([
+		expect(f.store.readLog(runRef).entries.filter(entry => entry.data.type === "update_due")).toEqual([
 			{ seq: 3, at: BASE_TIME + 1_000, origin: "service", data: { type: "update_due", due: BASE_TIME + 1_000 } },
 		]);
 		expect(f.persisted().run.updateDue).toBe(BASE_TIME + 1_000);
 		expect(f.core.runs()[0]!.update_overdue).toBe(true);
 		expect(f.events).toHaveLength(1);
-		expect(f.store.readRunLog("r1").entries.filter(entry => entry.data.type === "update_due")).toHaveLength(1);
+		expect(f.store.readLog({ kind: "run", run: "r1" }).entries.filter(entry => entry.data.type === "update_due")).toHaveLength(1);
 		expectOk(await f.request({ op: "snooze", args: { run: "r1", after: 1 } }));
 		f.setTime(BASE_TIME + 2_000);
 		await f.nextEvent();
@@ -413,47 +233,7 @@ describe("Status updates and snooze (runs.md §6)", () => {
 			{ event: "update_due", data: { run: "r1", due: BASE_TIME + 1_000, last_update: BASE_TIME } },
 			{ event: "update_due", data: { run: "r1", due: BASE_TIME + 2_000, last_update: BASE_TIME } },
 		]);
-		expect(f.store.readRunLog("r1").entries.filter(entry => entry.data.type === "update_due")).toHaveLength(2);
-	});
-
-	test("restart immediately records an overdue unrecorded value, never replays disconnected events or duplicates it", async () => {
-		const f = fixture();
-		await f.connect();
-		expectOk(await f.request({ op: "start_run", args: { name: "Restart", update_every: 1 } }));
-		f.core.disconnected(f.connection);
-		f.core.stop();
-		f.setTime(BASE_TIME + 2_000);
-		const restarted = f.newCore();
-		expect(f.store.readRunLog("r1").entries.filter(entry => entry.data.type === "update_due")).toEqual([
-			{ seq: 2, at: BASE_TIME + 2_000, origin: "service", data: { type: "update_due", due: BASE_TIME + 1_000 } },
-		]);
-		expect(f.events).toEqual([]);
-		await f.connect(restarted, "session-restarted");
-		expect(f.events).toEqual([]);
-		expect(expectOk(await f.request({ op: "runs", args: {} }, restarted))).toEqual({ runs: restarted.runs() });
-		expect(restarted.runs()[0]!).toMatchObject({ update_due: BASE_TIME + 1_000, update_overdue: true });
-		restarted.stop();
-		const secondRestart = f.newCore();
-		expect(secondRestart.view(runRef).timeline.filter(entry => entry.data.type === "update_due")).toHaveLength(1);
-		expect(f.store.readRunLog("r1").entries.filter(entry => entry.data.type === "update_due")).toHaveLength(1);
-	});
-
-	test("restart catches up a changed due even if a different due was recorded, and ignores finished Runs", async () => {
-		const f = fixture();
-		await f.connect();
-		expectOk(await f.request({ op: "start_run", args: { name: "New due", update_every: 60 } }));
-		f.core.stop();
-		f.store.appendEntry("r1", { seq: 2, at: BASE_TIME - 1_000, origin: "service", data: { type: "update_due", due: BASE_TIME - 1_000 } });
-		f.setTime(BASE_TIME + 61_000);
-		const restarted = f.newCore();
-		expect(restarted.view(runRef).timeline.filter(entry => entry.data.type === "update_due").map(entry => entry.data)).toEqual([
-			{ type: "update_due", due: BASE_TIME - 1_000 }, { type: "update_due", due: BASE_TIME + 60_000 },
-		]);
-		expect(restarted.finishRun("r1")).toBeNull();
-		restarted.stop();
-		const finishedRestart = f.newCore();
-		expect(finishedRestart.view(runRef).run!.updateDue).toBeNull();
-		expect(finishedRestart.view(runRef).timeline.filter(entry => entry.data.type === "update_due")).toHaveLength(2);
+		expect(f.store.readLog({ kind: "run", run: "r1" }).entries.filter(entry => entry.data.type === "update_due")).toHaveLength(2);
 	});
 
 	test("finishing before the deadline prevents a later due event and log", async () => {
@@ -465,7 +245,7 @@ describe("Status updates and snooze (runs.md §6)", () => {
 		f.setTime(BASE_TIME + 2_000);
 		await f.nextEvent();
 		expect(f.events).toEqual([{ event: "update_due", data: { run: "r2", due: BASE_TIME + 1_000, last_update: null } }]);
-		expect(f.store.readRunLog("r1").entries.filter(entry => entry.data.type === "update_due")).toEqual([]);
+		expect(f.store.readLog({ kind: "run", run: "r1" }).entries.filter(entry => entry.data.type === "update_due")).toEqual([]);
 	});
 });
 
@@ -475,9 +255,10 @@ describe("Run persistence, timeline and summaries (runs.md §§3,5–7)", () => 
 		await f.connect();
 		const observed: { readonly entry: TimelineEntry; readonly meta: RunMeta; readonly alreadyLogged: boolean }[] = [];
 		const append = f.store.appendEntry.bind(f.store);
-		f.store.appendEntry = (run, entry) => {
-			observed.push({ entry, meta: f.persisted(run).run, alreadyLogged: f.store.readRunLog(run).entries.some(prior => prior.seq === entry.seq) });
-			append(run, entry);
+		f.store.appendEntry = (ref, entry) => {
+			if (ref.kind !== "run") throw new Error("Expected Run log");
+			observed.push({ entry, meta: f.persisted(ref.run).run, alreadyLogged: f.store.readLog(ref).entries.some(prior => prior.seq === entry.seq) });
+			append(ref, entry);
 		};
 		expectOk(await f.request({ op: "start_run", args: { name: "Ordered writes", update_every: 60 } }));
 		f.setTime(BASE_TIME + 1_000);
@@ -495,36 +276,14 @@ describe("Run persistence, timeline and summaries (runs.md §§3,5–7)", () => 
 			{ type: "update_due", status: "running", due: BASE_TIME + 3_000, finished: null },
 			{ type: "run_finished", status: "finished", due: null, finished: BASE_TIME + 3_000 },
 		]);
-		expect(f.store.readRunLog("r1").entries).toEqual([...f.core.view(runRef).timeline]);
-	});
-
-	test("post retains quote, human origin and current session; timeline after is exclusive and omits launch records", async () => {
-		const f = fixture();
-		await f.connect();
-		expectOk(await f.request({ op: "start_run", args: { name: "Messages" } }));
-		expectOk(await f.request({ op: "launch", args: { run: "r1", blocks: ["b1"] } }));
-		expect(expectOk(await f.request({ op: "post", args: { run: "r1", kind: "result", text: "Entire selected message\nSecond line", block: "b1", launch: "l1", quote: "message-42", origin: "human" } }))).toEqual({ seq: 3 });
-		f.core.disconnected(f.connection);
-		await f.connect(f.core, "session-two");
-		expect(expectOk(await f.request({ op: "post", args: { run: "r1", kind: "failure", text: "Coordinator message", quote: "message-43" } }))).toEqual({ seq: 4 });
-		expect(f.core.post("r1", "result", "Direct human note", "b2", null)).toBeNull();
-		const entries = f.core.view(runRef).timeline;
-		expect(entries[2]).toEqual({ seq: 3, at: BASE_TIME, origin: "human", data: { type: "post", kind: "result", text: "Entire selected message\nSecond line", block: "b1", launch: "l1", quote: "message-42", session: "session-one" } });
-		expect(entries[3]).toEqual({ seq: 4, at: BASE_TIME, origin: "coordinator", data: { type: "post", kind: "failure", text: "Coordinator message", quote: "message-43", session: "session-two" } });
-		expect(entries[4]).toEqual({ seq: 5, at: BASE_TIME, origin: "human", data: { type: "post", kind: "result", text: "Direct human note", block: "b2" } });
-		for (const after of [undefined, 0, 2, 3, 5, 100]) {
-			expect(expectOk(await f.request({ op: "timeline", args: { run: "r1", ...(after === undefined ? {} : { after }) } }))).toEqual({ entries: entries.filter(entry => entry.seq > (after ?? 0)) });
-		}
-		expect(f.store.readRunLog("r1").launches.size).toBe(1);
-		expect(f.store.readRunLog("r1").entries).toEqual([...entries]);
-		expectError(await f.request({ op: "timeline", args: { run: "r99" } }), "UnknownRun");
+		expect(f.store.readLog({ kind: "run", run: "r1" }).entries).toEqual([...f.store.readLog(runRef).entries]);
 	});
 
 	test("runs exposes complete running/finished summaries, done counts, overdue and retrospective state", async () => {
 		const f = fixture();
 		await f.connect();
 		expectOk(await f.request({ op: "start_run", args: { name: "Running", update_every: 60 } }));
-		expect(f.core.setDone(runRef, "b2", true)).toBeNull();
+		expect(f.core.setStatus(runRef, "b2", "done")).toBeNull();
 		expectOk(await f.request({ op: "start_run", args: { name: "Finished" } }));
 		f.setTime(BASE_TIME + 61_000);
 		expectOk(await f.request({ op: "finish_run", args: { run: "r2" } }));

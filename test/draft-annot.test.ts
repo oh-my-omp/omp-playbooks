@@ -1,3 +1,4 @@
+import { fence, passiveEdit, renderDefaults } from "./draft-helpers";
 import { describe, expect, test } from "bun:test";
 import { parseAnnot, renderAnnot, type AnnotSpec } from "../src/service/draft/annot";
 import type { RenderContext } from "../src/service/draft/contract";
@@ -9,7 +10,7 @@ const example = [
 ];
 
 function parsed(lines: readonly string[]): AnnotSpec {
-	const result = parseAnnot({ args: "", lines, line: 10 });
+	const result = parseAnnot(fence({ args: "", lines, line: 10 }));
 	if (!result.ok) throw new Error(JSON.stringify(result.diagnostics));
 	return result.value;
 }
@@ -19,7 +20,7 @@ function rendered(lines: readonly string[]): { readonly svgs: string[]; readonly
 	const sizes: { w: number; h: number }[] = [];
 	const ids: string[] = [];
 	const alts: string[] = [];
-	const ctx: RenderContext = {
+	const ctx: RenderContext = { ...renderDefaults,
 		id: "draft.annot", view: "changes",
 		svg(id, svg, size, alt) {
 			svgs.push(svg); sizes.push(size); ids.push(id); alts.push(alt);
@@ -72,7 +73,7 @@ describe("annot syntax", () => {
 		["Before [span{note}", "右方括号"],
 		["Before []{note}", "片段不能为空"],
 	])("diagnoses malformed annotation %s on its design-text source line", (source, message) => {
-		const result = parseAnnot({ args: "", lines: ["# Group", "", source], line: 25 });
+		const result = parseAnnot(fence({ args: "", lines: ["# Group", "", source], line: 25 }));
 		expect(result.ok).toBe(false);
 		expect(result.diagnostics).toHaveLength(1);
 		expect(result.diagnostics[0]).toMatchObject({ line: 27, severity: "error", component: "annot" });
@@ -81,10 +82,10 @@ describe("annot syntax", () => {
 	});
 
 	test("reports each malformed sentence and rejects empty input", () => {
-		const errors = parseAnnot({ args: "", lines: ["[one", "[two]{note"], line: 4 });
+		const errors = parseAnnot(fence({ args: "", lines: ["[one", "[two]{note"], line: 4 }));
 		expect(errors.ok).toBe(false);
 		expect(errors.diagnostics.map(item => item.line)).toEqual([4, 5]);
-		const empty = parseAnnot({ args: "", lines: ["", "  "], line: 19 });
+		const empty = parseAnnot(fence({ args: "", lines: ["", "  "], line: 19 }));
 		expect(empty.ok).toBe(false);
 		expect(empty.diagnostics[0]!.line).toBe(19);
 	});

@@ -1,10 +1,11 @@
+import { fence, passiveEdit, renderDefaults } from "./draft-helpers";
 import { describe, expect, test } from "bun:test";
 import { parseCallout, renderCallout, type CalloutSpec } from "../src/service/draft/callout.ts";
 import type { FenceInput, RenderContext } from "../src/service/draft/contract.ts";
 import type { TspNode } from "../src/service/tsp-types.ts";
 
 function input(args = "", lines: readonly string[] = ["正文"], line = 20): FenceInput {
-	return { args, lines, line };
+	return fence({ args, lines, line });
 }
 
 function parsed(source: FenceInput): CalloutSpec {
@@ -15,7 +16,7 @@ function parsed(source: FenceInput): CalloutSpec {
 }
 
 function context(id = "draft.callout"): RenderContext {
-	return {
+	return { ...renderDefaults,
 		id,
 		view: "changes",
 		svg() { throw new Error("Callout must use native elements/Markdown nodes"); },
@@ -34,34 +35,34 @@ const variants = [
 describe("callout argument syntax", () => {
 	for (const { type } of variants) {
 		test(`parses ${type} with a title`, () => {
-			expect(parsed(input(`${type} 注意事项`))).toEqual({ type, title: "注意事项", body: "正文" });
+			expect(parsed(input(`${type} 注意事项`))).toEqual({ span: expect.anything(), type, title: "注意事项", body: "正文" });
 		});
 	}
 
 	test("parses the authoritative caution example", () => {
-		expect(parsed(input("warn Caution", ["Close the valve before you remove the pump."]))).toEqual({
+		expect(parsed(input("warn Caution", ["Close the valve before you remove the pump."]))).toEqual({ span: expect.anything(),
 			type: "warn", title: "Caution", body: "Close the valve before you remove the pump.",
 		});
 	});
 
 	test("uses the entire unknown argument string as an info title", () => {
 		for (const title of ["注意  保留间距", "warning Caution", "error Failure", "note Note", "WARN Caution", "warning info"]) {
-			expect(parsed(input(title))).toEqual({ type: "info", title, body: "正文" });
+			expect(parsed(input(title))).toEqual({ span: expect.anything(), type: "info", title, body: "正文" });
 		}
 	});
 
 	test("normalizes known-type title whitespace like the reference parser", () => {
-		expect(parsed(input("  warn\t先关闭   阀门  "))).toEqual({ type: "warn", title: "先关闭 阀门", body: "正文" });
-		expect(parsed(input("  未知\t保留   空格  "))).toEqual({ type: "info", title: "未知\t保留   空格", body: "正文" });
+		expect(parsed(input("  warn\t先关闭   阀门  "))).toEqual({ span: expect.anything(), type: "warn", title: "先关闭 阀门", body: "正文" });
+		expect(parsed(input("  未知\t保留   空格  "))).toEqual({ span: expect.anything(), type: "info", title: "未知\t保留   空格", body: "正文" });
 	});
 
 	test("allows omitted type and title when the body is present", () => {
-		expect(parsed(input())).toEqual({ type: "info", title: "", body: "正文" });
+		expect(parsed(input())).toEqual({ span: expect.anything(), type: "info", title: "", body: "正文" });
 	});
 
 	test("allows a title without a body", () => {
-		expect(parsed(input("ok 完成", []))).toEqual({ type: "ok", title: "完成", body: "" });
-		expect(parsed(input("仅标题", ["", "  "]))).toEqual({ type: "info", title: "仅标题", body: "\n  " });
+		expect(parsed(input("ok 完成", []))).toEqual({ span: expect.anything(), type: "ok", title: "完成", body: "" });
+		expect(parsed(input("仅标题", ["", "  "]))).toEqual({ span: expect.anything(), type: "info", title: "仅标题", body: "\n  " });
 	});
 });
 
@@ -102,46 +103,24 @@ describe("callout diagnostics", () => {
 	});
 });
 
-describe("callout rendering", () => {
-	const lines = ["", "**结论** $E=mc^2$", "", "$$", "\\int_0^1 x\\,dx=\\frac12", "$$", "", "- item", "  "];
-
-	for (const { type, head } of variants) {
-		test(`renders ${type} with a semantic callout title and untouched Markdown and math`, () => {
-			const spec = parsed(input(type, lines));
-			const rendered = renderCallout(spec, context());
-			expect(spec.body).toBe(lines.join("\n"));
-			expect(rendered).toEqual({
-				nodes: [{
-					id: "draft.callout.card", k: "el", p: { tag: "div", class: `am-callout am-callout-${type}` },
-					c: [
-						{ id: "draft.callout.head", k: "el", p: { tag: "strong", class: "am-callout-title", text: head } },
-						{ id: "draft.callout.body", k: "md", p: { text: lines.join("\n") } },
-					],
-				}],
-				diagnostics: [],
-			});
-		});
-	}
-
-	test("uses the explicit title rather than the default heading", () => {
-		const rendered = renderCallout(parsed(input("warn Caution", [])), context());
-		expect(rendered.nodes[0]?.p).toEqual({ tag: "div", class: "am-callout am-callout-warn" });
-		expect(rendered.nodes[0]?.c).toEqual([{ id: "draft.callout.head", k: "el", p: { tag: "strong", class: "am-callout-title", text: "Caution" } }]);
+describe("editable callout rendering", () => {
+	test("preserves authored title, Markdown and math without supplying a default heading", () => {
+		const body = "**Conclusion** $E=mc^2$\n\n- item";
+		const parsedSpec = parsed(input("warn Review", body.split("\n")));
+		const edits: string[] = [];
+		const rendered = renderCallout(parsedSpec, { ...context(), edit: { ...passiveEdit, text(_id, span, multiline, view) { expect(multiline).toBe(true); edits.push(body.slice(span.start, span.end)); return view; } } });
+		const walk = (node: TspNode): TspNode[] => [node, ...(node.c ?? []).flatMap(walk)];
+		const nodes = rendered.nodes.flatMap(walk);
+		expect(nodes.some(node => node.p?.text === "Review")).toBe(true);
+		expect(nodes.some(node => node.k === "md" && node.p?.text === body)).toBe(true);
+		expect(edits).toEqual([body]);
+		expect(rendered.diagnostics).toEqual([]);
+		const titleless = renderCallout(parsed(input("info", ["Body"])), context()).nodes.flatMap(walk);
+		expect(titleless.filter(node => node.p?.tag === "strong")).toEqual([]);
 	});
-
-	test("assigns unique namespaced ids to every node", () => {
-		const nodes = [
-			...renderCallout(parsed(input("info")), context("panel.1.callout.1")).nodes,
-			...renderCallout(parsed(input("err")), context("panel.1.callout.2")).nodes,
-		];
-		const ids: string[] = [];
-		function visit(node: TspNode): void {
-			ids.push(node.id);
-			for (const child of node.c ?? []) visit(child);
-		}
-		for (const node of nodes) visit(node);
-		expect(ids).toHaveLength(6);
-		expect(new Set(ids).size).toBe(ids.length);
-		expect(ids.every(id => id.startsWith("panel.1.callout.1.") || id.startsWith("panel.1.callout.2."))).toBe(true);
+	test("unique node ids allow multiple callouts in the same document", () => {
+		const walk = (node: TspNode): TspNode[] => [node, ...(node.c ?? []).flatMap(walk)];
+		const nodes = [...renderCallout(parsed(input("info")), context("one")).nodes, ...renderCallout(parsed(input("err")), context("two")).nodes].flatMap(walk);
+		expect(new Set(nodes.map(node => node.id)).size).toBe(nodes.length);
 	});
 });

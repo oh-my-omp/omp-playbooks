@@ -64,7 +64,7 @@ describe("TSP wire and input", () => {
 
 	test("separates byte-fragmented APC and DA from ordinary UTF8 and escape keys", () => {
 		const { input, received } = harness();
-		const action: TspEvent = { ev: "action", id: "a.button", act: "launch" };
+		const action: TspEvent = { ev: "action", mods: [], id: "a.button", act: "launch" };
 		const wire = Buffer.from(`好${ESC}[A${ESC}_tsp;r;{"r":"hello","dark":false}${ST}x${ESC}[?62;4c${ESC}_tsp;e;${JSON.stringify(action)}${ST}尾${ESC}[200~paste${ESC}[201~`);
 		for (const byte of wire) input.feed(Buffer.from([byte]));
 		expect(received.filter(value => value.kind !== "keys")).toEqual([
@@ -98,7 +98,7 @@ describe("TSP wire and input", () => {
 		const bodies: readonly TspEvent[] = [
 			{ ev: "ack", s: 1 }, { ev: "error", s: 1, op: 0, msg: "bad" },
 			{ ev: "theme", dark: true }, { ev: "focus", id: "a.title" },
-			{ ev: "action", id: "a.button", act: "run" },
+			{ ev: "action", mods: [], id: "a.button", act: "run" },
 			{ ev: "change", id: "a.done", checked: false, value: "no", text: "text" },
 			{ ev: "edit", id: "a.body", from: 0, to: 1, text: "好", cursor: 1, len: 2 },
 			{ ev: "undo", id: "a.body" }, { ev: "toggle", id: "a.ref", collapsed: true, key: "ref" },

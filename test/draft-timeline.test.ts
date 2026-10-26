@@ -1,3 +1,4 @@
+import { fence, passiveEdit, renderDefaults } from "./draft-helpers";
 import { describe, expect, test } from "bun:test";
 import type { RenderContext } from "../src/service/draft/contract";
 import { parseTimeline, renderTimeline, type TimelineSpec } from "../src/service/draft/timeline";
@@ -15,7 +16,7 @@ function context(): { ctx: RenderContext; captures: SvgCapture[] } {
 	const captures: SvgCapture[] = [];
 	return {
 		captures,
-		ctx: {
+		ctx: { ...renderDefaults,
 			id: "draft.timeline", view: "changes",
 			svg(id, source, size, alt) {
 				captures.push({ id, source, size, alt });
@@ -28,7 +29,7 @@ function context(): { ctx: RenderContext; captures: SvgCapture[] } {
 }
 
 function spec(lines: readonly string[], args = ""): TimelineSpec {
-	const parsed = parseTimeline({ lines, args, line: 10 });
+	const parsed = parseTimeline(fence({ lines, args, line: 10 }));
 	if (!parsed.ok) throw new Error(JSON.stringify(parsed.diagnostics));
 	return parsed.value;
 }
@@ -71,7 +72,7 @@ describe("timeline parsing", () => {
 	});
 
 	test("reports missing pipes and blank titles at their original source lines", () => {
-		const parsed = parseTimeline({ args: "", line: 21, lines: ["// comment", "", "missing separator", "Now |  ", "Then | Good", "Now || note"] });
+		const parsed = parseTimeline(fence({ args: "", line: 21, lines: ["// comment", "", "missing separator", "Now |  ", "Then | Good", "Now || note"] }));
 		expect(parsed.ok).toBe(false);
 		expect(parsed.diagnostics.map(d => [d.component, d.line, d.severity])).toEqual([
 			["timeline", 23, "error"], ["timeline", 24, "error"], ["timeline", 26, "error"],
@@ -81,7 +82,7 @@ describe("timeline parsing", () => {
 
 	test("rejects empty timelines with an actionable source-line diagnostic", () => {
 		for (const lines of [[], ["", " // comment"]]) {
-			const parsed = parseTimeline({ args: "v", line: 38, lines });
+			const parsed = parseTimeline(fence({ args: "v", line: 38, lines }));
 			expect(parsed.ok).toBe(false);
 			expect(parsed.diagnostics).toEqual([{ component: "timeline", line: 38, severity: "error", message: "时间线至少需要一项，例如：现在 | 发布 | 已上线" }]);
 		}

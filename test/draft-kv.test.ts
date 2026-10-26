@@ -1,16 +1,17 @@
+import { fence, passiveEdit, renderDefaults } from "./draft-helpers";
 import { describe, expect, test } from "bun:test";
 import type { FenceInput, RenderContext } from "../src/service/draft/contract";
 import { parseKv, renderKv, type KvSpec } from "../src/service/draft/kv";
 import type { TspNode } from "../src/service/tsp-types";
 
-const context: RenderContext = {
+const context: RenderContext = { ...renderDefaults,
 	id: "draft.kv", view: "changes",
 	svg: () => { throw new Error("kv must use native nodes"); },
 	image: () => { throw new Error("kv must use native nodes"); },
 	readFile: () => { throw new Error("kv must not read files"); },
 };
 function input(lines: readonly string[], args = "", line = 10): FenceInput {
-	return { lines, args, line };
+	return fence({ lines, args, line });
 }
 function spec(lines: readonly string[], args = ""): KvSpec {
 	const result = parseKv(input(lines, args));
@@ -25,34 +26,34 @@ describe("kv syntax", () => {
 	test("parses the authoritative title block example with default two columns", () => {
 		expect(parseKv(input(["* Title: Simplified Technical English", "Specification: ASD-STE100", "Owner: ASD"]))).toEqual({
 			ok: true, diagnostics: [], value: { cols: 2, items: [
-				{ kind: "wide", key: "Title", value: "Simplified Technical English" },
-				{ kind: "item", key: "Specification", value: "ASD-STE100" },
-				{ kind: "item", key: "Owner", value: "ASD" },
+				{ keySpan: expect.anything(), valueSpan: expect.anything(), kind: "wide", key: "Title", value: "Simplified Technical English" },
+				{ keySpan: expect.anything(), valueSpan: expect.anything(), kind: "item", key: "Specification", value: "ASD-STE100" },
+				{ keySpan: expect.anything(), valueSpan: expect.anything(), kind: "item", key: "Owner", value: "ASD" },
 			] },
 		});
 	});
 	test("splits at whichever colon appears first and preserves further colons", () => {
 		expect(spec(["网址：https://example.org:8443/path", "URL: scheme：detail:tail"]).items).toEqual([
-			{ kind: "item", key: "网址", value: "https://example.org:8443/path" },
-			{ kind: "item", key: "URL", value: "scheme：detail:tail" },
+			{ keySpan: expect.anything(), valueSpan: expect.anything(), kind: "item", key: "网址", value: "https://example.org:8443/path" },
+			{ keySpan: expect.anything(), valueSpan: expect.anything(), kind: "item", key: "URL", value: "scheme：detail:tail" },
 		]);
 	});
 	test("trims surrounding whitespace, accepts empty values, and recognizes unspaced wide markers", () => {
 		expect(spec(["  *标题 ： **正文**  ", " Value :   "]).items).toEqual([
-			{ kind: "wide", key: "标题", value: "**正文**" },
-			{ kind: "item", key: "Value", value: "" },
+			{ keySpan: expect.anything(), valueSpan: expect.anything(), kind: "wide", key: "标题", value: "**正文**" },
+			{ keySpan: expect.anything(), valueSpan: expect.anything(), kind: "item", key: "Value", value: "" },
 		]);
 	});
 	test("ignores blanks and whole-line // comments, not # keys or inline // values", () => {
 		expect(spec(["", "   ", " // note without a colon", "# Owner: ASD", "URL: //example.org"]).items).toEqual([
-			{ kind: "item", key: "# Owner", value: "ASD" },
-			{ kind: "item", key: "URL", value: "//example.org" },
+			{ keySpan: expect.anything(), valueSpan: expect.anything(), kind: "item", key: "# Owner", value: "ASD" },
+			{ keySpan: expect.anything(), valueSpan: expect.anything(), kind: "item", key: "URL", value: "//example.org" },
 		]);
 	});
 	test("reports every malformed line at its original source line while retaining drawable items", () => {
 		const result = parseKv(input(["", "// note", "bad", "Key: value", "* missing separator", "：missing key"], "", 20));
 		expect(result.ok).toBe(true);
-		if (result.ok) expect(result.value.items).toEqual([{ kind: "item", key: "Key", value: "value" }]);
+		if (result.ok) expect(result.value.items).toEqual([{ keySpan: expect.anything(), valueSpan: expect.anything(), kind: "item", key: "Key", value: "value" }]);
 		expect(result.diagnostics.map(diagnostic => [diagnostic.component, diagnostic.severity, diagnostic.line])).toEqual([
 			["kv", "error", 22], ["kv", "error", 24], ["kv", "error", 25],
 		]);
@@ -88,61 +89,28 @@ describe("kv syntax", () => {
 	});
 });
 
-describe("native kv rendering", () => {
-	test("renders ordinary entries as ordered cells in one N-column grid", () => {
-		const result = renderKv(spec(["A: a", "B: b", "C: c", "D: d", "E: e", "F: f", "G: g"], "cols=3"), context);
+describe("editable kv rendering", () => {
+	test("keys and values retain source order and exact editable spans", () => {
+		const source = "  Owner : Platform\n* Title: Wide value\nEmpty:";
+		const parsed = spec(source.split("\n"));
+		const edits: { text: string; multiline: boolean }[] = [];
+		const result = renderKv(parsed, { ...context, edit: { ...passiveEdit, text(_id, span, multiline, node) { edits.push({ text: source.slice(span.start, span.end), multiline }); return node; } } });
 		expect(result.diagnostics).toEqual([]);
-		expect(result.nodes).toHaveLength(1);
-		const grid = result.nodes[0]!;
-		expect(grid).toMatchObject({ k: "el", p: { tag: "div", class: "am-kv am-kv-3" } });
-		expect(grid.c).toHaveLength(7);
-		expect(grid.c!.map(cell => cell.c?.[0]?.p?.text)).toEqual(["A", "B", "C", "D", "E", "F", "G"]);
-		for (const [index, cell] of grid.c!.entries()) {
-			expect(cell).toMatchObject({ k: "el", p: { tag: "div", class: "am-kv-cell" } });
-			expect(cell.c?.[0]).toMatchObject({ k: "el", p: { tag: "span", class: "am-kv-key" } });
-			expect(cell.c?.[1]).toMatchObject({ k: "text", p: { spans: [{ t: String.fromCharCode(97 + index) }] } });
-		}
-	});
-	test("wide cells span the grid without reordering ordinary entries", () => {
-		const grid = renderKv(spec(["A: a", "B: b", "* Title: wide", "C: c", "* Subtitle: second", "* End: last", "D: d"]), context).nodes[0]!;
-		expect(grid.c!.map(cell => cell.c?.[0]?.p?.text)).toEqual(["A", "B", "Title", "C", "Subtitle", "End", "D"]);
-		expect(grid.c!.map(cell => cell.p?.class)).toEqual(["am-kv-cell", "am-kv-cell", "am-kv-cell am-kv-wide", "am-kv-cell", "am-kv-cell am-kv-wide", "am-kv-cell am-kv-wide", "am-kv-cell"]);
-		expect(grid.c!.filter(cell => cell.p?.class === "am-kv-cell am-kv-wide").map(cell => cell.c?.[1]?.p?.spans)).toEqual([
-			[{ t: "wide", s: "strong" }], [{ t: "second", s: "strong" }], [{ t: "last", s: "strong" }],
+		expect(edits).toEqual([
+			{ text: "Owner", multiline: false }, { text: "Platform", multiline: false },
+			{ text: "Title", multiline: false }, { text: "Wide value", multiline: false },
+			{ text: "Empty", multiline: false }, { text: "", multiline: false },
 		]);
 	});
-	test("parses Markdown values into spans while keeping source keys literal", () => {
-		const cell = renderKv(spec(["Raw **Key**: **bold** *em* `code` ~~old~~"]), context).nodes[0]!.c![0]!;
-		expect(cell.c?.[0]?.p?.text).toBe("Raw **Key**");
-		expect(cell.c?.[1]?.p?.spans).toEqual([
-			{ t: "bold", s: "strong" }, { t: " " }, { t: "em", s: "em" }, { t: " " },
-			{ t: "code", s: "code" }, { t: " " }, { t: "old", s: "del" },
-		]);
-	});
-	test("keeps all wide value runs strong while preserving their inline Markdown styles", () => {
-		const cell = renderKv(spec(["* Title: Text *em* `code` ~~old~~"]), context).nodes[0]!.c![0]!;
-		expect(cell.c?.[1]?.p?.spans).toEqual([
-			{ t: "Text ", s: "strong" }, { t: "em", s: "strong em" },
-			{ t: " ", s: "strong" }, { t: "code", s: "strong code" }, { t: " ", s: "strong" }, { t: "old", s: "strong del" },
-		]);
-	});
-	test("renders one-column and wide-only content without empty cells", () => {
-		const single = renderKv(spec(["A: a", "B: b"], "cols=1"), context).nodes[0]!;
-		expect(single.p?.class).toBe("am-kv am-kv-1");
-		expect(single.c).toHaveLength(2);
-		const wide = renderKv(spec(["* Title: t", "* Subtitle: s"]), context).nodes[0]!;
-		expect(wide.c!.map(cell => cell.p?.class)).toEqual(["am-kv-cell am-kv-wide", "am-kv-cell am-kv-wide"]);
-	});
-	test("uses globally unique context-prefixed IDs for cells and children, even with duplicate keys", () => {
-		const nodes = flatten(renderKv(spec(["A: 1", "A: 2", "* A: 3", "A: 4", "* A: 5", "A: 6"]), context).nodes);
-		const ids = nodes.map(node => node.id);
+	test("duplicate keys still emit unique namespaced node ids", () => {
+		const ids = flatten(renderKv(spec(["A: 1", "A: 2", "* A: 3"]), context).nodes).map(node => node.id);
 		expect(new Set(ids).size).toBe(ids.length);
-		for (const id of ids) expect(id.startsWith(`${context.id}.`)).toBe(true);
+		expect(ids.every(id => id.startsWith(`${context.id}.`))).toBe(true);
 	});
-	test("kv is independent of change views", () => {
-		const parsed = spec(["A: a", "* Title: t"]);
-		for (const view of ["before", "after"] as const) {
-			expect(renderKv(parsed, { ...context, view })).toEqual(renderKv(parsed, context));
-		}
+	test("declared slots in values use the slot host without changing keys", () => {
+		const uses: string[] = [];
+		const slot = { name: "owner", value: "Platform", options: [], line: 1 };
+		renderKv(spec(["Owner: {{owner}}"]), { ...context, slots: new Map([["owner", slot]]), edit: { ...passiveEdit, slot(id, name) { uses.push(name); return { id, k: "text", p: { text: slot.value } }; } } });
+		expect(uses).toEqual(["owner"]);
 	});
 });

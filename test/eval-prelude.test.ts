@@ -49,7 +49,7 @@ function harness(context: { doc?: string; run?: string; launch?: string } = { do
 		agent: async (prompt, options) => {
 			calls.push({ kind: "agent", prompt, options });
 			if (agentFailure) throw agentFailure;
-			return { id: "worker-1", wait: async () => { calls.push({ kind: "wait" }); waiting.resolve(); return outcome.promise; } };
+			return { cancel: async () => {}, id: "worker-1", wait: async () => { calls.push({ kind: "wait" }); waiting.resolve(); return outcome.promise; } };
 		},
 	};
 	return {
@@ -220,13 +220,14 @@ test("spawn refuses a closed Launch before starting a subagent", async () => {
 	expect(h.calls).toEqual([{ kind: "tool", name: "playbook_launch", args: { doc: "/book.yaml", op: "info", launch: "l1" } }]);
 });
 
-test("tool error JSON propagates instead of starting an agent; missing Run fails before requesting a Launch", async () => {
+test("tool errors propagate without starting an agent; omitted run targets the template", async () => {
 	const h = harness(); h.toolFailure = { code: "RunFinished", message: "Run is finished" };
 	await expect(h.playbook.agent({ blocks: ["b1"] })).rejects.toThrow("RunFinished: Run is finished");
 	expect(h.calls).toHaveLength(1);
 	const noRun = harness({});
-	await expect(noRun.playbook.run({ blocks: ["b1"] })).rejects.toThrow("run is required");
-	expect(noRun.calls).toEqual([]);
+	const spawned = await noRun.playbook.agent({ blocks: ["b1"] });
+	expect(spawned.run).toBeUndefined();
+	expect(noRun.calls[0]).toEqual({ kind: "tool", name: "playbook_launch", args: { op: "launch", blocks: ["b1"] } });
 });
 
 test("read, timeline and post decode JSON text and respect explicit scope overrides", async () => {
@@ -250,4 +251,33 @@ test("result decodes the eval agent wait JSON envelope before returning or recor
 		{ kind: "tool", name: "playbook_timeline", args: { doc: "/book.yaml", run: "r1", op: "post", kind: "result", text: "hello", launch: "l1", block: "b1" } },
 		close(),
 	]);
+});
+
+test("template helper calls omit run and stop cancels handles before resetting only running roots", async () => {
+	const calls: { op: string; args?: Record<string, unknown> }[] = [];
+	const deps: PlaybookDeps = {
+		doc: "/template.yaml",
+		agent: async () => ({ id: "stop-worker", wait: async () => "unused", cancel: () => { calls.push({ op: "cancel" }); } }),
+		tool: {
+			playbook_launch: async args => {
+				calls.push({ op: "launch", args });
+				if (args.op === "launch") return { launch: "l999", kind: "prompt", text: "Prompt" };
+				if (args.op === "info") return { run: null, kind: "prompt", blocks: ["b1", "b2"], baselines: ["Prompt"], snapshot: { result: { text: "Prompt" } }, closed: null };
+				return null;
+			},
+			playbook_read: async args => { calls.push({ op: "read", args }); return { status: args.block === "b1" ? "running" : "done" }; },
+			playbook_edit: async args => { calls.push({ op: "edit", args }); return null; },
+		},
+	};
+	const firstCell = createPlaybook(deps);
+	const spawned = await firstCell.agent({ blocks: ["b1", "b2"] });
+	expect(spawned.run).toBeUndefined();
+	expect(calls[0]).toEqual({ op: "launch", args: { doc: "/template.yaml", op: "launch", blocks: ["b1", "b2"] } });
+	calls.length = 0;
+	const laterCell = createPlaybook(deps);
+	expect(await laterCell.stop("l999")).toEqual({ cancelled: ["stop-worker"] });
+	expect(calls.map(call => call.op)).toEqual(["cancel", "launch", "read", "edit", "read"]);
+	expect(calls[3]).toEqual({ op: "edit", args: { doc: "/template.yaml", op: "status", block: "b1", value: "todo" } });
+	expect(calls.every(call => call.args === undefined || !("run" in call.args))).toBe(true);
+	await expect(laterCell.stop("l999")).rejects.toThrow();
 });

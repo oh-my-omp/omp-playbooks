@@ -1,8 +1,9 @@
+import { fence, passiveEdit, renderDefaults } from "./draft-helpers";
 import { describe, expect, test } from "bun:test";
 import type { RenderContext } from "../src/service/draft/contract";
 import { parseTable, renderTable, type TableSpec } from "../src/service/draft/table";
 
-const ctx: RenderContext = {
+const ctx: RenderContext = { ...renderDefaults,
 	id: "draft.table.7",
 	view: "changes",
 	svg() { throw new Error("Tables must not render SVG"); },
@@ -11,7 +12,7 @@ const ctx: RenderContext = {
 };
 
 function parse(lines: readonly string[], line = 20): TableSpec {
-	const parsed = parseTable({ args: "", lines, line });
+	const parsed = parseTable(fence({ args: "", lines, line }));
 	if (!parsed.ok) throw new Error(JSON.stringify(parsed.diagnostics));
 	return parsed.value;
 }
@@ -22,11 +23,11 @@ function rendered(lines: readonly string[]) {
 
 describe("draft table", () => {
 	test("parses and renders aligned GFM cells, escaped pipes, inline Markdown and status", () => {
-		const result = parseTable({
+		const result = parseTable(fence({
 			args: "",
 			line: 5,
 			lines: ["| **Check** | Result | Count |", "| :--- | :---: | ---: |", "| API\\|CLI | ok **approved** | `3` |"],
-		});
+		}));
 		expect(result.ok).toBe(true);
 		if (!result.ok) return;
 		expect(result.diagnostics).toEqual([]);
@@ -77,7 +78,7 @@ describe("draft table", () => {
 	});
 
 	test("pads short rows and drops excess cells with original-line warnings", () => {
-		const result = parseTable({ args: "", line: 40, lines: ["| A | B |", "| --- | --- |", "| short |", "| one | two | extra |", "| good | row |"] });
+		const result = parseTable(fence({ args: "", line: 40, lines: ["| A | B |", "| --- | --- |", "| short |", "| one | two | extra |", "| good | row |"] }));
 		expect(result.ok).toBe(true);
 		if (!result.ok) return;
 		expect(result.value.rows).toEqual([["short", ""], ["one", "two"], ["good", "row"]]);
@@ -95,7 +96,7 @@ describe("draft table", () => {
 		["delimiter column-count mismatch", ["| A | B |", "| --- |"]],
 		["empty delimiter cell", ["| A | B |", "| --- | |"]],
 	] as const)("reports %s as an error at the delimiter line", (_label, lines) => {
-		const result = parseTable({ args: "", lines, line: 12 });
+		const result = parseTable(fence({ args: "", lines, line: 12 }));
 		expect(result.ok).toBe(false);
 		expect(result.diagnostics).toHaveLength(1);
 		expect(result.diagnostics[0]).toMatchObject({ component: "table", severity: "error", line: 13 });

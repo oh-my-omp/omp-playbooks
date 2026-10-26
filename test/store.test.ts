@@ -12,7 +12,7 @@ function fixture() {
 	return { directory, path, store: createStore(path) };
 }
 afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }); });
-const doc: PlaybookDoc = { title: "Incident: #237", blocks: [{ id: "b1", title: "First step", content: { kind: "task", body: "alpha\nbeta\ngamma\n" }, done: false }] };
+const doc: PlaybookDoc = { title: "Incident: #237", blocks: [{ id: "b1", title: "First step", content: { kind: "task", body: "alpha\nbeta\ngamma\n" }, progress: { kind: "tracked", status: "todo", report: null } }] };
 const run: RunMeta = { id: "r1", name: "Night shift", status: "running", startedAt: Date.parse("2026-10-11T00:00:00.123Z"), finishedAt: null, updateEvery: 60, updateDue: Date.parse("2026-10-11T00:01:00.123Z") };
 const launch: Launch = {
 	id: "l1", run: "r1", session: "session-1", blocks: ["b1"], kind: "prompt",
@@ -57,13 +57,13 @@ describe("YAML persistence", () => {
 		for (const design of ["", "## A Plan\n\n```code\nconst value = 1;\n```\n"]) {
 			test(`design YAML roundtrip ${JSON.stringify({ requirement, design })}`, () => {
 				const { path, store } = fixture();
-				const value: PlaybookDoc = { ...doc, blocks: [...doc.blocks, { id: "b2", title: "Design", done: true, content: { kind: "design", requirement, design } }] };
+				const value: PlaybookDoc = { ...doc, blocks: [...doc.blocks, { id: "b2", title: "Design", progress: { kind: "tracked", status: "done", report: null }, content: { kind: "design", requirement, design } }] };
 				const text = store.serialize(value, null);
 				expect(Bun.YAML.parse(text)).toEqual({
 					title: doc.title,
 					blocks: [
-						{ id: "b1", title: "First step", body: "alpha\nbeta\ngamma\n", done: false },
-						{ id: "b2", title: "Design", requirement, design, done: true },
+						{ id: "b1", title: "First step", body: "alpha\nbeta\ngamma\n", status: "todo" },
+						{ id: "b2", title: "Design", requirement, design, status: "done" },
 					],
 				});
 				expect(store.parse(text, false)).toEqual({ ok: true, doc: value, run: null });
@@ -74,7 +74,7 @@ describe("YAML persistence", () => {
 	}
 	test("legacy body-only YAML still decodes as a task block", () => {
 		const { path } = fixture();
-		writeFileSync(path, 'title: "Incident: #237"\nblocks:\n  - id: b1\n    title: First step\n    body: |\n      alpha\n      beta\n      gamma\n    done: false\n');
+		writeFileSync(path, 'title: "Incident: #237"\nblocks:\n  - id: b1\n    title: First step\n    body: |\n      alpha\n      beta\n      gamma\n    status: todo\n');
 		expect(createStore(path).readTemplate()).toEqual({ ok: true, doc, run: null });
 	});
 	for (const content of [
@@ -87,7 +87,7 @@ describe("YAML persistence", () => {
 	]) {
 		test(`mixed or missing content keys reject ${JSON.stringify(content)}`, () => {
 			const { store } = fixture();
-			const text = JSON.stringify({ title: "Invalid content", blocks: [{ id: "b1", title: "Block", done: false, ...content }] });
+			const text = JSON.stringify({ title: "Invalid content", blocks: [{ id: "b1", title: "Block", status: "todo", ...content }] });
 			const result = store.parse(text, false);
 			expect(result.ok).toBe(false);
 			if (!result.ok) expect(result.error.length).toBeGreaterThan(0);
@@ -95,14 +95,14 @@ describe("YAML persistence", () => {
 	}
 	test("a task block's execution contract roundtrips trimmed, and a block without one serializes as before", () => {
 		const { store } = fixture();
-		expect(store.serialize(doc, null)).toBe('title: "Incident: #237"\nblocks:\n  - id: b1\n    title: "First step"\n    body: |2\n      alpha\n      beta\n      gamma\n    done: false\n');
-		const parsed = store.parse('title: "T"\nblocks:\n  - id: b1\n    title: "A"\n    body: |2-\n      hi\n    agent: " task:mid "\n    isolated: false\n    done: false\n', false);
-		const configured: PlaybookDoc = { title: "T", blocks: [{ id: "b1", title: "A", content: { kind: "task", body: "hi", agent: "task:mid", isolated: false }, done: false }] };
+		expect(store.serialize(doc, null)).toBe('title: "Incident: #237"\nblocks:\n  - id: b1\n    title: "First step"\n    body: |2\n      alpha\n      beta\n      gamma\n    status: todo\n');
+		const parsed = store.parse('title: "T"\nblocks:\n  - id: b1\n    title: "A"\n    body: |2-\n      hi\n    agent: " task:mid "\n    isolated: false\n    status: todo\n', false);
+		const configured: PlaybookDoc = { title: "T", blocks: [{ id: "b1", title: "A", content: { kind: "task", body: "hi", agent: "task:mid", isolated: false }, progress: { kind: "tracked", status: "todo", report: null } }] };
 		expect(parsed).toEqual({ ok: true, doc: configured, run: null });
 		const text = store.serialize(configured, null);
-		expect(text).toBe('title: "T"\nblocks:\n  - id: b1\n    title: "A"\n    body: |2-\n      hi\n    agent: "task:mid"\n    isolated: false\n    done: false\n');
+		expect(text).toBe('title: "T"\nblocks:\n  - id: b1\n    title: "A"\n    body: |2-\n      hi\n    agent: "task:mid"\n    isolated: false\n    status: todo\n');
 		expect(store.parse(text, false)).toEqual({ ok: true, doc: configured, run: null });
-		const isolatedOnly: PlaybookDoc = { title: "T", blocks: [{ id: "b1", title: "A", content: { kind: "task", body: "hi", isolated: true }, done: false }] };
+		const isolatedOnly: PlaybookDoc = { title: "T", blocks: [{ id: "b1", title: "A", content: { kind: "task", body: "hi", isolated: true }, progress: { kind: "tracked", status: "todo", report: null } }] };
 		expect(store.parse(store.serialize(isolatedOnly, null), false)).toEqual({ ok: true, doc: isolatedOnly, run: null });
 	});
 	for (const [name, extra] of [
@@ -114,13 +114,13 @@ describe("YAML persistence", () => {
 	] as const) {
 		test(`task execution contract rejects ${name}`, () => {
 			const { store } = fixture();
-			expect(store.parse(JSON.stringify({ title: "T", blocks: [{ id: "b1", title: "A", body: "x", done: false, ...extra }] }), false).ok).toBe(false);
+			expect(store.parse(JSON.stringify({ title: "T", blocks: [{ id: "b1", title: "A", body: "x", status: "todo", ...extra }] }), false).ok).toBe(false);
 		});
 	}
 	for (const extra of [{ agent: "task:mid" }, { isolated: true }]) {
 		test(`a design block refuses ${Object.keys(extra)[0]}`, () => {
 			const { store } = fixture();
-			const result = store.parse(JSON.stringify({ title: "T", blocks: [{ id: "b1", title: "D", requirement: "", design: "", done: false, ...extra }] }), false);
+			const result = store.parse(JSON.stringify({ title: "T", blocks: [{ id: "b1", title: "D", requirement: "", design: "", status: "todo", ...extra }] }), false);
 			expect(result).toEqual({ ok: false, error: `Unknown field: ${Object.keys(extra)[0]}` });
 		});
 	}
@@ -157,7 +157,7 @@ describe("YAML persistence", () => {
 		const value = { title: "", blocks: [] };
 		expect(store.parse(store.serialize(value, null), false)).toEqual({ ok: true, doc: value, run: null });
 	});
-	for (const invalid of ["[", "null", "[]", "title: x\nblocks: {}", "title: 3\nblocks: []", "title: x\nblocks: []\nextra: true", "title: x\nblocks:\n - id: b0\n   title: x\n   body: x\n   done: false", "title: x\nblocks:\n - id: b1\n   title: x\n   body: x\n   done: 1", "title: x\nblocks:\n - id: b1\n   title: x\n   done: false", "title: x\nblocks:\n - {id: b1, title: x, body: x, done: false}\n - {id: b1, title: y, body: y, done: true}"]) {
+	for (const invalid of ["[", "null", "[]", "title: x\nblocks: {}", "title: 3\nblocks: []", "title: x\nblocks: []\nextra: true", "title: x\nblocks:\n - id: b0\n   title: x\n   body: x\n   status: todo", "title: x\nblocks:\n - id: b1\n   title: x\n   body: x\n   done: 1", "title: x\nblocks:\n - id: b1\n   title: x\n   status: todo", "title: x\nblocks:\n - {id: b1, title: x, body: x, status: todo}\n - {id: b1, title: y, body: y, status: done}"]) {
 		test(`invalid document rejects ${JSON.stringify(invalid)}`, () => {
 			const { store } = fixture();
 			const result = store.parse(invalid, false);
@@ -244,10 +244,10 @@ describe("append-only facts", () => {
 			{ type: "block_edited", block: "b1", field: "body", text: "\nnew\n", edit: 1 },
 			{ type: "block_added", block: "b2", title: "New", content: { kind: "task", body: "body" } },
 			{ type: "block_deleted", block: "b2", title: "New", content: { kind: "task", body: "body" } },
-			{ type: "blocks_reordered", order: ["b2", "b1"] }, { type: "done_changed", block: "b1", done: true },
+			{ type: "blocks_reordered", order: ["b2", "b1"] }, { type: "progress_changed", block: "b1", progress: { kind: "tracked", status: "done", report: null } },
 			{ type: "launch_created", launch: "l1", kind: "prompt", blocks: ["b1"] },
 			{ type: "agent_bound", launch: "l1", agent: "agent-1" }, { type: "launch_closed", launch: "l1" },
-			{ type: "event_sent", event: "run_started", data: { run: "r1", name: "Shift" } },
+			{ type: "event_sent", event: "status_changed", data: { run: "r1", block: "b1", status: "done" } },
 			{ type: "interrupted", block: "b1", request: "req" },
 			{ type: "check_reported", blocks: ["b1"], version: "v1", result: { kind: "answers", answers: { completeness: 1 } } },
 			{ type: "check_reported", blocks: ["b1"], version: "v2", result: { kind: "judge_unavailable" } },
@@ -256,14 +256,14 @@ describe("append-only facts", () => {
 			{ type: "update_due", due: 100 }, { type: "update_snoozed", due: 200 },
 		];
 		const entries: TimelineEntry[] = payloads.map((data, index) => ({ seq: index + 1, at: index, origin: "service", data }));
-		store.appendEntry("r1", entries[0]!);
+		store.appendEntry({ kind: "run", run: "r1" }, entries[0]!);
 		const path = join(directory, "incident.runs/r1.jsonl");
 		const prefix = readFileSync(path, "utf8");
 		expect(JSON.parse(prefix)).toEqual({ entry: { seq: 1, at: 0, type: "run_started", origin: "service", data: { name: "Shift" } } });
-		for (const entry of entries.slice(1)) store.appendEntry("r1", entry);
+		for (const entry of entries.slice(1)) store.appendEntry({ kind: "run", run: "r1" }, entry);
 		expect(readFileSync(path, "utf8").startsWith(prefix)).toBe(true);
 		expect(readFileSync(path, "utf8").split("\n").length).toBe(entries.length + 1);
-		expect(store.readRunLog("r1").entries).toEqual(entries);
+		expect(store.readLog({ kind: "run", run: "r1" }).entries).toEqual(entries);
 	});
 	for (const type of ["block_added", "block_deleted", "content_replaced"] as const) {
 		for (const { content, flattened } of [
@@ -277,7 +277,7 @@ describe("append-only facts", () => {
 					? { type, block: "b2", content }
 					: { type, block: "b2", title: "Block title", content };
 				const entry: TimelineEntry = { seq: 1, at: 100, origin: "disk", data };
-				store.appendEntry("r1", entry);
+				store.appendEntry({ kind: "run", run: "r1" }, entry);
 				const text = readFileSync(join(directory, "incident.runs/r1.jsonl"), "utf8");
 				expect(JSON.parse(text)).toEqual({
 					entry: {
@@ -285,7 +285,7 @@ describe("append-only facts", () => {
 						data: { block: "b2", ...(type === "content_replaced" ? {} : { title: "Block title" }), ...flattened },
 					},
 				});
-				expect(createStore(path).readRunLog("r1")).toEqual({ entries: [entry], launches: new Map() });
+				expect(createStore(path).readLog({ kind: "run", run: "r1" })).toEqual({ entries: [entry], launches: new Map() });
 			});
 		}
 	}
@@ -297,7 +297,7 @@ describe("append-only facts", () => {
 			'{"entry":{"seq":2,"at":101,"type":"block_deleted","origin":"disk","data":{"block":"b2","title":"Old block","body":"old body"}}}',
 			"",
 		].join("\n"));
-		expect(createStore(path).readRunLog("r1")).toEqual({
+		expect(createStore(path).readLog({ kind: "run", run: "r1" })).toEqual({
 			entries: [
 				{ seq: 1, at: 100, origin: "coordinator", data: { type: "block_added", block: "b2", title: "Old block", content: { kind: "task", body: "old body" } } },
 				{ seq: 2, at: 101, origin: "disk", data: { type: "block_deleted", block: "b2", title: "Old block", content: { kind: "task", body: "old body" } } },
@@ -307,15 +307,15 @@ describe("append-only facts", () => {
 	});
 	test("Launch keeps its full nested state; the last line for each Launch wins", () => {
 		const { store } = fixture();
-		expect(store.readRunLog("r1")).toEqual({ entries: [], launches: new Map() });
-		store.appendLaunch("r1", launch);
-		store.appendLaunch("r1", { ...launch, id: "l2" });
+		expect(store.readLog({ kind: "run", run: "r1" })).toEqual({ entries: [], launches: new Map() });
+		store.appendLaunch({ kind: "run", run: "r1" }, launch);
+		store.appendLaunch({ kind: "run", run: "r1" }, { ...launch, id: "l2" });
 		const latest: Launch = { ...launch, agents: ["agent-1"], dirty: [["b1", 2]], baselines: ["snapshot", "new baseline"], notified: { kind: "Ok", text: "changed", sources: [] }, fetches: [
 			["missing", { ok: false, at: 13, error: "Missing" }],
 			["issue", { ok: true, at: 14, value: { kind: "issue", issue: { title: "Issue", body: "Body", comments: [{ author: "A", createdAt: "now", body: "Reply" }] } } }],
 		], closed: { at: 15, by: "run_finished" } };
-		store.appendLaunch("r1", latest);
-		const result = store.readRunLog("r1");
+		store.appendLaunch({ kind: "run", run: "r1" }, latest);
+		const result = store.readLog({ kind: "run", run: "r1" });
 		expect(result.entries).toEqual([]);
 		expect(result.launches.get("l1")).toEqual(latest);
 		expect(result.launches.get("l2")).toEqual({ ...launch, id: "l2" });
@@ -326,8 +326,8 @@ describe("append-only facts", () => {
 		const errors: CompileError[] = [{ kind: "UnknownBlock", block: "b2", at }, { kind: "UnknownTarget", at }, { kind: "BadExpression", reason: "invalid", at }, { kind: "Cycle", path: ["b1", "b2", "b1"], at }, { kind: "TooDeep", at }, { kind: "NoResult", block: "b2", at }, { kind: "FetchFailed", target: "file:a", error: "missing", at }];
 		for (const error of errors) {
 			const updated = { ...launch, notified: { kind: "Err" as const, error } };
-			store.appendLaunch("r1", updated);
-			expect(store.readRunLog("r1").launches.get("l1")).toEqual(updated);
+			store.appendLaunch({ kind: "run", run: "r1" }, updated);
+			expect(store.readLog({ kind: "run", run: "r1" }).launches.get("l1")).toEqual(updated);
 		}
 	});
 	test("malformed logs do not masquerade as empty or partial valid logs", () => {
@@ -337,7 +337,7 @@ describe("append-only facts", () => {
 		const valid = JSON.stringify({ entry: { seq: 1, at: 0, type: "run_finished", origin: "service", data: {} } });
 		for (const bad of ["{", "", '{"entry":{"seq":2,"at":0,"type":"unknown","origin":"service","data":{}}}', '{"entry":{"seq":2,"at":0,"type":"done_changed","origin":"service","data":{"block":"b1","done":"yes"}}}', valid, JSON.stringify({ launch: { ...launch, run: "r2" } }), JSON.stringify({ launch: { ...launch, dirty: [["b1"]] } })]) {
 			writeFileSync(path, `${valid}\n${bad}\n`);
-			expect(() => store.readRunLog("r1")).toThrow(`${path}:2:`);
+			expect(() => store.readLog({ kind: "run", run: "r1" })).toThrow(`${path}:2:`);
 		}
 	});
 });
@@ -365,7 +365,7 @@ describe("revision journals", () => {
 		const reopened = createStore(path);
 		for (const [index, journal] of journals.entries()) expect(reopened.readRevisions(journal.ref)).toEqual(histories[index]!);
 		expect(reopened.readRevisions({ kind: "run", run: "r3" })).toEqual([]);
-		expect(reopened.readRunLog("r1")).toEqual({ entries: [], launches: new Map() });
+		expect(reopened.readLog({ kind: "run", run: "r1" })).toEqual({ entries: [], launches: new Map() });
 	});
 	for (const kind of ["template", "run"] as const) {
 		for (const seq of [2, 1]) {

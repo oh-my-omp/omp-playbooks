@@ -1,16 +1,17 @@
+import { fence, passiveEdit, renderDefaults } from "./draft-helpers";
 import { describe, expect, test } from "bun:test";
 import { parseEr, renderEr, type ErSpec } from "../src/service/draft/er";
 import type { ChangeView, RenderContext } from "../src/service/draft/contract";
 import type { TspNode } from "../src/service/tsp-types";
 
 function parsed(text: string, args = "", line = 10): ErSpec {
-	const result = parseEr({ args, lines: text.split("\n"), line });
+	const result = parseEr(fence({ args, lines: text.split("\n"), line }));
 	if (!result.ok) throw new Error(JSON.stringify(result.diagnostics));
 	expect(result.diagnostics).toEqual([]);
 	return result.value;
 }
 function error(text: string, offset: number, includes: string, args = ""): void {
-	const result = parseEr({ args, lines: text.split("\n"), line: 10 });
+	const result = parseEr(fence({ args, lines: text.split("\n"), line: 10 }));
 	expect(result.ok).toBe(false);
 	if (result.ok) throw new Error("Expected error");
 	expect(result.diagnostics[0]).toMatchObject({ component: "er", severity: "error", line: 10 + offset });
@@ -19,7 +20,7 @@ function error(text: string, offset: number, includes: string, args = ""): void 
 function draw(spec: ErSpec, view: ChangeView = "changes"): { svg: string; nodes: readonly TspNode[]; width: number } {
 	let svg = "";
 	let width = 0;
-	const ctx: RenderContext = {
+	const ctx: RenderContext = { ...renderDefaults,
 		id: "er.test", view,
 		svg(id, source, size, alt) { svg = source; width = size.w; return { id, k: "image", p: { alt } }; },
 		image() { throw new Error("Unexpected image"); },

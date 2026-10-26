@@ -1,15 +1,16 @@
+import { fence, passiveEdit, renderDefaults } from "./draft-helpers";
 import { describe, expect, test } from "bun:test";
 import { parseDiff, renderDiff, type DiffSpec } from "../src/service/draft/diff";
 import type { Parsed, RenderContext } from "../src/service/draft/contract";
 
 function parse(lines: readonly string[], args = "", line = 12): Parsed<DiffSpec> {
-	return parseDiff({ lines, args, line });
+	return parseDiff(fence({ lines, args, line }));
 }
 function value(result: Parsed<DiffSpec>): DiffSpec {
 	if (!result.ok) throw new Error(JSON.stringify(result.diagnostics));
 	return result.value;
 }
-const ctx: RenderContext = {
+const ctx: RenderContext = { ...renderDefaults,
 	id: "draft.diff", view: "changes",
 	svg: () => { throw new Error("Diff must use native nodes"); },
 	image: () => { throw new Error("Diff must use native nodes"); },

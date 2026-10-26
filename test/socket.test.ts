@@ -62,7 +62,11 @@ const valid: readonly [string, unknown][] = [
 	["unlock", { block: "b2", request: "lock-id" }],
 	["read", { run: "r1", block: "b2" }],
 	["set", { block: "b2", field: "title", value: "title" }],
-	["set", { block: "b2", field: "done", value: false }],
+	["set", { block: "b2", field: "status", value: "todo" }],
+	["set", { block: "b2", field: "task", value: false }],
+	["launch", { blocks: ["b2"] }],
+	["timeline", {}],
+	["post", { kind: "result", text: "Template result" }],
 	["set", { block: "b2", field: "agent", value: "task:mid" }],
 	["set", { block: "b2", field: "agent", value: null }],
 	["set", { block: "b2", field: "isolated", value: true }],
@@ -118,12 +122,12 @@ describe("parseRequest", () => {
 		for (const [op, args] of valid) {
 			if (typeof args !== "object" || args === null) throw new Error("invalid fixture");
 			for (const key of Object.keys(args)) {
-				if (["pane", "run", "after", "update_every", "next", "quote", "origin"].includes(key) && !(["launch", "finish_run", "timeline", "post", "snooze"].includes(op) && key === "run") && !(op === "snooze" && key === "after")) continue;
+				if (["pane", "run", "after", "update_every", "next", "quote", "origin"].includes(key) && !(["finish_run", "snooze"].includes(op) && key === "run") && !(op === "snooze" && key === "after")) continue;
 				if (key === "block" && (op === "read" || op === "post" || op === "revisions")) continue;
 				if (key === "launch" && op === "post") continue;
 				const incomplete = { ...args };
 				Reflect.deleteProperty(incomplete, key);
-				expect(parseRequest(op, incomplete)).toMatchObject({ code: op === "launch" && key === "run" ? "BadLaunch" : "BadValue" });
+				expect(parseRequest(op, incomplete)).toMatchObject({ code: "BadValue" });
 			}
 		}
 	});
@@ -171,7 +175,7 @@ describe("parseRequest", () => {
 	});
 
 	test("does not perform document, run, or report business validation", () => {
-		expect(parseRequest("launch", { blocks: [] })).toMatchObject({ code: "BadLaunch" });
+		expect(parseRequest("launch", { blocks: [] })).toMatchObject({ op: "launch", args: { blocks: [] } });
 		expect(parseRequest("launch", { run: "r1", blocks: [] })).toEqual({ op: "launch", args: { run: "r1", blocks: [] } });
 		expect(parseRequest("read", { block: "b999" })).toMatchObject({ op: "read" });
 		expect(parseRequest("post", { run: "r999", kind: "retrospective", text: "x" })).toMatchObject({ op: "post" });
@@ -205,12 +209,12 @@ describe("serveK1 real Unix sockets", () => {
 	test("pushes events and preserves success-without-result and error frames", async () => {
 		const path = tempPath();
 		await start(path, async (conn, id): Promise<Outcome<unknown>> => {
-			conn.send({ event: "run_started", data: { run: "r1", name: "Run" } });
+			conn.send({ event: "status_changed", data: { run: "r1", block: "b1", status: "done" } });
 			return id === "empty" ? { ok: true, result: undefined } : { ok: false, error: { code: "NotHello", message: "hello required" } };
 		});
 		const c = await client(path);
 		c.socket.write('{"id":"empty","op":"runs","args":{}}\n');
-		expect(await c.next()).toEqual({ event: "run_started", data: { run: "r1", name: "Run" } });
+		expect(await c.next()).toEqual({ event: "status_changed", data: { run: "r1", block: "b1", status: "done" } });
 		expect(await c.next()).toEqual({ id: "empty", ok: true, result: null });
 		c.socket.write('{"id":"error","op":"runs","args":{}}\n');
 		await c.next();
@@ -253,7 +257,7 @@ describe("serveK1 real Unix sockets", () => {
 		c.socket.destroy();
 		const conn = await disconnected.promise;
 		conn.close();
-		conn.send({ event: "run_finished", data: { run: "r1" } });
+		conn.send({ event: "status_changed", data: { run: "r1", block: "b1", status: "todo" } });
 		release.resolve();
 		await finished.promise;
 		await setImmediate();
@@ -302,14 +306,14 @@ describe("serveK1 real Unix sockets", () => {
 		const path = tempPath();
 		const name = "状态".repeat(300_000);
 		await start(path, async conn => {
-			conn.send({ event: "run_started", data: { run: "r1", name } });
-			conn.send({ event: "run_finished", data: { run: "r1" } });
+			conn.send({ event: "revision_requested", data: { block: "b1", revision: 1, ...{ padding: name } } });
+			conn.send({ event: "status_changed", data: { run: "r1", block: "b1", status: "todo" } });
 			return { ok: true, result: "done" };
 		});
 		const c = await client(path);
 		c.socket.write('{"id":"large","op":"runs","args":{}}\n');
-		expect(await c.next()).toEqual({ event: "run_started", data: { run: "r1", name } });
-		expect(await c.next()).toEqual({ event: "run_finished", data: { run: "r1" } });
+		expect(await c.next()).toEqual({ event: "revision_requested", data: { block: "b1", revision: 1, ...{ padding: name } } });
+		expect(await c.next()).toEqual({ event: "status_changed", data: { run: "r1", block: "b1", status: "todo" } });
 		expect(await c.next()).toEqual({ id: "large", ok: true, result: "done" });
 	});
 

@@ -15,7 +15,7 @@ function task(body: string): BlockContent {
 	return { kind: "task", body };
 }
 function input(entries: readonly (readonly [BlockId, BlockContent])[], fetches: readonly (readonly [string, FetchOutcome])[] = []): CompileInput {
-	return { blocks: new Map(entries), fetches: new Map(fetches), results: new Map(), inTemplate: false };
+	return { blocks: new Map(entries), fetches: new Map(fetches), results: new Map(), };
 }
 function ok(result: CompileResult): Extract<CompileResult, { kind: "Ok" }> {
 	if (result.kind === "Err") throw new Error(JSON.stringify(result.error));
@@ -137,7 +137,7 @@ describe("pure compile and expansion", () => {
 	test("depth 8 succeeds and depth 9 fails at referring block", () => {
 		const blocks = new Map<BlockId, BlockContent>();
 		for (let number = 1; number <= 8; number++) blocks.set(`b${number}`, task(number === 8 ? "end" : `((b${number + 1}))`));
-		const data: CompileInput = { blocks, fetches: new Map(), results: new Map(), inTemplate: false };
+		const data: CompileInput = { blocks, fetches: new Map(), results: new Map(), };
 		expect(ok(references.compile(["b1"], data)).text).toBe("end");
 		blocks.set("b8", task("((b9))")); blocks.set("b9", task("end"));
 		expect(references.compile(["b1"], data)).toEqual({ kind: "Err", error: { kind: "TooDeep", at: { block: "b8", reference: "((b9))" } } });
@@ -145,7 +145,7 @@ describe("pure compile and expansion", () => {
 	test("result snapshots are not recursively expanded and carry provenance", () => {
 		const data: CompileInput = { ...input([["b1", task("((b9.result | lines(2..2)))")]]), results: new Map([["b9", { text: "ignored\n((not-a-reference-in-results))", at: fetchedAt, seq: 42, origin: "human", launch: "l2" }]]) };
 		expect(references.compile(["b1"], data)).toEqual({ kind: "Ok", text: "((not-a-reference-in-results))", sources: [{ kind: "result", target: "b9.result", expression: "lines(2..2)", seq: 42, origin: "human", launch: "l2" }] });
-		expect(references.compile(["b1"], { ...data, inTemplate: true })).toEqual({ kind: "Err", error: { kind: "NoResult", block: "b9", at: { block: "b1", reference: "((b9.result | lines(2..2)))" } } });
+		expect(references.compile(["b1"], { ...data, results: new Map() })).toEqual({ kind: "Err", error: { kind: "NoResult", block: "b9", at: { block: "b1", reference: "((b9.result | lines(2..2)))" } } });
 		expect(references.compile(["b1"], { ...data, results: new Map() }).kind).toBe("Err");
 	});
 	test("unknown block, unknown target, missing fetch and failed fetch preserve error sites", () => {

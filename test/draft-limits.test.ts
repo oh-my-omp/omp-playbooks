@@ -1,9 +1,10 @@
+import { fence, passiveEdit, renderDefaults } from "./draft-helpers";
 import { describe, expect, test } from "bun:test";
 import type { RenderContext } from "../src/service/draft/contract";
 import { parseLimits, renderLimits } from "../src/service/draft/limits";
 import type { TspNode } from "../src/service/tsp-types";
 
-const ctx: RenderContext = {
+const ctx: RenderContext = { ...renderDefaults,
 	id: "limits-test",
 	view: "changes",
 	svg() { throw new Error("limits must render native nodes"); },
@@ -12,7 +13,7 @@ const ctx: RenderContext = {
 };
 
 function parse(lines: readonly string[], line = 10) {
-	return parseLimits({ args: "", lines, line });
+	return parseLimits(fence({ args: "", lines, line }));
 }
 
 function nodesOfKind(nodes: readonly TspNode[], kind: string): TspNode[] {

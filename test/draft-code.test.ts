@@ -1,9 +1,10 @@
+import { fence, passiveEdit, renderDefaults } from "./draft-helpers";
 import { describe, expect, test } from "bun:test";
 import { parseCode, renderCode, type CodeSpec } from "../src/service/draft/code";
 import type { FileRead, RenderContext } from "../src/service/draft/contract";
 
 function parsed(args: string, lines: readonly string[] = [], line = 12): CodeSpec {
-	const result = parseCode({ args, lines, line });
+	const result = parseCode(fence({ args, lines, line }));
 	if (!result.ok) throw new Error(JSON.stringify(result.diagnostics));
 	return result.value;
 }
@@ -12,7 +13,7 @@ function context(result: FileRead = { ok: true, bytes: new TextEncoder().encode(
 	const reads: string[] = [];
 	return {
 		reads,
-		ctx: {
+		ctx: { ...renderDefaults,
 			id: "draft.code-1", view: "changes",
 			svg() { throw new Error("code must use a native TSP node"); },
 			image() { throw new Error("code must use a native TSP node"); },
@@ -26,7 +27,7 @@ function file(text: string, path = "/playbook/example.ts"): FileRead {
 }
 
 function rejects(args: string, lines: readonly string[] = [], message?: string): void {
-	const result = parseCode({ args, lines, line: 12 });
+	const result = parseCode(fence({ args, lines, line: 12 }));
 	expect(result.ok).toBe(false);
 	expect(result.diagnostics.some(item => item.severity === "error")).toBe(true);
 	expect(result.diagnostics[0]?.line).toBe(11);
@@ -67,7 +68,7 @@ describe("draft code syntax and native rendering", () => {
 	});
 
 	test("reads source only when rendering, slices inclusively, normalizes file newlines and infers extension", () => {
-		const result = parseCode({ args: 'src="source file.TS" lines=2-3 hl=2', lines: [], line: 12 });
+		const result = parseCode(fence({ args: 'src="source file.TS" lines=2-3 hl=2', lines: [], line: 12 }));
 		expect(result.ok).toBe(true);
 		if (!result.ok) throw new Error("parse rejected valid source");
 		const { ctx, reads } = context(file("one\r\ntwo\rthree\n"));
@@ -85,7 +86,7 @@ describe("draft code syntax and native rendering", () => {
 	});
 
 	test("nonempty src block warns at the first nonblank design line and renders only the actual file", () => {
-		const result = parseCode({ args: "ts src=example.ts", lines: [" ", "not the source"], line: 12 });
+		const result = parseCode(fence({ args: "ts src=example.ts", lines: [" ", "not the source"], line: 12 }));
 		expect(result.ok).toBe(true);
 		expect(result.diagnostics).toHaveLength(1);
 		expect(result.diagnostics[0]).toMatchObject({ severity: "warning", component: "code", line: 13 });
@@ -93,7 +94,7 @@ describe("draft code syntax and native rendering", () => {
 		const { ctx, reads } = context();
 		expect(renderCode(result.value, ctx).nodes[0]?.p?.text).toBe("one\ntwo\nthree");
 		expect(reads).toEqual(["example.ts"]);
-		expect(parseCode({ args: "src=example.ts", lines: ["", "  "], line: 12 }).diagnostics).toEqual([]);
+		expect(parseCode(fence({ args: "src=example.ts", lines: ["", "  "], line: 12 })).diagnostics).toEqual([]);
 	});
 
 	test("unknown, malformed and duplicate settings report the fence line", () => {
@@ -114,7 +115,7 @@ describe("draft code syntax and native rendering", () => {
 
 	test("typed length limits warn above 40 and reject above 200 at the first body line", () => {
 		for (const count of [0, 40, 41, 200, 201]) {
-			const result = parseCode({ args: "ts", lines: Array.from({ length: count }, () => "line"), line: 12 });
+			const result = parseCode(fence({ args: "ts", lines: Array.from({ length: count }, () => "line"), line: 12 }));
 			expect(result.ok).toBe(count <= 200);
 			expect(result.diagnostics).toHaveLength(count > 40 ? 1 : 0);
 			if (count > 40) expect(result.diagnostics[0]).toMatchObject({ line: 12, severity: count > 200 ? "error" : "warning" });

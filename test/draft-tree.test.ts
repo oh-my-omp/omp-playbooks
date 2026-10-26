@@ -1,3 +1,4 @@
+import { fence, passiveEdit, renderDefaults } from "./draft-helpers";
 import { describe, expect, test } from "bun:test";
 import type { ChangeView, RenderContext } from "../src/service/draft/contract";
 import { parseTree, renderTree, type TreeSpec } from "../src/service/draft/tree";
@@ -5,7 +6,7 @@ import type { Span } from "../src/service/draft/text";
 import type { TspNode } from "../src/service/tsp-types";
 
 function tree(text: string, args = "", line = 10): TreeSpec {
-	const parsed = parseTree({ lines: text.split("\n"), args, line });
+	const parsed = parseTree(fence({ lines: text.split("\n"), args, line }));
 	if (!parsed.ok) throw new Error(JSON.stringify(parsed.diagnostics));
 	return parsed.value;
 }
@@ -19,7 +20,7 @@ interface SvgCapture {
 
 function context(view: ChangeView = "changes") {
 	const svgs: SvgCapture[] = [];
-	const ctx: RenderContext = {
+	const ctx: RenderContext = { ...renderDefaults,
 		id: "draft.tree", view,
 		svg(id, text, size, alt) {
 			svgs.push({ text, ...size, alt });
@@ -102,7 +103,7 @@ describe("draft tree parser", () => {
 
 	test("all contradictory explicit markers report the offending absolute source line", () => {
 		for (const [parent, child] of [["+", "-"], ["+", "~"], ["-", "+"], ["-", "~"]]) {
-			const parsed = parseTree({ args: "", line: 30, lines: [`${parent} Parent`, "  Inherited", `    ${child} Bad child`] });
+			const parsed = parseTree(fence({ args: "", line: 30, lines: [`${parent} Parent`, "  Inherited", `    ${child} Bad child`] }));
 			expect(parsed.ok).toBe(false);
 			expect(parsed.diagnostics).toHaveLength(1);
 			expect(parsed.diagnostics[0]).toMatchObject({ line: 32, component: "tree", severity: "error" });
@@ -111,7 +112,7 @@ describe("draft tree parser", () => {
 	});
 
 	test("empty trees cannot be drawn and report the opening content line", () => {
-		const parsed = parseTree({ args: "", line: 42, lines: ["", "  ", "\t"] });
+		const parsed = parseTree(fence({ args: "", line: 42, lines: ["", "  ", "\t"] }));
 		expect(parsed.ok).toBe(false);
 		expect(parsed.diagnostics).toEqual([{ component: "tree", line: 42, severity: "error", message: "树至少需要一个节点，例如：Root。" }]);
 	});

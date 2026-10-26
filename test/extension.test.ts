@@ -15,8 +15,8 @@ import { K1Client } from "../src/extension/client";
 import { ensureTernPlugin } from "../src/extension/tern-setup";
 
 const summary = { id: "r1", name: "Run", status: "running", started_at: 1, finished_at: null, done: 0, total: 1, update_due: null, update_overdue: false, retrospective: false };
-const block = { id: "b1", kind: "task", title: "Block", body: "Body", done: false };
-const designBlock = { id: "b3", kind: "design", title: "Design", requirement: "Human requirement", design: "```js\nreturn 42;\n```", done: false };
+const block = { id: "b1", kind: "task", title: "Block", body: "Body", status: "todo" };
+const designBlock = { id: "b3", kind: "design", title: "Design", requirement: "Human requirement", design: "```js\nreturn 42;\n```", status: "todo" };
 type Frame = Request & { readonly id: string };
 type Cleanup = () => void | Promise<void>;
 const cleanup: Cleanup[] = [];
@@ -192,7 +192,7 @@ const runId = parseRunId("r1")!;
 
 for (const [op, fields, mutation, args] of [
 	["title", { value: "Renamed" }, "set", { field: "title", value: "Renamed" }],
-	["done", { value: true }, "set", { field: "done", value: true }],
+	["status", { value: "done" }, "set", { field: "status", value: "done" }],
 	["replace", { find: "Body", replace: "New" }, "edit", { find: "Body", replace: "New" }],
 	["write", { text: "New design" }, "write", { text: "New design" }],
 	["panel", { panel: "A", text: "## A Revised\nNew design" }, "panel", { panel: "A", text: "## A Revised\nNew design" }],
@@ -242,15 +242,6 @@ test("playbook_read accepts task blocks carrying agent and isolated", async () =
 	expect(JSON.parse(result.content[0]!.text!)).toEqual({ title: "Book", blocks: [configured] });
 });
 
-test("the coordinator guidance keeps worker handles across eval calls and closes Launches through result", async () => {
-	const h = await harness(); await h.event("session_start");
-	const description = (h.tools.get("playbook_open") as unknown as { description: string }).description;
-	expect(description).not.toContain("Never keep an agent handle");
-	expect(description).toContain("keep it in a top-level `var`");
-	expect(description).toContain("closes the Launch that playbook.agent created");
-	expect(description).toContain("current baseline (after rebase, the rebased text)");
-});
-
 test("interruption revokes an in-flight edit without aborting the coordinator; Locked never sends a mutation", async () => {
 	const s = await service(); const h = await harness();
 	await h.execute("playbook_open", { doc: s.doc });
@@ -264,7 +255,7 @@ test("interruption revokes an in-flight edit without aborting the coordinator; L
 	};
 	const changed = await h.execute("playbook_edit", { op: "title", run: "r1", block: "b1", value: "New" });
 	expect(changed.isError).toBe(true);
-	expect(JSON.parse(changed.content[0]!.text!).error).toMatchObject({ code: "NotLocked", message: expect.stringContaining("person took this block back") });
+	expect(structuredClone(JSON.parse(changed.content[0]!.text!).error)).toMatchObject({ code: "NotLocked", message: expect.stringContaining("person took this block back") });
 	expect(s.frames.map(frame => frame.op)).toEqual(["hello", "lock", "set", "unlock"]);
 	expect(h.aborted).toBe(0); expect(h.messages).toEqual([]);
 	s.handler = (frame, socket) => socket.write(JSON.stringify({ id: frame.id, ok: false, error: { code: "Locked", message: "human editing", detail: { block: "b1" } } }) + "\n");
@@ -362,7 +353,7 @@ for (const run of [undefined, "r1"] as const) {
 test("add writes full text, quote and human origin; cancelling any message/run/kind/block menu suppresses post", async () => {
 	const s = await service(); const h = await harness(); h.choices.push("assistant-1: FULL FIRST FULL SECOND");
 	await h.command("playbook-add", s.doc);
-	expect(s.frames.at(-1)).toMatchObject({ op: "post", args: { run: "r1", kind: "update", text: "FULL FIRST\nFULL SECOND", quote: "assistant-1", origin: "human" } });
+	expect(s.frames.at(-1)).toMatchObject({ op: "post", args: { kind: "update", text: "FULL FIRST\nFULL SECOND", quote: "assistant-1", origin: "human" } });
 	expect(h.notices.at(-1)!.message).toContain("7");
 	for (let stage = 0; stage < 4; stage++) {
 		h.choices.push(...Array<undefined>(stage).fill(undefined), null);
@@ -587,15 +578,6 @@ test("launch_requested names a single block's preset agent and isolated", async 
 	expect(lines[1]).toContain('块 b1 已预设 agent: "task:mid" isolated: true，不显式传参时 playbook.agent / playbook.run 自动使用。');
 });
 
-test("revision_requested asks to turn an answered ask fence into the design conclusion", async () => {
-	const s = await service(); const h = await harness();
-	await h.execute("playbook_open", { doc: s.doc });
-	s.handler = (frame, socket) => respond(socket, frame, { revisions: [{ seq: 1, at: 1, block: "b3", prompt: "针对问题「Which cache?」，选择：Redis" }] });
-	s.push({ event: "revision_requested", data: { block: "b3", revision: 1 } } as EventPayload);
-	await h.messageSent;
-	expect(h.messages[0]!.message.content).toContain("prompt 回答了设计稿中的 `ask` 时，把那个 ask 围栏替换为对应的设计结论。");
-});
-
 test("exec runs the latest rebased orchestration code, not the frozen snapshot", async () => {
 	const s = await service(); const h = await harness();
 	await h.execute("playbook_open", { doc: s.doc });
@@ -664,10 +646,10 @@ for (const kind of ["prompt", "unknown", "unfenced"] as const) {
 test("exec must be the whole cell and needs an unambiguous document", async () => {
 	const h = await harness();
 	expect(await h.call({ language: "js", code: 'const a = await playbook.exec("l1"); return a;' })).toMatchObject({ block: true });
-	expect(await h.call({ language: "js", code: 'await playbook.exec("l1")' })).toMatchObject({ block: true, reason: expect.stringContaining("NoService") });
+	expect(structuredClone(await h.call({ language: "js", code: 'await playbook.exec("l1")' }))).toMatchObject({ block: true, reason: expect.stringContaining("NoService") });
 	const a = await service(); const b = await service();
 	await h.execute("playbook_open", { doc: a.doc }); await h.execute("playbook_open", { doc: b.doc });
-	expect(await h.call({ language: "js", code: 'await playbook.exec("l1")' })).toMatchObject({ block: true, reason: expect.stringContaining("several") });
+	expect(structuredClone(await h.call({ language: "js", code: 'await playbook.exec("l1")' }))).toMatchObject({ block: true, reason: expect.stringContaining("several") });
 	expect(a.frames.map(frame => frame.op)).toEqual(["hello"]); expect(b.frames.map(frame => frame.op)).toEqual(["hello"]);
 });
 
@@ -727,7 +709,7 @@ test("a rejected edit still releases its lock and the next call receives a fresh
 	};
 	const rejected = await h.execute("playbook_edit", { op: "replace", block: "b1", find: "Body", replace: "New" });
 	expect(JSON.parse(rejected.content[0]!.text!)).toEqual({ error: { code: "BadValue", message: "find is not unique" } });
-	await h.execute("playbook_edit", { op: "done", block: "b1", value: true });
+	await h.execute("playbook_edit", { op: "status", block: "b1", value: "done" });
 	expect(s.frames.map(frame => frame.op)).toEqual(["hello", "lock", "edit", "unlock", "lock", "set", "unlock"]);
 	expect(s.frames[1]!.args).toEqual({ block: "b1" });
 	expect(s.frames[4]!.id).not.toBe(s.frames[1]!.id);

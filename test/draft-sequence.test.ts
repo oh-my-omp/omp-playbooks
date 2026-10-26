@@ -1,9 +1,10 @@
+import { fence, passiveEdit, renderDefaults } from "./draft-helpers";
 import { describe, expect, test } from "bun:test";
 import type { RenderContext } from "../src/service/draft/contract";
 import { parseSequence, renderSequence, type SequenceSpec } from "../src/service/draft/sequence";
 
 function parsed(lines: readonly string[], args = ""): SequenceSpec {
-	const result = parseSequence({ lines, args, line: 10 });
+	const result = parseSequence(fence({ lines, args, line: 10 }));
 	expect(result.ok).toBe(true);
 	if (!result.ok) throw new Error(JSON.stringify(result.diagnostics));
 	expect(result.diagnostics).toEqual([]);
@@ -13,7 +14,7 @@ function parsed(lines: readonly string[], args = ""): SequenceSpec {
 function rendered(spec: SequenceSpec, id = "draft") {
 	let source = "";
 	let size = { w: 0, h: 0 };
-	const ctx: RenderContext = {
+	const ctx: RenderContext = { ...renderDefaults,
 		id,
 		view: "changes",
 		svg(nodeId, svg, dimensions, alt) {
@@ -64,7 +65,7 @@ describe("sequence parser", () => {
 	});
 
 	test.each(["A => B: invalid", "A ---> B: invalid", "A -> : missing", "-> B: missing", "note A:", "note : text", "== ==", "unrecognized", "participants:", "participants: A,,B", "note A,: text"])("reports malformed line %s at its original source location", text => {
-		const result = parseSequence({ args: "", lines: ["A -> B: good", "", text], line: 20 });
+		const result = parseSequence(fence({ args: "", lines: ["A -> B: good", "", text], line: 20 }));
 		expect(result.ok).toBe(false);
 		expect(result.diagnostics).toHaveLength(1);
 		expect(result.diagnostics[0]).toMatchObject({ line: 22, severity: "error", component: "sequence" });
@@ -72,10 +73,10 @@ describe("sequence parser", () => {
 	});
 
 	test("rejects unknown arguments on the fence line and an empty diagram", () => {
-		const option = parseSequence({ args: "numbers", lines: ["A -> B"], line: 8 });
+		const option = parseSequence(fence({ args: "numbers", lines: ["A -> B"], line: 8 }));
 		expect(option.ok).toBe(false);
 		expect(option.diagnostics[0]).toMatchObject({ line: 7, severity: "error" });
-		const empty = parseSequence({ args: "", lines: ["", "// no actors"], line: 8 });
+		const empty = parseSequence(fence({ args: "", lines: ["", "// no actors"], line: 8 }));
 		expect(empty.ok).toBe(false);
 		expect(empty.diagnostics[0]).toMatchObject({ line: 8, severity: "error" });
 	});

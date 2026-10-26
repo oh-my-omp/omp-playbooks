@@ -1,3 +1,4 @@
+import { fence, passiveEdit, renderDefaults } from "./draft-helpers";
 import { describe, expect, test } from "bun:test";
 import type { FileRead, RenderContext } from "../src/service/draft/contract";
 import { parseImage, renderImage, type ImageSpec } from "../src/service/draft/image";
@@ -7,7 +8,7 @@ const LINE = 27;
 const LIMIT = 5 * 1024 * 1024;
 
 function parse(source: string): ImageSpec {
-	const result = parseImage({ args: "", lines: [source], line: LINE });
+	const result = parseImage(fence({ args: "", lines: [source], line: LINE }));
 	if (!result.ok) throw new Error(JSON.stringify(result.diagnostics));
 	return result.value;
 }
@@ -15,7 +16,7 @@ function parse(source: string): ImageSpec {
 function fakeContext(file: FileRead = { ok: true, bytes: new Uint8Array([1, 2, 3]), path: "/playbook/example.png" }) {
 	const reads: string[] = [];
 	const images: { id: string; bytes: Uint8Array; mime: string; alt: string }[] = [];
-	const ctx: RenderContext = {
+	const ctx: RenderContext = { ...renderDefaults,
 		id: "draft.panel.image",
 		view: "changes",
 		readFile(path) { reads.push(path); return file; },
@@ -50,13 +51,13 @@ function expectIds(nodes: readonly TspNode[], prefix: string): void {
 describe("image syntax", () => {
 	for (const path of ["screenshots/login screen.png", "/absolute/path/to/screenshot.png", "../screenshots/example.JPG"]) {
 		test(`preserves alt, source line and path ${path}`, () => {
-			const result = parseImage({ args: "", lines: [`![登录页面](${path})`], line: LINE });
+			const result = parseImage(fence({ args: "", lines: [`![登录页面](${path})`], line: LINE }));
 			expect(result).toEqual({ ok: true, value: { line: LINE, alt: "登录页面", path }, diagnostics: [] });
 		});
 	}
 	for (const alt of ["", "   "]) {
 		test(`empty caption ${JSON.stringify(alt)} is a warning`, () => {
-			const result = parseImage({ args: "", lines: [`![${alt}](example.png)`], line: LINE });
+			const result = parseImage(fence({ args: "", lines: [`![${alt}](example.png)`], line: LINE }));
 			expect(result.ok).toBe(true);
 			expect(result.diagnostics).toEqual([expect.objectContaining({ severity: "warning", component: "image", line: LINE })]);
 			expect(result.diagnostics[0]!.message).toContain("![图片内容](screenshots/example.png)");
@@ -64,17 +65,17 @@ describe("image syntax", () => {
 	}
 	for (const source of ["", "![alt]()", "![alt](   )", "[alt](example.png)", "before ![alt](example.png)", "![alt](example.png) after", "![a](a.png) ![b](b.png)", "![alt\ntext](example.png)", "![alt](example\n.png)", "![alt](example.png)\n"]) {
 		test(`rejects invalid single-line syntax ${JSON.stringify(source)}`, () => {
-			const result = parseImage({ args: "", lines: [source], line: LINE });
+			const result = parseImage(fence({ args: "", lines: [source], line: LINE }));
 			expect(result.ok).toBe(false);
 			expect(result.diagnostics).toEqual([expect.objectContaining({ severity: "error", component: "image", line: LINE })]);
 			expect(result.diagnostics[0]!.message).toContain("![图片内容](screenshots/example.png)");
 		});
 	}
 	test("rejects missing line and reports second line for extra content", () => {
-		const missing = parseImage({ args: "", lines: [], line: LINE });
+		const missing = parseImage(fence({ args: "", lines: [], line: LINE }));
 		expect(missing.ok).toBe(false);
 		expect(missing.diagnostics[0]).toMatchObject({ line: LINE, severity: "error" });
-		const extra = parseImage({ args: "", lines: ["![alt](example.png)", "extra"], line: LINE });
+		const extra = parseImage(fence({ args: "", lines: ["![alt](example.png)", "extra"], line: LINE }));
 		expect(extra.ok).toBe(false);
 		expect(extra.diagnostics[0]).toMatchObject({ line: LINE + 1, severity: "error" });
 	});
@@ -127,7 +128,7 @@ describe("local image rendering", () => {
 				: { ok: true, bytes: new Uint8Array(failure === "oversized" ? LIMIT + 1 : 3), path: "/image.png" };
 			const fake = fakeContext(file);
 			const path = failure === "unknown" ? "image.bmp" : "image.png";
-			const parsed = parseImage({ args: "", lines: [`![图片占位](${path})`], line: LINE });
+			const parsed = parseImage(fence({ args: "", lines: [`![图片占位](${path})`], line: LINE }));
 			expect(parsed.diagnostics).toEqual([]);
 			if (!parsed.ok) throw new Error("Expected syntactically valid image");
 			const result = renderImage(parsed.value, fake.ctx);

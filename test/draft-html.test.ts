@@ -1,10 +1,11 @@
+import { fence, passiveEdit, renderDefaults } from "./draft-helpers";
 import { describe, expect, test } from "bun:test";
 import { parseHtml, renderHtml, type HtmlSpec } from "../src/service/draft/html";
 import type { DraftDiagnostic, RenderContext } from "../src/service/draft/contract";
 import type { TspNode } from "../src/service/tsp-types";
 
 function parse(source: string, line = 10): { spec: HtmlSpec; diagnostics: readonly DraftDiagnostic[] } {
-	const result = parseHtml({ args: "", lines: source.split("\n"), line });
+	const result = parseHtml(fence({ args: "", lines: source.split("\n"), line }));
 	if (!result.ok) throw new Error("HTML must be drawable");
 	return { spec: result.value, diagnostics: result.diagnostics };
 }
@@ -13,7 +14,7 @@ function harness(): { ctx: RenderContext; svgs: { source: string; w: number; h: 
 	const svgs: { source: string; w: number; h: number; alt: string }[] = [];
 	return {
 		svgs,
-		ctx: {
+		ctx: { ...renderDefaults,
 			id: "draft.html", view: "changes",
 			svg(id, source, size, alt) { svgs.push({ source, ...size, alt }); return { id, k: "image", p: { alt } }; },
 			image() { throw new Error("HTML must not read external images"); },
@@ -177,7 +178,7 @@ describe("HTML escape hatch", () => {
 	});
 
 	test.each([257, 16384])("rejects %s nested HTML elements with an absolute-line error, not a RangeError", depth => {
-		const result = parseHtml({ args: "", lines: ["<div>".repeat(256), `${"<div>".repeat(depth - 256)}正文${"</div>".repeat(depth)}`], line: 30 });
+		const result = parseHtml(fence({ args: "", lines: ["<div>".repeat(256), `${"<div>".repeat(depth - 256)}正文${"</div>".repeat(depth)}`], line: 30 }));
 		expect(result.ok).toBe(false);
 		expect(result.diagnostics).toHaveLength(1);
 		expect(result.diagnostics[0]).toMatchObject({ component: "html", severity: "error", line: 31 });
@@ -185,13 +186,13 @@ describe("HTML escape hatch", () => {
 	});
 
 	test("depth failure retains earlier scan warnings", () => {
-		const result = parseHtml({ args: "", lines: ['<div id="first" id="second">', "<div>".repeat(256)], line: 40 });
+		const result = parseHtml(fence({ args: "", lines: ['<div id="first" id="second">', "<div>".repeat(256)], line: 40 }));
 		expect(result.ok).toBe(false);
 		expect(result.diagnostics.map(value => [value.severity, value.line])).toEqual([["warning", 40], ["error", 41]]);
 	});
 
 	test("empty HTML is drawable and fence args do not invent a grammar", () => {
-		expect(parseHtml({ args: "arbitrary", lines: [], line: 1 })).toEqual({ ok: true, value: { nodes: [] }, diagnostics: [] });
+		expect(parseHtml(fence({ args: "arbitrary", lines: [], line: 1 }))).toEqual({ ok: true, value: { nodes: [] }, diagnostics: [] });
 	});
 });
 
@@ -299,7 +300,7 @@ describe("inline SVG", () => {
 	});
 
 	test.each([257, 16384])("rejects %s open SVG elements before recursive serialization", depth => {
-		const result = parseHtml({ args: "", lines: [`<svg>${"<g>".repeat(255)}`, `${"<g>".repeat(depth - 256)}${"</g>".repeat(depth - 1)}</svg>`], line: 80 });
+		const result = parseHtml(fence({ args: "", lines: [`<svg>${"<g>".repeat(255)}`, `${"<g>".repeat(depth - 256)}${"</g>".repeat(depth - 1)}</svg>`], line: 80 }));
 		expect(result.ok).toBe(false);
 		expect(result.diagnostics).toHaveLength(1);
 		expect(result.diagnostics[0]).toMatchObject({ component: "html", severity: "error", line: 81 });

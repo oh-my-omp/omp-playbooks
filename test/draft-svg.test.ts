@@ -1,10 +1,11 @@
+import { fence, passiveEdit, renderDefaults } from "./draft-helpers";
 import { describe, expect, test } from "bun:test";
 import { renderDraft } from "../src/service/draft/components";
 import type { ChangeView, Parsed, RenderContext } from "../src/service/draft/contract";
 import { parseSvg, renderSvg, type SvgSpec } from "../src/service/draft/svg";
 
 function parse(source: string, line = 10): Parsed<SvgSpec> {
-	return parseSvg({ args: "", lines: source.split("\n"), line });
+	return parseSvg(fence({ args: "", lines: source.split("\n"), line }));
 }
 
 function value(source: string): SvgSpec {
@@ -18,7 +19,7 @@ function rejected(source: string, line: number, message: string): void {
 	expect(result.ok).toBe(false);
 	expect(result.diagnostics).toContainEqual({ component: "svg", severity: "error", line, message: expect.stringContaining(message) });
 	let svgCalls = 0;
-	const rendered = renderDraft(`\`\`\`svg\n${source}\n\`\`\``, {
+	const rendered = renderDraft(`\`\`\`svg\n${source}\n\`\`\``, { edit: passiveEdit,
 		id: "draft.rejected",
 		context: {
 			svg(id) { svgCalls++; return { id, k: "image" }; },
@@ -199,7 +200,7 @@ describe("SVG rendering", () => {
 		test(`passes raw source and dimensions to ctx.svg in ${view} view`, () => {
 			const spec = value('<svg width="240" height="80"><text fill="var(--accent)">中文</text></svg>');
 			const calls: { readonly id: string; readonly source: string; readonly size: { readonly w: number; readonly h: number }; readonly alt: string }[] = [];
-			const ctx: RenderContext = {
+			const ctx: RenderContext = { ...renderDefaults,
 				id: "draft.panel.3", view,
 				svg(id, source, size, alt) {
 					calls.push({ id, source, size, alt });
