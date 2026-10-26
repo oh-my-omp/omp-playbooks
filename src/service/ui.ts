@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync, statSync } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { homedir } from "node:os";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { prepareSvg } from "@oh-my-pi/pi-tui/chat/svg-source";
 import { svgFigurePalette } from "@oh-my-pi/pi-tui/chat/svg-figure";
 import { initThemeSync, setTheme } from "@oh-my-pi/pi-tui/theme/theme";
@@ -8,6 +9,7 @@ import { outlinedText, type Block, type BlockId, type DocRef, type HumanField } 
 import type { BlockView, CoreApi, DocView, RenderStatus } from "../domain/ports";
 import { renderDraft, type DraftHost } from "./draft/components";
 import { outlineProblems } from "./draft/outline";
+import { imageMime } from "./draft/image";
 import type { ChangeView, EditHost, FileRead, ListItem, Span } from "./draft/contract";
 import { parseSlots, setSlotValue, type SlotDecl } from "./draft/slot";
 import type { FrameOp, TspEvent, TspInput, TspNode, TspSession } from "./tsp-types";
@@ -200,6 +202,28 @@ function readDraftFile(baseDir: string, path: string): FileRead {
 	}
 }
 
+/**
+ * The image files a pasted text names, as Tern pastes a copied file: its absolute path with shell
+ * escapes (`\ `), several separated by spaces; quoted paths, `~/` and `file://` URLs too. Null
+ * unless the whole text is such paths.
+ */
+export function pastedImagePaths(text: string): readonly string[] | null {
+	const words: string[] = [];
+	let current = "", started = false, quote: string | null = null;
+	for (let index = 0; index < text.length; index++) {
+		const char = text[index]!;
+		if (quote !== null) { if (char === quote) quote = null; else current += char; continue; }
+		if (char === "\\" && index + 1 < text.length) { current += text[++index]; started = true; continue; }
+		if (char === "'" || char === "\"") { quote = char; started = true; continue; }
+		if (/\s/.test(char)) { if (started) words.push(current); current = ""; started = false; continue; }
+		current += char; started = true;
+	}
+	if (quote !== null) return null;
+	if (started) words.push(current);
+	const paths = words.map(word => word.startsWith("file://") ? decodeURIComponent(word.slice("file://".length)) : word.startsWith("~/") ? join(homedir(), word.slice(2)) : word);
+	return paths.length > 0 && paths.every(path => isAbsolute(path) && imageMime(path) !== null) ? paths : null;
+}
+
 const el = (id: string, tag: string, className: string, c: readonly TspNode[] = [], extra: Record<string, unknown> = {}): TspNode => ({ id, k: "el", p: { tag, class: className, ...extra }, c });
 
 /** An ordered list's items in a new order, renumbered from `start`, keeping the separators the list had. */
@@ -285,35 +309,61 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 	}
 
 	/**
-	 * Ctrl+V, an empty paste, or the menu: the clipboard's image is kept beside the Playbook and its
-	 * line goes in at the caret of the multi-line text being edited, or else at the end of the open
-	 * card's body (design card: requirement).
+	 * Keep pasted images beside the Playbook and put their lines at the caret of the multi-line text
+	 * being edited, or else at the end of the open card's body (design card: requirement).
 	 */
-	function pasteImage(): void {
-		void clipboardImage().then(image => {
-			if (!image) { notify("剪贴板里没有图片"); return; }
+	function placeImages(images: readonly { readonly data: Uint8Array; readonly mimeType: string }[]): void {
+		const lines: string[] = [];
+		for (const image of images) {
 			const saved = core.saveImage(image.data, image.mimeType);
 			if (!saved.ok) { notify(saved.error); return; }
-			const line = `![图片](${saved.path})`;
-			if (editing) {
-				if (!editing.multiline) { notify("这一栏只有一行，放不下图片：退出编辑再粘贴，图片会加到卡片末尾"); return; }
-				const caret = editing.caret;
-				const before = editing.text.slice(0, caret.anchor === null ? caret.cursor : Math.min(caret.cursor, caret.anchor));
-				const after = editing.text.slice(caret.anchor === null ? caret.cursor : Math.max(caret.cursor, caret.anchor));
-				// An image is drawn only on a line of its own.
-				insert(`${before === "" || before.endsWith("\n") ? "" : "\n"}${line}${after === "" || after.startsWith("\n") ? "" : "\n"}`);
-				return;
-			}
-			const block = open === null ? undefined : core.view(REF).blocks.find(item => item.block.id === open)?.block;
-			if (!block) { notify("先展开要放图片的卡片"); return; }
-			const field = block.content.kind === "task" ? "body" : "requirement";
-			const source = block.content.kind === "task" ? block.content.body : block.content.requirement;
-			const error = core.edit(REF, block.id, field, source, source.trim() ? `${source.trimEnd()}\n\n${line}\n` : `${line}\n`);
-			if (error) notify(error);
-			else notify(block.content.kind === "task" ? "图片已加到正文末尾" : "图片已加到需求末尾", "success");
+			lines.push(`![图片](${saved.path})`);
+		}
+		const text = lines.join("\n");
+		if (editing) {
+			if (!editing.multiline) { notify("这一栏只有一行，放不下图片：退出编辑再粘贴，图片会加到卡片末尾"); return; }
+			const caret = editing.caret;
+			const before = editing.text.slice(0, caret.anchor === null ? caret.cursor : Math.min(caret.cursor, caret.anchor));
+			const after = editing.text.slice(caret.anchor === null ? caret.cursor : Math.max(caret.cursor, caret.anchor));
+			// An image is drawn only on a line of its own.
+			insert(`${before === "" || before.endsWith("\n") ? "" : "\n"}${text}${after === "" || after.startsWith("\n") ? "" : "\n"}`);
+			return;
+		}
+		const block = open === null ? undefined : core.view(REF).blocks.find(item => item.block.id === open)?.block;
+		if (!block) { notify("先展开要放图片的卡片"); return; }
+		const field = block.content.kind === "task" ? "body" : "requirement";
+		const source = block.content.kind === "task" ? block.content.body : block.content.requirement;
+		const error = core.edit(REF, block.id, field, source, source.trim() ? `${source.trimEnd()}\n\n${text}\n` : `${text}\n`);
+		if (error) notify(error);
+		else notify(block.content.kind === "task" ? "图片已加到正文末尾" : "图片已加到需求末尾", "success");
+	}
+	/** Ctrl+V, an empty paste, or the menu: the image data on the system clipboard. */
+	function pasteClipboardImage(): void {
+		void clipboardImage().then(image => {
+			if (image) placeImages([image]);
+			else notify("剪贴板里没有图片");
 		}, (error: unknown) => {
-			notify(`读不到剪贴板：${error instanceof Error ? error.message : String(error)}`);
+			notify(`读不到剪贴板里的图片：${error instanceof Error ? error.message : String(error)}`);
 		}).then(redraw);
+	}
+	/**
+	 * Cmd+V of copied image files: Tern pastes their paths, and the files themselves go in. One file
+	 * this process may not open (another app's container) is still on the clipboard as image data.
+	 */
+	function pasteImageFiles(paths: readonly string[]): void {
+		const images: { data: Uint8Array; mimeType: string }[] = [];
+		for (const path of paths) {
+			try {
+				const stat = statSync(path);
+				if (!stat.isFile()) { notify(`不是普通文件：${path}`); return; }
+				if (stat.size > MAX_DRAFT_FILE_BYTES) { notify(`图片超过 5 MiB，卡片显示不了：${path}`); return; }
+				images.push({ data: new Uint8Array(readFileSync(path)), mimeType: imageMime(path)! });
+			} catch (error) {
+				if (paths.length === 1) { pasteClipboardImage(); return; }
+				notify(`读不到 ${path}：${error instanceof Error ? error.message : String(error)}`); return;
+			}
+		}
+		placeImages(images);
 	}
 
 	// ------------------------------------------------------------ drawing one block field
@@ -727,7 +777,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 		const children: TspNode[] = [];
 		if (menu !== null && view.blocks.some(item => item.block.id === menu)) {
 			const block = menu;
-			on("menu.image", { click: () => { menu = null; pasteImage(); } });
+			on("menu.image", { click: () => { menu = null; pasteClipboardImage(); } });
 			on("menu.delete", { click: () => { menu = null; if (open === block) open = null; outcome(core.deleteBlock(REF, block)); } });
 			children.push({ id: "menu", k: "overlay", p: { anchor: { node: `${block}.more` }, size: "sm" }, c: [
 				el("menu.image", "div", "pb-menu-item", [], { text: "粘贴剪贴板图片（Ctrl+V）", actions: { click: "invoke" } }),
@@ -857,13 +907,17 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 			const code = Number(kitty[1]), modifiers = Number(kitty[2] ?? 1) - 1;
 			if (code === 13 && modifiers === 1 && editing?.multiline) { insert("\n"); return; }
 			if (code === 13 || code === 27) { end(); return; }
-			if (code === 118 && modifiers === 4) { pasteImage(); return; } // Ctrl+V, as omp pastes an image.
+			if (code === 118 && modifiers === 4) { pasteClipboardImage(); return; } // Ctrl+V, as omp pastes an image.
 			if (modifiers > 1 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return;
 			bytes = String.fromCodePoint(code);
 		}
 		if (bytes === ESC || bytes === "\r" || bytes === "\n") { end(); return; }
 		// Ctrl+V without the kitty protocol, and a paste carrying no text (the clipboard holds only an image).
-		if (bytes === "\x16" || bytes === `${ESC}[200~${ESC}[201~`) { pasteImage(); return; }
+		if (bytes === "\x16" || bytes === `${ESC}[200~${ESC}[201~`) { pasteClipboardImage(); return; }
+		// Cmd+V of copied image files arrives as their paths, typed all at once.
+		const pasted = bytes.startsWith(`${ESC}[200~`) && bytes.endsWith(`${ESC}[201~`) ? bytes.slice(6, -6) : bytes;
+		const files = pasted.includes("/") ? pastedImagePaths(pasted.trim()) : null;
+		if (files) { pasteImageFiles(files); redraw(); return; }
 		if (!editing) return;
 		const text = editing.text;
 		const caret = editing.caret;

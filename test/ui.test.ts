@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { startUi, type ClipboardImageReader } from "../src/service/ui";
+import { pastedImagePaths, startUi, type ClipboardImageReader } from "../src/service/ui";
 import type { FrameOp, FrameStatus, TspEvent, TspInput, TspNode, TspSession } from "../src/service/tsp-types";
 import type { CoordinatorPicker, OmpPane } from "../src/service/coordinators";
 import { registerCoreCleanup, coreFixture, design, task, template } from "./core-fixture";
@@ -218,6 +218,24 @@ describe("current Playbook user interactions", () => {
 		await settle();
 		expect(tiff.core.view(template).blocks[0]?.block.content).toMatchObject({ body: "Task body" });
 		expect(tiff.tsp.nodes().some(node => node.k === "toast" && node.p?.tone === "error")).toBe(true);
+	});
+	test("Cmd+V of copied image files, pasted as their escaped paths, puts the files in; an unreadable one falls back to the clipboard data", async () => {
+		const f = await fixture([task("b1", "Before")], undefined, async () => ({ data: PNG, mimeType: "image/png" }));
+		const folder = join(f.directory, "copied dir");
+		mkdirSync(folder);
+		const gif = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]);
+		writeFileSync(join(folder, "a b.gif"), gif);
+		f.tsp.keys(`${folder.replaceAll(" ", "\\ ")}/a\\ b.gif`);
+		const gifPath = `book.yaml.assets/${new Bun.CryptoHasher("sha256").update(gif).digest("hex")}.gif`;
+		expect(f.core.view(template).blocks[0]?.block.content).toMatchObject({ body: `Before\n\n![图片](${gifPath})\n` });
+		expect(new Uint8Array(readFileSync(join(f.directory, gifPath)))).toEqual(gif);
+		f.tsp.keys(`\x1b[200~${join(folder, "gone.png").replaceAll(" ", "\\ ")}\x1b[201~`);
+		await settle();
+		expect(f.core.view(template).blocks[0]?.block.content).toMatchObject({ body: `Before\n\n![图片](${gifPath})\n\n![图片](${PNG_PATH})\n` });
+	});
+	test("pasted text that is not only image paths stays text", () => {
+		expect(pastedImagePaths("/a/b\\ c.png '/d/e f.JPG' file:///g/h%20i.webp")).toEqual(["/a/b c.png", "/d/e f.JPG", "/g/h i.webp"]);
+		for (const text of ["/a/b.txt", "relative/b.png", "/a/b.png and more", "see /a/b.png", "'/a/b.png", ""]) expect(pastedImagePaths(text)).toBeNull();
 	});
 	test("the 退出编辑 button commits the edit like Enter", async () => {
 		const f = await fixture();

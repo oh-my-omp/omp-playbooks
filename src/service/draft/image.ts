@@ -11,7 +11,7 @@ export interface ImageSpec {
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 /** File extension a pasted image is saved under, by MIME type; each is one `imageMime` draws. */
 export const IMAGE_EXTENSIONS: Readonly<Partial<Record<string, string>>> = {
-	"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp", "image/avif": "avif",
+	"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp", "image/avif": "avif", "image/svg+xml": "svg",
 };
 const EXAMPLE = "![图片内容](screenshots/example.png)";
 
@@ -31,7 +31,8 @@ export function parseImage(input: FenceInput): Parsed<ImageSpec> {
 	};
 }
 
-function imageMime(path: string): string | null {
+/** The MIME type a card draws a file of this name as; null when it draws no such file. */
+export function imageMime(path: string): string | null {
 	switch (extname(path).toLowerCase()) {
 		case ".png": return "image/png";
 		case ".jpg":
