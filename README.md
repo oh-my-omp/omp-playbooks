@@ -123,7 +123,8 @@ The pane shows the Playbook file itself in one column; Runs are not shown there.
 
 - **Card header:** a number (`--` for untracked blocks, then `01`, `02`… for tracked ones), the title, a status icon (empty ring `todo`, spinner `running`, check `done`) and a chevron. Clicking the title or the chevron opens or folds the card; double-clicking the title edits it.
 - **Status icon:** clicking it toggles `done` and `todo` and notifies the coordinator with `status_changed`. Ticking a block done does not touch its report.
-- **Open card:** "⋯" opens a menu with "删除此块" (delete this block). The body is drawn with the components below. An execution block's foot shows "SUBAGENT" (its `agent`, "默认" when unset; double-click to edit) and "独立 WORKTREE" (double-click toggles `isolated`), then the launch button. A `done` block shows a folded "完成报告" (completion report) instead; click to unfold.
+- **Open card:** "⋯" opens a menu with "删除此块" (delete this block). The body is drawn with the components below. An execution block's foot shows "SUBAGENT" (its `agent`) and "独立 WORKTREE" (double-click toggles `isolated`), then the launch button. A `done` block shows a folded "完成报告" (completion report) instead; click to unfold.
+- **SUBAGENT dropdown:** clicking it lists "默认" (unset: omp's default subagent) and the subagent types the coordinator's omp session can launch right now; picking one writes `agent`. The list is asked from the coordinator each time the dropdown opens: the extension reads it from the session's built-in `task` tool, which has already removed disabled agents and applied the spawn policy. Offline, or when the session cannot list them, the dropdown says so and offers only "默认". A saved name the session no longer lists stays shown as the current setting and is never rewritten for you; omp still checks the name again at launch.
 - **Launch button:** "启动" (Launch) sends `launch_requested` for this block; until the coordinator creates a Launch from it, the button reads "已请求启动" (launch requested) and cannot be clicked again. While the block is `running` the button reads "打断执行" (stop): with an open Launch it sends `stop_requested` to the coordinator; with none, nothing is executing and the block simply goes back to `todo`.
 - **Launching several blocks:** ⌘-click card titles to select tracked execution blocks; the dock shows "一起启动 N 块" (launch N together) and "取消" (clear). The blocks are combined into one Launch in document order; an orchestration block can only be launched alone.
 - **Dock status strip:** "协调者在线/离线" (coordinator online/offline; click to focus the coordinator's pane) and "N / M 已完成" (done count over tracked blocks).
@@ -132,7 +133,7 @@ Requests that need the coordinator (launch, stop with an open Launch, change req
 
 ### How a person edits
 
-Every edit is in place: double-click the text, edit, and `Enter`, `Esc` or any other action commits; `Shift+Enter` is a new line in multi-line text. An edit is written only when the field still holds the text you started from; if the coordinator or the file changed it meanwhile, the edit is refused with a notice and you edit the latest content again.
+Every edit is in place: double-click the text and edit it. `Enter`, `Esc`, the "退出编辑" (done editing) button beside the field, or any other action commits; `Shift+Enter` is a new line in multi-line text. An edit is written only when the field still holds the text you started from; if the coordinator or the file changed it meanwhile, the edit is refused with a notice and you edit the latest content again.
 
 | Part | What a person can do |
 |---|---|

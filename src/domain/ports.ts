@@ -2,6 +2,7 @@
 // every other module is either a pure function set it calls, an IO adapter it calls, or a
 // front end (TSP UI, K1 socket) that calls the core.
 import type {
+	AgentList,
 	BlockContent,
 	BlockId,
 	BlockResult,
@@ -180,6 +181,10 @@ export interface HumanCommands {
 export interface CoreApi extends HumanCommands {
 	view(ref: DocRef): DocView;
 	coordinator(): CoordinatorStatus;
+	/** The coordinator's latest answer about launchable subagents. */
+	agents(): AgentList;
+	/** Ask the coordinator for that list again (a SUBAGENT dropdown opened); a no-op without a coordinator. */
+	requestAgents(): void;
 	focusCoordinator(): Promise<string | null>;
 	/** Document-level messages (disk parse errors, unmapped TSP errors, K5 errors). */
 	errors(): readonly string[];

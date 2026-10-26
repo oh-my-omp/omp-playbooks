@@ -8,6 +8,7 @@ import { socketPath, type EventPayload, type Request, type ServerFrame } from ".
 import { K1Client, type Reply } from "./client";
 import { splitPane } from "../service/panes";
 import { ensureTernPlugin, type TernPluginState } from "./tern-setup";
+import { availableAgents } from "./agents";
 
 /** A block body that is one fenced js/py code block is an orchestration block (launch-events.md §1). */
 const ORCHESTRATION = /^\s*```(js|py)\s*\n([\s\S]*)\n```\s*$/;
@@ -117,6 +118,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		z.object({ event: z.literal("update_due"), data: z.object({ run, due: z.number(), last_update: z.number().nullable() }) }),
 		z.object({ event: z.literal("interrupted"), data: z.object({ run: run.optional(), block, request: z.string() }) }),
 		z.object({ event: z.literal("revision_requested"), data: z.object({ run: run.optional(), block, revision: positive }) }),
+		z.object({ event: z.literal("agents_requested"), data: z.object({}).strict() }),
 	]);
 	const error = z.object({ code: z.enum(["Busy", "NotHello", "Locked", "NotLocked", "UnknownBlock", "UnknownRun", "RunFinished", "BadValue", "NotFound", "Ambiguous", "BadLaunch", "CompileError", "UnknownTarget", "BadReport", "UnknownLaunch", "NotOwner", "UnknownEvent", "RevealFailed"]), message: z.string(), detail: z.unknown().optional() });
 	const frames = z.union([events, z.object({ id: z.string(), ok: z.literal(true), result: z.unknown().optional() }).strict().transform(frame => ({ ...frame, result: frame.result })), z.object({ id: z.string(), ok: z.literal(false), error }).strict()]);
@@ -163,6 +165,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				// A human interrupt only revokes the lock of an in-flight playbook_edit, whose
 				// mutation then fails with NotLocked; nothing else in this session depends on it.
 				if (event.event === "interrupted") return;
+				// A SUBAGENT dropdown opened: the extension answers from this session; the model is not involved.
+				if (event.event === "agents_requested") {
+					await clients.get(absolute)?.request({ op: "agents", args: { result: availableAgents(pi.getAllTools()) } });
+					return;
+				}
 				pi.sendMessage({ customType: "playbook-event", content: await notice(absolute, event), display: true }, { deliverAs: "aside", triggerTurn: true });
 			});
 			clients.set(absolute, client);
@@ -335,7 +342,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	}
 
 	/** Event aside: header line, the next call to make, then the data (launch-events.md §6). */
-	async function notice(absolute: string, event: Exclude<EventPayload, { event: "interrupted" }>): Promise<string> {
+	async function notice(absolute: string, event: Exclude<EventPayload, { event: "interrupted" | "agents_requested" }>): Promise<string> {
 		const header = "这是 Playbook 文档服务的通知，不是用户消息";
 		const docLiteral = JSON.stringify(absolute);
 		let next: string;

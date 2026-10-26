@@ -327,4 +327,16 @@ export type Findings = Readonly<Record<FindingName, boolean>>; // true = fails
 
 // ---------------------------------------------------------------- events (K1)
 
-export type EventName = "block_changed" | "launch_requested" | "stop_requested" | "status_changed" | "update_due" | "interrupted" | "revision_requested";
+export type EventName = "block_changed" | "launch_requested" | "stop_requested" | "status_changed" | "update_due" | "interrupted" | "revision_requested" | "agents_requested";
+
+/**
+ * The subagent types the coordinator's omp session can launch, as the coordinator last answered.
+ * omp owns the list and decides again at launch; the service only shows the answer to its request.
+ */
+export type AgentList =
+	| { readonly kind: "offline" }
+	/** Connected, but no dropdown has asked yet. */
+	| { readonly kind: "unasked" }
+	| { readonly kind: "pending" }
+	| { readonly kind: "listed"; readonly names: readonly string[] }
+	| { readonly kind: "unavailable"; readonly reason: string };

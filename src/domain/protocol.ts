@@ -59,6 +59,8 @@ export type Request =
 	  }
 	| { readonly op: "snooze"; readonly args: { readonly run: RunId; readonly after: number } }
 	| { readonly op: "ack"; readonly args: { readonly event: string } }
+	/** The coordinator's answer to `agents_requested`: the subagent types its session can launch now. */
+	| { readonly op: "agents"; readonly args: { readonly result: AgentAnswer } }
 	/** Show the document service's own pane; any connection may send it without hello (contracts.md K1). */
 	| { readonly op: "reveal"; readonly args: Record<string, never> };
 
@@ -136,7 +138,11 @@ export type EventPayload =
 	| { readonly event: "update_due"; readonly data: { readonly run: RunId; readonly due: number; readonly last_update: number | null } }
 	| { readonly event: "interrupted"; readonly data: { readonly run?: RunId; readonly block: BlockId; readonly request: string } }
 	/** The person submitted a change request for a design block; read it with `revisions`. */
-	| { readonly event: "revision_requested"; readonly data: { readonly run?: RunId; readonly block: BlockId; readonly revision: number } };
+	| { readonly event: "revision_requested"; readonly data: { readonly run?: RunId; readonly block: BlockId; readonly revision: number } }
+	/** The person opened a SUBAGENT dropdown; answer with `agents`. A query, not a document event: it is not logged. */
+	| { readonly event: "agents_requested"; readonly data: Record<string, never> };
+
+export type AgentAnswer = { readonly kind: "listed"; readonly names: readonly string[] } | { readonly kind: "unavailable"; readonly reason: string };
 
 export type InsertContent =
 	| { readonly kind: "task"; readonly body: string; readonly agent?: string; readonly isolated?: boolean }

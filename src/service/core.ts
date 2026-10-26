@@ -1,6 +1,7 @@
 // Document service core: the single owner of Playbook, Run, Launch, lock and timeline state.
 // Rules come from design/; section references are given at each rule.
 import type {
+	AgentList,
 	Block,
 	BlockContent,
 	BlockField,
@@ -107,6 +108,8 @@ interface ConnState {
 	conn: Connection;
 	session: string | null;
 	pane: string | null;
+	/** The coordinator's answer about launchable subagents; it belongs to this connection and ends with it. */
+	agents: AgentList;
 }
 
 const JUDGE_DELAY_MS = 2_000;
@@ -901,7 +904,7 @@ export class Core implements CoreApi, K1Handler {
 		if (this.#conn?.conn !== conn) {
 			if (request.op !== "hello") return fail(this.#conn === null ? "NotHello" : "Busy", this.#conn === null ? "第一条请求必须是 hello" : "另一个协调者已连接");
 			if (this.#conn !== null) return fail("Busy", "另一个协调者已连接");
-			this.#conn = { conn, session: null, pane: null };
+			this.#conn = { conn, session: null, pane: null, agents: { kind: "unasked" } };
 		}
 		const session = this.#conn.session;
 		switch (request.op) {
@@ -1136,6 +1139,12 @@ export class Core implements CoreApi, K1Handler {
 					return ok(null);
 				}
 				return fail("UnknownEvent", `事件 ${request.args.event} 不是待确认的事件`);
+			}
+			case "agents": {
+				if (this.#conn.agents.kind !== "pending") return fail("UnknownEvent", "没有待回答的 agents_requested");
+				this.#conn.agents = request.args.result;
+				this.#emit(null);
+				return ok(null);
 			}
 		}
 	}
@@ -1451,6 +1460,19 @@ export class Core implements CoreApi, K1Handler {
 
 	coordinator(): CoordinatorStatus {
 		return { connected: this.#conn?.session != null, session: this.#conn?.session ?? null, pane: this.#conn?.pane ?? null };
+	}
+
+	agents(): AgentList {
+		return this.#conn?.session != null ? this.#conn.agents : { kind: "offline" };
+	}
+
+	/** Ask the coordinator which subagents its session can launch; the answer arrives as an `agents` request. */
+	requestAgents(): void {
+		if (!this.#conn || this.#conn.session === null) return;
+		this.#conn.agents = { kind: "pending" };
+		// A query about the coordinator's session, not a document event: sent without a log entry.
+		this.#conn.conn.send({ event: "agents_requested", data: {} });
+		this.#emit(null);
 	}
 
 	async focusCoordinator(): Promise<string | null> {

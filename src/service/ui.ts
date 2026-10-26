@@ -67,6 +67,14 @@ const SURFACE_CSS = [
 	".pb-opt-on .pb-opt-label { color: var(--accent); }",
 	".pb-opt-note { font-size: 12px; color: var(--t2); }",
 	".pb-opt-past { font-size: 11px; color: var(--t3); }",
+	".pb-opt-notice { padding: 6px 10px; }",
+	".pb-opt-stale { cursor: default; }",
+	".pb-opt-stale .pb-opt-label { color: var(--t2); }",
+	// SUBAGENT: a dropdown trigger, the value and a chevron in a field-like box.
+	".pb-select { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: 4px; padding: 3px 8px; border-radius: 4px; box-shadow: inset 0 0 0 1px var(--l2); cursor: pointer; }",
+	".pb-select:hover { background: var(--l1); }",
+	".pb-select-open { box-shadow: inset 0 0 0 1px var(--accent); }",
+	".pb-select-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
 	// Lists: an ordered list's items carry a grip that picks the item up; a click on another item places it there.
 	".pb-list { display: flex; flex-direction: column; margin: 0; padding: 0; }",
 	".pb-li { display: flex; align-items: flex-start; gap: 8px; padding: 3px 6px 3px 2px; border-radius: 6px; }",
@@ -95,6 +103,12 @@ const SURFACE_CSS = [
 	".pb-tool { padding: 2px 8px; border-radius: 6px; box-shadow: inset 0 0 0 1px var(--l2); font-size: 12px; cursor: pointer; }",
 	".pb-tool:hover { background: var(--l1); }",
 	".pb-danger { color: var(--bad); }",
+	// An in-place edit: the field, then the control that ends it (the same as Enter or Esc).
+	".pb-editing { display: flex; flex-direction: column; align-items: stretch; gap: 4px; min-width: 0; flex: 1 1 auto; }",
+	".pb-editing-line { flex-direction: row; align-items: center; gap: 6px; }",
+	".pb-editing-line > .sf-input { flex: 1 1 auto; min-width: 0; }",
+	".pb-exit { align-self: flex-end; flex: 0 0 auto; padding: 2px 8px; border-radius: 4px; font-family: var(--sans); font-size: 12px; color: var(--accent); box-shadow: inset 0 0 0 1px rgb(from var(--accent) r g b / 45%); cursor: pointer; white-space: nowrap; }",
+	".pb-editing-line > .pb-exit { align-self: center; }",
 	// Comments: `//` and muted small text, never a box.
 	".pb-comment { display: flex; gap: 8px; align-items: flex-start; color: var(--t2); font-size: 12px; }",
 	".pb-comment-slash { flex: 0 0 auto; color: var(--t3); }",
@@ -190,6 +204,8 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 	let open: BlockId | null = null;
 	let openChosen = false;
 	let menu: BlockId | null = null;
+	/** The task block whose SUBAGENT dropdown is open. */
+	let agentMenu: BlockId | null = null;
 	let editing: Editing | null = null;
 	let picker: Picker | null = null;
 	/** An ordered list item picked up to be placed elsewhere. */
@@ -236,7 +252,13 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 		if (done.text !== done.initial) outcome(done.commit(done.text));
 	}
 	function editor(state: Editing): TspNode {
-		return { id: `${state.id}.edit`, k: state.multiline ? "editor" : "input", p: { text: state.text, cursor: state.caret.cursor, anchor: state.caret.anchor, placeholder: state.placeholder, aria: state.placeholder || "编辑", ...(state.multiline ? { maxLines: 18 } : {}) } };
+		const field: TspNode = { id: `${state.id}.edit`, k: state.multiline ? "editor" : "input", p: { text: state.text, cursor: state.caret.cursor, anchor: state.caret.anchor, placeholder: state.placeholder, aria: state.placeholder || "编辑", ...(state.multiline ? { maxLines: 18 } : {}) } };
+		const exit = `${state.id}.exit`;
+		on(exit, { click: finishEdit });
+		return el(`${state.id}.editing`, "div", state.multiline ? "pb-editing" : "pb-editing pb-editing-line", [
+			field,
+			el(exit, "span", "pb-exit", [], { text: "退出编辑", title: "保存并退出编辑（同 Enter / Esc）", actions: { click: "invoke" } }),
+		]);
 	}
 	/** A view that turns into its editor on double-click. */
 	function editable(id: string, view: TspNode, initial: () => string, multiline: boolean, commit: (text: string) => string | null, placeholder = "", tag = "div"): TspNode {
@@ -444,7 +466,15 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 		}
 		const content = block.content;
 		const agentId = `${id}.agent`;
-		const agent = editable(agentId, el(`${agentId}.view`, "div", "pb-val", [], { text: content.agent ?? "默认" }), () => content.agent ?? "", false, text => core.setAgent(REF, block.id, text.trim() || null), "subagent 名称，留空用默认");
+		on(agentId, { click: () => {
+			if (agentMenu === block.id) { agentMenu = null; return; }
+			agentMenu = block.id;
+			core.requestAgents();
+		} });
+		const agent = el(agentId, "div", `pb-val pb-select${agentMenu === block.id ? " pb-select-open" : ""}`, [
+			el(`${agentId}.value`, "span", "pb-select-value", [], { text: content.agent ?? "默认" }),
+			{ id: `${agentId}.chev`, k: "icon", p: { name: "chev" } },
+		], { aria: "选择 subagent", actions: { click: "invoke" } });
 		const isolatedId = `${id}.isolated`;
 		on(isolatedId, { dblclick: () => outcome(core.setIsolated(REF, block.id, !(content.isolated ?? false))) });
 		const launchId = `${id}.launch`;
@@ -542,12 +572,44 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 		return { id: "dock.view", k: "col", c: rows };
 	}
 
+	/** The SUBAGENT dropdown: 默认, then what the coordinator's session can launch, as it last answered. */
+	function agentOptions(block: BlockId, current: string | null): TspNode[] {
+		const choose = (id: string, label: string, value: string | null, note = ""): TspNode => {
+			on(id, { click: () => { agentMenu = null; outcome(core.setAgent(REF, block, value)); } });
+			return el(id, "div", `pb-opt${value === current ? " pb-opt-on" : ""}`, [
+				el(`${id}.row`, "div", "pb-opt-row", [el(`${id}.label`, "span", "pb-opt-label", [], { text: label })]),
+				...(note ? [el(`${id}.note`, "span", "pb-opt-note", [], { text: note })] : []),
+			], { actions: { click: "invoke" } });
+		};
+		const notice = (text: string): TspNode => el("agents.notice", "div", "pb-opt-note pb-opt-notice", [], { text });
+		const list = core.agents();
+		const options: TspNode[] = [choose("agents.default", "默认", null, "不指定，由协调者的 omp 用默认 subagent")];
+		switch (list.kind) {
+			case "offline": options.push(notice("协调者离线，无法列出可用的 subagent")); break;
+			case "unasked": case "pending": options.push(notice("正在向协调者读取可用的 subagent…")); break;
+			case "unavailable": options.push(notice(list.reason)); break;
+			case "listed": list.names.forEach((name, index) => options.push(choose(`agents.o${index}`, name, name))); break;
+		}
+		// A saved name the session no longer lists stays visible; it is never rewritten behind the person's back.
+		if (current !== null && !(list.kind === "listed" && list.names.includes(current))) {
+			options.push(el("agents.current", "div", "pb-opt pb-opt-on pb-opt-stale", [
+				el("agents.current.row", "div", "pb-opt-row", [el("agents.current.label", "span", "pb-opt-label", [], { text: current })]),
+				el("agents.current.note", "span", "pb-opt-note", [], { text: list.kind === "listed" ? "当前设置；协调者的 omp 现在不能启动它" : "当前设置" }),
+			]));
+		}
+		return options;
+	}
+
 	function layer(view: DocView): TspNode {
 		const children: TspNode[] = [];
 		if (menu !== null && view.blocks.some(item => item.block.id === menu)) {
 			const block = menu;
 			on("menu.delete", { click: () => { menu = null; if (open === block) open = null; outcome(core.deleteBlock(REF, block)); } });
 			children.push({ id: "menu", k: "overlay", p: { anchor: { node: `${block}.more` }, size: "sm" }, c: [el("menu.delete", "div", "pb-menu-item pb-danger", [], { text: "删除此块", actions: { click: "invoke" } })] });
+		}
+		const agentItem = agentMenu === null ? undefined : view.blocks.find(item => item.block.id === agentMenu);
+		if (agentItem && open === agentItem.block.id && agentItem.block.content.kind === "task" && agentItem.block.progress.kind === "tracked" && agentItem.block.progress.status !== "done") {
+			children.push({ id: "agents", k: "overlay", p: { anchor: { node: `${agentItem.block.id}.foot.agent` }, size: "sm" }, c: agentOptions(agentItem.block.id, agentItem.block.content.agent ?? null) });
 		}
 		if (picker) {
 			const current = picker;
@@ -697,7 +759,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 	/** Enter or Esc: apply the edit; with nothing being edited, Esc closes the menu, the picker and a picked item. */
 	function end(): void {
 		if (editing) finishEdit();
-		else { menu = null; picker = null; picked = null; node = null; }
+		else { menu = null; agentMenu = null; picker = null; picked = null; node = null; }
 		redraw();
 	}
 
@@ -716,6 +778,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 				if (click) click(input.mods);
 				else dblclick?.();
 				if (!input.id.startsWith("picker.") && !input.id.endsWith(".more") && !input.id.startsWith("menu.")) menu = null;
+				if (!input.id.startsWith("agents.") && !input.id.endsWith(".foot.agent")) agentMenu = null;
 				redraw();
 				break;
 			}

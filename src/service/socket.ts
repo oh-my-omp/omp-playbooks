@@ -162,6 +162,14 @@ export function parseRequest(op: string, args: unknown): Request | ProtocolError
 			}
 			case "snooze": return { op, args: { run: run(a.run), after: integer(a.after, "after") } };
 			case "ack": return { op, args: { event: string(a.event, "event") } };
+			case "agents": {
+				const result = object(a.result, "result");
+				switch (result.kind) {
+					case "listed": return { op, args: { result: { kind: "listed", names: array(result.names, "names", v => agentName(v)) } } };
+					case "unavailable": return { op, args: { result: { kind: "unavailable", reason: string(result.reason, "reason") } } };
+					default: throw new BadInput("result kind must be listed or unavailable");
+				}
+			}
 			case "reveal": return { op, args: {} };
 			default: throw new BadInput(`Unknown operation: ${op}`);
 		}
