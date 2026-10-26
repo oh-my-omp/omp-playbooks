@@ -139,6 +139,31 @@ describe("current Playbook user interactions", () => {
 		const f = await fixture(); f.tsp.action("b1.more"); f.tsp.action("menu.delete");
 		expect(f.core.view(template).blocks.map(item => item.block.id)).toEqual(["b2"]);
 	});
+	test("Unicode deletion removes a code point and undo restores the last edit", async () => {
+		const f = await fixture();
+		f.tsp.action("b1.title", "edit");
+		f.tsp.event({ ev: "edit", id: "b1.title.edit", from: 0, to: 2, text: "A😀B", cursor: 4, len: 2 });
+		f.tsp.keys("\x7f\x7f");
+		f.tsp.event({ ev: "undo", id: "b1.title.edit" });
+		f.tsp.keys("\r");
+		expect(f.core.view(template).blocks[0]?.block.title).toBe("A😀");
+	});
+	test("fragmented paste and coalesced text plus Escape commit one single-line edit", async () => {
+		const f = await fixture();
+		f.tsp.action("b1.title", "edit");
+		f.tsp.keys("\x1b[200~");
+		f.tsp.keys(" pasted\ntext");
+		f.tsp.keys("\x1b[201~!\x1b");
+		expect(f.core.view(template).blocks[0]?.block.title).toBe("b1 pasted text!");
+	});
+	test("Shift+Enter inserts a requirement newline and Ctrl+Enter commits without editing design", async () => {
+		const f = await fixture([design("b1")]);
+		f.tsp.action("b1.requirement", "edit");
+		f.tsp.keys("\x1b[13;2u");
+		f.tsp.keys("Extra requirement");
+		f.tsp.keys("\x1b[13;5u");
+		expect(f.core.view(template).blocks[0]?.block.content).toEqual({ kind: "design", requirement: "Requirement\nExtra requirement", design: "## A Plan\nDesign" });
+	});
 });
 
 registerCoreCleanup();
