@@ -4,9 +4,10 @@ import { isAbsolute, relative, resolve } from "node:path";
 import { prepareSvg } from "@oh-my-pi/pi-tui/chat/svg-source";
 import { svgFigurePalette } from "@oh-my-pi/pi-tui/chat/svg-figure";
 import { initThemeSync, setTheme } from "@oh-my-pi/pi-tui/theme/theme";
-import type { Block, BlockId, DocRef, HumanField } from "../domain/model";
+import { outlinedText, type Block, type BlockId, type DocRef, type HumanField } from "../domain/model";
 import type { BlockView, CoreApi, DocView, RenderStatus } from "../domain/ports";
 import { renderDraft, type DraftHost } from "./draft/components";
+import { outlineProblems } from "./draft/outline";
 import type { ChangeView, EditHost, FileRead, ListItem, Span } from "./draft/contract";
 import { parseSlots, setSlotValue, type SlotDecl } from "./draft/slot";
 import type { FrameOp, TspEvent, TspInput, TspNode, TspSession } from "./tsp-types";
@@ -578,10 +579,15 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 		drawn.nodes.forEach(collect);
 		summaries.set(block.id, { view: { md, images }, draftErrors: drawn.errors });
 		const bottom = isOpen ? foot(item) : null;
+		// The same rule as the `outline` check, said where the text is.
+		const outline = isOpen ? outlineProblems(outlinedText(block.content) ?? "") : [];
+		const outlineNode: TspNode[] = outline.length === 0 ? [] : [el(`${block.id}.outline`, "div", "pb-errors", outline.map((problem, index) => ({
+			id: `${block.id}.outline${index}`, k: "text", p: { text: `Where/What/How · ${problem}`, tone: "warning" },
+		})))];
 		return {
 			id: `${block.id}.card`, k: "card",
 			p: { head: `${block.id}.head`, selected: isOpen, ...(selected.has(block.id) ? { mark: "pick" } : {}) },
-			c: [head(item, number, isOpen), ...(isOpen ? [el(`${block.id}.body`, "div", "pb-body", [...drawn.nodes, ...(bottom ? [bottom] : [])])] : [])],
+			c: [head(item, number, isOpen), ...(isOpen ? [el(`${block.id}.body`, "div", "pb-body", [...drawn.nodes, ...outlineNode, ...(bottom ? [bottom] : [])])] : [])],
 		};
 	}
 

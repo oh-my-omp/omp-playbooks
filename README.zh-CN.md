@@ -74,35 +74,50 @@ blocks:
   - id: b1
     title: 执行通则
     body: |
+      ## A Where · 适用范围
+      本 Playbook 的所有执行块。
+
+      ## B What · 约束
       只读检查，不修改任何文件。
+
+      ## C How · 做法
+      发现需要改动时停下，把要改什么写进完成报告。
     task: false
   - id: b2
     title: 缓存设计
     requirement: |
       数据重启后不能丢。请求路径要简单。
     design: |
-      ## A 结论
+      ## A Where · 请求路径
+      ```flow LR
+      Client -> Gateway -> [(Cache)]: read
+      ```
+
+      ## B What · 结论
       ```callout ok 使用持久化缓存
       明确持久化策略，不把“用了 Redis”当成数据不会丢的保证。
       ```
 
-      ## B 请求路径
-      ```flow LR
-      Client -> Gateway -> [(Cache)]: read
-      ```
+      ## C How · 落地与验证
+      开启 AOF 持久化；重启缓存实例后读回重启前写入的键。
     status: todo
   - id: b3
     title: 检查方案
     body: |
-      用 {{检查方式}} 列出三个需要验证的边界。
-      ((b1))
+      ## A Where · 检查对象
       ((b2 | requirement, panel(B)))
+
+      ## B What · 产出
+      用 {{检查方式}} 列出三个需要验证的边界。
 
       ```slot 检查方式
       = 清单
       * 清单 | 每条一行
       - 表格 | 边界、风险、验证方法三列
       ```
+
+      ## C How · 做法
+      ((b1))
     status: todo
 ````
 
@@ -116,6 +131,18 @@ blocks:
 每个块必须有 `id`、`title` 和对应的内容字段，另外要么写 `status`，要么写 `task: false`。ID 为 `b1`、`b2` 等正整数编号，不能重复。YAML **不写 `kind`**；类型由字段决定。混写 `body` 和 `requirement`/`design`、缺字段、未知字段会被拒绝。`agent`（去掉首尾空白后非空的字符串）和 `isolated`（布尔值）只能写在执行块上；不写时文件里也不出现。`task` 只能是 `false`、只能写在执行块上，这样的块不能有 `status` 或 `report`。设计块不会是 `running`，也没有 `report`。多行内容建议用 `|`，空需求或空设计用空字符串或空块标量。
 
 `status` 是执行状态，不是设计认可，也不从检查、subagent 返回值或 Launch 记录推导。`report` 是完成报告：subagent 把块改成 `done` 时一并写入，面板只读显示。仍使用旧字段 `done:` 的文件会被拒绝；把 `done: false` 改成 `status: todo`，`done: true` 改成 `status: done`。
+
+### Where/What/How
+
+卡片上的文字是写给人看的，所以每个执行正文（跟踪的或 `task: false`）和每份设计都按 Where/What/How 写：标题以角色词开头的 `## ` 面板。
+
+| 角色 | 标题 | 面板写什么 |
+|---|---|---|
+| Where | `## A Where · 现状` | 对象、位置、范围、现状与证据 |
+| What | `## B What · 决定` | 目标、决定、预期结果与边界 |
+| How | `## C How · 处置` | 步骤、验证、失败处理与回退 |
+
+三个角色都要有内容，并按这个顺序出现。一个角色可以占几个面板（`## D How · 验收与回退`）；导语和不带角色的面板放在哪里都行。角色词区分大小写，后面是标题结尾、空格或分隔符（`·`、`:`、`：`、`|`、`-`、`—`）；角色面板不能设 `bare`，否则标题不显示。空文字算作还没写。编排块是代码，不受此约束；人的 `requirement` 和完成报告也不受。展开的卡片在文字下方列出不符合之处，`playbook_check` 把它报告为 `outline`；两者都不阻止启动。
 
 ### 面板布局
 
@@ -214,7 +241,7 @@ subagent 收到的是冻结文本，不是 UI、实时设计页或隐式 Playboo
 
 规则和限制：
 
-- 设计块支持 `requirement`、`design`、`panel(A)`；面板必须在标题中写单个大写字母 ID，例如 `## A 结论`。自动显示的编号不能作为引用 ID。需求和设计稿中的 `((…))` 原样保留，不会取回或展开。
+- 设计块支持 `requirement`、`design`、`panel(A)`；面板必须在标题中写单个大写字母 ID，例如 `## B What · 结论`。自动显示的编号不能作为引用 ID。需求和设计稿中的 `((…))` 原样保留，不会取回或展开。
 - `lines` 是 1 开始的闭区间，写作 `lines(1..3)`；`section` 不含所选标题本身，包含其下级小节。两者都不能用于设计块。
 - GitHub 只支持标准的 `https://github.com/<owner>/<repo>/issues/<n>` 或 `/pull/<n>`。`comments`、`comments(1..2)`、`comments(-1)` 按时间顺序选择讨论评论；PR 不包含 diff、文件、review 或行内 review 评论。不支持任意网页 URL。
 - 外部文本包在 `<external source="…" fetched="…">` 中，显示取回时间。取回的是副本，不实时同步；需要最新内容时用 `playbook_compile {op:"refetch"}`。
@@ -231,7 +258,7 @@ subagent 收到的是冻结文本，不是 UI、实时设计页或隐式 Playboo
 
 - 可选稿头必须在第一行，以 `---` 开始/结束；只支持逐行 `key: value`，不是完整 YAML。
 - 面板按书写顺序单列绘制。显示 `title`、`subtitle`；未设置稿头 `title` 时，正文第一条非空行若为 `# 标题`，会提取为稿头标题并从正文移除；先写说明再写标题不会触发提取。`template`（`sheet`/`doc`）和 `cols`（1–6）为了格式兼容仍会校验，但不改变布局。
-- `## A 标题 {bare meta="备注"}` 开始一个面板。`bare` 去掉面板标题行，`meta` 显示附加文字。`span`、`rows` 会校验但不改变布局。
+- `## A 标题 {bare meta="备注"}` 开始一个面板。`bare` 去掉面板标题行（Where/What/How 面板不能用），`meta` 显示附加文字。`span`、`rows` 会校验但不改变布局。
 - `lang` 被忽略；`theme`、`mode`、`style` 被忽略并提示；其他稿头键作为文字元数据显示。
 - 面板 ID 是单个大写字母，不能重复。部分组件的原生文字标签支持行内代码、粗体、斜体和删除线；flow、ER 标签显示为纯文字，sequence 标签会去掉这些标记后显示纯文字。不要把组件标签当成完整 Markdown 渲染器。
 - 以 `//` 开头的行是注释行：以淡色注释样式绘制，仍属于 agent 收到的文本。
@@ -356,7 +383,7 @@ Python 编排会设置 **Python 变量** `PLAYBOOK_DOC`、`PLAYBOOK_RUN`（Playb
 
 ## 检查不等于完成或认可
 
-`playbook_check inspect` 返回确定性检查：`compile`、`render_error`、`render_pending`；执行块另检查 `empty_expansion`，执行正文和设计稿检查 `draft`。面板不显示检查，组件错误在原处显示。检查不负责证明业务设计正确；除编译失败等 Launch 自身约束外，其他检查不通过不是启动门禁。
+`playbook_check inspect` 返回确定性检查：`compile`、`render_error`、`render_pending`；执行块另检查 `empty_expansion`，执行正文和设计稿检查 `draft`，非编排的执行正文和设计稿检查 `outline`（Where/What/How）。面板不显示检查，组件错误和不符合 Where/What/How 之处在原处显示。检查不负责证明业务设计正确；除编译失败等 Launch 自身约束外，其他检查不通过不是启动门禁。
 
 `jev` 是另行报告的模型判定：
 

@@ -34,7 +34,7 @@ import type {
 	TaskConfig,
 	TimelineEntry,
 } from "../domain/model";
-import { coordinatorField, fieldText, freshProgress, humanFieldValid, idNumber, withField } from "../domain/model";
+import { coordinatorField, fieldText, freshProgress, humanFieldValid, idNumber, isOrchestration, withField } from "../domain/model";
 import type {
 	BlockView,
 	ChecksModule,
@@ -147,11 +147,6 @@ function sameProgress(a: Progress, b: Progress): boolean {
 function requestedBlocks(data: unknown): readonly string[] {
 	if (typeof data !== "object" || data === null || !("blocks" in data) || !Array.isArray(data.blocks)) return [];
 	return data.blocks.filter((value): value is string => typeof value === "string");
-}
-/** Orchestration block: a task block whose whole body is one `js` or `py` fenced code block (README §定义). */
-export function isOrchestration(content: BlockContent): boolean {
-	if (content.kind !== "task") return false;
-	return /^(`{3,}|~{3,})(js|py)[ \t]*\n[\s\S]*?\n\1[ \t]*\n?$/.test(content.body.trim() + "\n");
 }
 
 /** A block as K1 sends it: content and progress fields flattened beside `kind`, as the file writes them. */

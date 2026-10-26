@@ -74,35 +74,50 @@ blocks:
   - id: b1
     title: 执行通则
     body: |
+      ## A Where · 适用范围
+      本 Playbook 的所有执行块。
+
+      ## B What · 约束
       只读检查，不修改任何文件。
+
+      ## C How · 做法
+      发现需要改动时停下，把要改什么写进完成报告。
     task: false
   - id: b2
     title: 缓存设计
     requirement: |
       数据重启后不能丢。请求路径要简单。
     design: |
-      ## A 结论
+      ## A Where · 请求路径
+      ```flow LR
+      Client -> Gateway -> [(Cache)]: read
+      ```
+
+      ## B What · 结论
       ```callout ok 使用持久化缓存
       明确持久化策略，不把“用了 Redis”当成数据不会丢的保证。
       ```
 
-      ## B 请求路径
-      ```flow LR
-      Client -> Gateway -> [(Cache)]: read
-      ```
+      ## C How · 落地与验证
+      开启 AOF 持久化；重启缓存实例后读回重启前写入的键。
     status: todo
   - id: b3
     title: 检查方案
     body: |
-      用 {{检查方式}} 列出三个需要验证的边界。
-      ((b1))
+      ## A Where · 检查对象
       ((b2 | requirement, panel(B)))
+
+      ## B What · 产出
+      用 {{检查方式}} 列出三个需要验证的边界。
 
       ```slot 检查方式
       = 清单
       * 清单 | 每条一行
       - 表格 | 边界、风险、验证方法三列
       ```
+
+      ## C How · 做法
+      ((b1))
     status: todo
 ````
 
@@ -116,6 +131,18 @@ blocks:
 Every block needs `id`, `title` and the matching content fields, plus either `status` or `task: false`. IDs are positive integers such as `b1`, `b2` and must be unique. The YAML **has no `kind`**; the type follows from the fields. Mixing `body` with `requirement`/`design`, missing fields and unknown fields are rejected. `agent` (a string that is not blank after trimming) and `isolated` (a boolean) are allowed only on execution blocks; when unset they do not appear in the file. `task` may only be `false`, only on an execution block, and such a block has no `status` or `report`. A design block is never `running` and has no `report`. Use `|` for multi-line content; an empty requirement or design is an empty string or an empty block scalar.
 
 `status` is execution state, not design approval, and is never derived from checks, subagent return values or Launch records. `report` is the completion report: the subagent writes it when it sets its block to `done`, and the pane shows it read-only. Files that still use the old `done:` field are rejected; replace `done: false` with `status: todo` and `done: true` with `status: done`.
+
+### Where/What/How
+
+A card's text is written for a person, so every task body (tracked or `task: false`) and every design follows Where/What/How: `## ` panels whose titles start with the role word.
+
+| Role | Heading | What its panels say |
+|---|---|---|
+| Where | `## A Where · 现状` | object, location, scope, current state, evidence |
+| What | `## B What · 决定` | goal, decision, expected result, boundaries |
+| How | `## C How · 处置` | steps, verification, failure handling, rollback |
+
+Every role has content and the roles come in that order. A role may span several panels (`## D How · 验收与回退`); a lead and panels of no role may sit anywhere. The role word is case-sensitive and ends at the title's end, a space or a separator (`·`, `:`, `：`, `|`, `-`, `—`); a role panel may not be `bare`, since its heading would not show. An empty text counts as not yet written. An orchestration block is code and is exempt; so are the person's `requirement` and completion reports. An open card lists what breaks the outline under its text, and `playbook_check` reports it as `outline`; neither blocks a launch.
 
 ### Pane layout
 
@@ -214,7 +241,7 @@ Execution bodies use `((target))` or `((target | selector, selector))`. Several 
 
 Rules and limits:
 
-- Design blocks support `requirement`, `design` and `panel(A)`; a panel needs a single uppercase-letter ID written in its heading, such as `## A 结论`. Automatically displayed numbers are not referenceable IDs. `((…))` inside requirements and designs stays as written: it is not fetched or expanded.
+- Design blocks support `requirement`, `design` and `panel(A)`; a panel needs a single uppercase-letter ID written in its heading, such as `## B What · 结论`. Automatically displayed numbers are not referenceable IDs. `((…))` inside requirements and designs stays as written: it is not fetched or expanded.
 - `lines` is a 1-based closed range written `lines(1..3)`; `section` excludes the selected heading and includes its subsections. Neither works on design blocks.
 - GitHub supports only standard `https://github.com/<owner>/<repo>/issues/<n>` or `/pull/<n>` URLs. `comments`, `comments(1..2)` and `comments(-1)` select discussion comments in time order; a PR does not include its diff, files, reviews or inline review comments. Arbitrary web URLs are not supported.
 - External text is wrapped in `<external source="…" fetched="…">`, showing when it was fetched. A fetch is a copy, not a live sync; for the latest content use `playbook_compile {op:"refetch"}`.
@@ -231,7 +258,7 @@ Execution bodies and designs are drawn with the same component parser. The compo
 
 - The optional header must start on the first line, opened and closed with `---`; it supports only line-by-line `key: value`, not full YAML.
 - Panels are drawn in one column, in the order written. `title` and `subtitle` are shown; without a header `title`, if the first non-empty body line is `# Title`, it becomes the header title and is removed from the body; writing prose before the heading does not trigger this. `template` (`sheet`/`doc`) and `cols` (1–6) are validated for format compatibility but do not change the layout.
-- `## A Title {bare meta="note"}` starts a panel. `bare` drops the panel heading and `meta` shows extra text. `span` and `rows` are validated but do not change the layout.
+- `## A Title {bare meta="note"}` starts a panel. `bare` drops the panel heading (not on a Where/What/How panel) and `meta` shows extra text. `span` and `rows` are validated but do not change the layout.
 - `lang` is ignored; `theme`, `mode` and `style` are ignored with a warning; other header keys are shown as text metadata.
 - A panel ID is a single uppercase letter and must be unique. The native text labels of some components support inline code, bold, italic and strikethrough; flow and ER labels show as plain text, and sequence labels have these marks removed and show as plain text. Do not treat component labels as a full Markdown renderer.
 - A line starting with `//` is a comment line: it is drawn in the muted comment style and is still part of the text the agent receives.
@@ -356,7 +383,7 @@ Python orchestration sets the **Python variables** `PLAYBOOK_DOC`, `PLAYBOOK_RUN
 
 ## Checks are not completion or approval
 
-`playbook_check inspect` returns the deterministic checks `compile`, `render_error` and `render_pending`; execution blocks also check `empty_expansion`, and execution bodies and designs check `draft`. The pane does not show checks; it shows component errors in place. Checks do not prove a business design correct; apart from Launch constraints such as compile failures, a failed check does not gate a launch.
+`playbook_check inspect` returns the deterministic checks `compile`, `render_error` and `render_pending`; execution blocks also check `empty_expansion`, execution bodies and designs check `draft`, and non-orchestration bodies and designs check `outline` (Where/What/How). The pane does not show checks; it shows component errors and what breaks the outline in place. Checks do not prove a business design correct; apart from Launch constraints such as compile failures, a failed check does not gate a launch.
 
 `jev` is a separately reported model judgment:
 

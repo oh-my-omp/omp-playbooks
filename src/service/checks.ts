@@ -1,6 +1,7 @@
-import type { CompileError, CompileResult, Source } from "../domain/model";
+import { outlinedText, type CompileError, type CompileResult, type Source } from "../domain/model";
 import type { ChecksModule } from "../domain/ports";
 import { draftDiagnostics } from "./draft/components";
+import { outlineProblems } from "./draft/outline";
 
 function unreachable(value: never): never {
 	throw new Error(`Unexpected checks variant: ${JSON.stringify(value)}`);
@@ -67,6 +68,7 @@ export const checks: ChecksModule = {
 			...common,
 			empty_expansion: content.kind === "task" && expansions.some(expansion => expansion.kind === "Ok" && expansion.text.trim() === ""),
 			draft: render.draftErrors > 0 || draftDiagnostics(text).some(found => found.severity === "error"),
+			outline: outlineProblems(outlinedText(content) ?? "").length > 0,
 		};
 	},
 	version({ closure, results, compiled }) {

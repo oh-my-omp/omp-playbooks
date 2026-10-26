@@ -17,21 +17,23 @@ const compileErrors: readonly CompileError[] = [
 	{ kind: "NoResult", block: "b2", at: site },
 	{ kind: "FetchFailed", target: "missing.txt", error: "ENOENT", at: site },
 ];
+const outlined = "## A Where · Scope\nThe service.\n\n## B What · Goal\nIt answers.\n\n## C How · Steps\nRun it.";
 const input: Parameters<ChecksModule["findings"]>[0] = {
 	compiled: ok,
 	expansions: [],
-	content: { kind: "task", body: "A complete prompt without tables." },
+	content: { kind: "task", body: outlined },
 	render: { blockError: false, documentError: false, pendingOverdue: false, draftErrors: 0, view: { md: [], images: [] } },
 };
 
 describe("deterministic findings", () => {
-	test("a complete rendered prompt passes all six checks", () => {
+	test("a complete rendered prompt passes every check", () => {
 		expect(checks.findings(input)).toEqual({
 			compile: false,
 			empty_expansion: false,
 			render_error: false,
 			render_pending: false,
 			draft: false,
+			outline: false,
 		});
 	});
 
@@ -80,12 +82,12 @@ describe("deterministic findings", () => {
 				content: { kind: "task", body: numericTable },
 				render: { blockError: true, documentError: false, pendingOverdue: true, draftErrors: 2, view: { md: [], images: [] } },
 			}),
-		).toEqual({ compile: true, empty_expansion: true, render_error: true, render_pending: true, draft: true });
+		).toEqual({ compile: true, empty_expansion: true, render_error: true, render_pending: true, draft: true, outline: true });
 	});
 });
 
 describe("design draft findings", () => {
-	const cleanDesign = "Design overview.\n\n## A Architecture\nA complete design.\n\n## B Execution\nImplement the plan.";
+	const cleanDesign = "Design overview.\n\n## A Where · Scope\nThe service.\n\n## B What · Architecture\nA complete design.\n\n## C How · Execution\nImplement the plan.";
 	const designContent = { kind: "design", requirement: "A user requirement.", design: cleanDesign } as const;
 
 	test("design content skips empty expansion and chart checks", () => {
@@ -108,14 +110,22 @@ describe("design draft findings", () => {
 		});
 	}
 
-	test("a clean design passes all six checks", () => {
+	test("a clean design passes every check", () => {
 		expect(checks.findings({ ...input, content: designContent })).toEqual({
 			compile: false,
 			empty_expansion: false,
 			render_error: false,
 			render_pending: false,
 			draft: false,
+			outline: false,
 		});
+	});
+
+	test("outline is checked on the design and the body, never on the person's requirement or an orchestration body", () => {
+		expect(checks.findings({ ...input, content: { ...designContent, design: "## A Architecture\nA design." } }).outline).toBe(true);
+		expect(checks.findings({ ...input, content: { ...designContent, requirement: "free text" } }).outline).toBe(false);
+		expect(checks.findings({ ...input, content: { kind: "task", body: "Do it." } }).outline).toBe(true);
+		expect(checks.findings({ ...input, content: { kind: "task", body: "```js\nawait playbook.run({ blocks: [\"b2\"] });\n```" } }).outline).toBe(false);
 	});
 
 	for (const draftErrors of [0, 1, 2]) {

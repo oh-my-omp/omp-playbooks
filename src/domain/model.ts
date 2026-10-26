@@ -95,6 +95,21 @@ export function coordinatorField(content: BlockContent): "body" | "design" {
 	return content.kind === "task" ? "body" : "design";
 }
 
+/** Orchestration block: a task block whose whole body is one `js` or `py` fenced code block (README §定义). */
+export function isOrchestration(content: BlockContent): boolean {
+	if (content.kind !== "task") return false;
+	return /^(`{3,}|~{3,})(js|py)[ \t]*\n[\s\S]*?\n\1[ \t]*\n?$/.test(content.body.trim() + "\n");
+}
+
+/**
+ * The text a card presents to a person as its substance, which is written as Where/What/How:
+ * a task's body or a design's draft. An orchestration block is code and has none; the person's
+ * own requirement and a completion report are not it.
+ */
+export function outlinedText(content: BlockContent): string | null {
+	return isOrchestration(content) ? null : content.kind === "task" ? content.body : content.design;
+}
+
 /** Whether a person may write `field` on a block of this kind. */
 export function humanFieldValid(content: BlockContent, field: HumanField): boolean {
 	switch (field) {
@@ -322,7 +337,7 @@ export interface TimelineEntry {
 
 export type JudgeReport = { readonly kind: "answers"; readonly answers: Readonly<Record<string, number>> } | { readonly kind: "judge_unavailable" };
 
-export type FindingName = "compile" | "empty_expansion" | "render_error" | "render_pending" | "draft";
+export type FindingName = "compile" | "empty_expansion" | "render_error" | "render_pending" | "draft" | "outline";
 export type Findings = Readonly<Record<FindingName, boolean>>; // true = fails
 
 // ---------------------------------------------------------------- events (K1)
