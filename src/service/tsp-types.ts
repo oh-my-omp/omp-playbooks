@@ -15,7 +15,7 @@ export type TspEvent =
 	| { readonly ev: "error"; readonly s?: number; readonly op?: number; readonly msg?: string }
 	| { readonly ev: "theme"; readonly dark: boolean }
 	| { readonly ev: "focus"; readonly id: string }
-	| { readonly ev: "action"; readonly id: string; readonly act: string }
+	| { readonly ev: "action"; readonly id: string; readonly act: string; readonly mods: readonly string[] }
 	| { readonly ev: "change"; readonly id: string; readonly checked?: boolean; readonly value?: string; readonly text?: string }
 	| { readonly ev: "edit"; readonly id: string; readonly from: number; readonly to: number; readonly text: string; readonly cursor: number; readonly len: number }
 	| { readonly ev: "undo"; readonly id: string }

@@ -37,18 +37,35 @@ export type BlockContent =
 /** A task block's execution contract: the coordinator's defaults when it starts the block's Launch. */
 export type TaskConfig = Pick<Extract<BlockContent, { kind: "task" }>, "agent" | "isolated">;
 
+/** Where a tracked block's work stands. A design block is never `running`: it cannot be launched. */
+export type Status = "todo" | "running" | "done";
+
+/**
+ * Whether a block counts as a piece of work. A tracked block has a status and, once the subagent that ran
+ * it has written one, a completion report; `task: false` in the file declares an untracked task block
+ * (an overview, shared rules), which has neither and is left out of the done count.
+ */
+export type Progress =
+	| { readonly kind: "untracked" }
+	| { readonly kind: "tracked"; readonly status: Status; readonly report: string | null };
+
 /** A block (README §定义 块). */
 export interface Block {
 	readonly id: BlockId;
 	readonly title: string;
-	readonly done: boolean;
+	readonly progress: Progress;
 	readonly content: BlockContent;
+}
+
+/** A tracked block's progress reset for a new execution: status todo, no report. */
+export function freshProgress(progress: Progress): Progress {
+	return progress.kind === "untracked" ? progress : { kind: "tracked", status: "todo", report: null };
 }
 
 /** Persisted text fields of a block. `body` exists on task blocks, `requirement` and `design` on design blocks. */
 export type BlockField = "title" | "body" | "requirement" | "design";
-/** Fields a person edits through a draft: `prompt` is a design block's change request, never persisted in the block. */
-export type HumanField = "title" | "body" | "requirement" | "prompt";
+/** Fields a person writes directly; a design is the coordinator's and changes through a change request. */
+export type HumanField = "title" | "body" | "requirement";
 
 /** The text of `field` on `block`, or null when the block's kind has no such field. */
 export function fieldText(block: Block, field: BlockField): string | null {
@@ -78,12 +95,12 @@ export function coordinatorField(content: BlockContent): "body" | "design" {
 	return content.kind === "task" ? "body" : "design";
 }
 
-/** Whether a person may hold a draft of `field` on a block of this kind. */
+/** Whether a person may write `field` on a block of this kind. */
 export function humanFieldValid(content: BlockContent, field: HumanField): boolean {
 	switch (field) {
 		case "title": return true;
 		case "body": return content.kind === "task";
-		case "requirement": case "prompt": return content.kind === "design";
+		case "requirement": return content.kind === "design";
 	}
 }
 
@@ -123,10 +140,9 @@ export type EditOrigin = "human" | "coordinator" | "disk";
 /** Timeline entry origin (runs.md §3). */
 export type EntryOrigin = EditOrigin | "service";
 
-/** Block lock (README §定义 块锁). */
+/** Block lock (README §定义 块锁): the coordinator holds a block for the length of one `playbook_edit` call. */
 export type BlockLock =
 	| { readonly kind: "none" }
-	| { readonly kind: "human"; readonly field: HumanField; readonly draft: string }
 	| { readonly kind: "coordinator"; readonly request: string };
 
 // ---------------------------------------------------------------- references
@@ -226,8 +242,6 @@ export interface CompileInput {
 	readonly blocks: ReadonlyMap<BlockId, BlockContent>;
 	readonly fetches: FetchTable;
 	readonly results: ResultTable;
-	/** True when compiling a template, where block results are `NoResult`. */
-	readonly inTemplate: boolean;
 }
 
 // ---------------------------------------------------------------- launches
@@ -242,10 +256,10 @@ export interface PendingEvent {
 	readonly result: CompileResult;
 }
 
-/** Launch record (launch-events.md §1). */
+/** Launch record (launch-events.md §1). `run` is null for a Launch of the template. */
 export interface Launch {
 	readonly id: LaunchId;
-	readonly run: RunId;
+	readonly run: RunId | null;
 	readonly session: string;
 	readonly blocks: readonly BlockId[];
 	readonly kind: LaunchKind;
@@ -277,11 +291,12 @@ export type EntryData =
 	/** A disk edit switched the block between task and design, or a task block's execution contract changed. */
 	| { readonly type: "content_replaced"; readonly block: BlockId; readonly content: BlockContent }
 	| { readonly type: "blocks_reordered"; readonly order: readonly BlockId[] }
-	| { readonly type: "done_changed"; readonly block: BlockId; readonly done: boolean }
+	| { readonly type: "progress_changed"; readonly block: BlockId; readonly progress: Progress }
 	| { readonly type: "launch_created"; readonly launch: LaunchId; readonly kind: LaunchKind; readonly blocks: readonly BlockId[] }
 	| { readonly type: "agent_bound"; readonly launch: LaunchId; readonly agent: string }
 	| { readonly type: "launch_closed"; readonly launch: LaunchId }
-	| { readonly type: "event_sent"; readonly event: EventName; readonly data: unknown }
+	/** An event as it was sent; the name stays as written then, also for events since retired. */
+	| { readonly type: "event_sent"; readonly event: string; readonly data: unknown }
 	| { readonly type: "interrupted"; readonly block: BlockId; readonly request: string }
 	| { readonly type: "check_reported"; readonly blocks: readonly BlockId[]; readonly version: string; readonly result: JudgeReport }
 	| {
@@ -307,9 +322,9 @@ export interface TimelineEntry {
 
 export type JudgeReport = { readonly kind: "answers"; readonly answers: Readonly<Record<string, number>> } | { readonly kind: "judge_unavailable" };
 
-export type FindingName = "compile" | "empty_expansion" | "render_error" | "render_pending" | "chart" | "draft";
+export type FindingName = "compile" | "empty_expansion" | "render_error" | "render_pending" | "draft";
 export type Findings = Readonly<Record<FindingName, boolean>>; // true = fails
 
 // ---------------------------------------------------------------- events (K1)
 
-export type EventName = "block_changed" | "launch_requested" | "check_requested" | "run_started" | "run_finished" | "done_changed" | "update_due" | "interrupted" | "revision_requested";
+export type EventName = "block_changed" | "launch_requested" | "stop_requested" | "status_changed" | "update_due" | "interrupted" | "revision_requested";

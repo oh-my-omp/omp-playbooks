@@ -3,9 +3,9 @@ import { basename, dirname, join, resolve } from "node:path";
 import {
 	parseBlockId, parseLaunchId, parseRunId,
 	type Block, type BlockContent, type BlockId, type BlockResult, type CompileError, type CompileResult, type Revision,
-	type DocRef, type EntryData, type EntryOrigin, type EventName, type FetchOutcome,
-	type JudgeReport, type Launch, type LaunchId, type PlaybookDoc, type RunId,
-	type RunMeta, type Source, type TimelineEntry,
+	type DocRef, type EntryData, type EntryOrigin, type FetchOutcome,
+	type JudgeReport, type Launch, type LaunchId, type PlaybookDoc, type Progress, type RunId,
+	type RunMeta, type Source, type Status, type TimelineEntry,
 } from "../domain/model";
 import type { ParsedFile, ServiceRecord, Store } from "../domain/ports";
 
@@ -65,8 +65,8 @@ function launchId(value: unknown): LaunchId {
 function origin(value: unknown): EntryOrigin {
 	return choice(value, ["human", "coordinator", "disk", "service"]);
 }
-function eventName(value: unknown): EventName {
-	return choice(value, ["block_changed", "launch_requested", "check_requested", "run_started", "run_finished", "done_changed", "update_due", "interrupted", "revision_requested"]);
+function status(value: unknown): Status {
+	return choice(value, ["todo", "running", "done"]);
 }
 function timestamp(value: unknown): number {
 	const text = string(value);
@@ -115,10 +115,28 @@ function contentFields(content: BlockContent): Record<string, string | boolean> 
 		case "design": return { requirement: content.requirement, design: content.design };
 	}
 }
+/**
+ * A block's progress by its keys: `task: false` declares an untracked task block, which has no status or
+ * report; every other block has `status` and, for a task block, an optional `report`. A design block is
+ * never running and has no report: it is not launched.
+ */
+function decodeProgress(v: Fields, content: BlockContent): Progress {
+	if (Object.hasOwn(v, "task")) {
+		if (content.kind !== "task") throw new Error("task: false is only valid on a task block");
+		if (v.task !== false) throw new Error("task may only be false");
+		if (Object.hasOwn(v, "status") || Object.hasOwn(v, "report")) throw new Error("A block with task: false has no status or report");
+		return { kind: "untracked" };
+	}
+	if (!Object.hasOwn(v, "status")) throw new Error("Missing field: status");
+	const value = status(v.status);
+	if (content.kind === "design" && value === "running") throw new Error("A design block cannot be running");
+	if (content.kind === "design" && Object.hasOwn(v, "report")) throw new Error("A design block has no report");
+	return { kind: "tracked", status: value, report: Object.hasOwn(v, "report") ? string(v.report) : null };
+}
 function decodeBlock(value: unknown): Block {
 	const v = fields(value);
-	const content = decodeContent(v, ["id", "title", "done"]);
-	return { id: blockId(v.id), title: string(v.title), done: boolean(v.done), content };
+	const content = decodeContent(v, ["id", "title"], ["status", "report", "task"]);
+	return { id: blockId(v.id), title: string(v.title), progress: decodeProgress(v, content), content };
 }
 function decodeRevision(value: unknown): Revision {
 	const v = fields(value);
@@ -180,12 +198,17 @@ function contentYaml(content: BlockContent): string {
 		case "design": return `    requirement: ${bodyScalar(content.requirement)}    design: ${bodyScalar(content.design)}`;
 	}
 }
+/** Progress as YAML lines of a block mapping. */
+function progressYaml(progress: Progress): string {
+	if (progress.kind === "untracked") return "    task: false\n";
+	return `    status: ${progress.status}\n` + (progress.report === null ? "" : `    report: ${bodyScalar(progress.report)}`);
+}
 function serialize(doc: PlaybookDoc, run: RunMeta | null): string {
 	let text = `title: ${quoted(doc.title)}\nblocks:${doc.blocks.length === 0 ? " []" : ""}\n`;
 	for (const block of doc.blocks) {
 		text += `  - id: ${block.id}\n    title: ${quoted(block.title)}\n`;
 		text += contentYaml(block.content);
-		text += `    done: ${block.done}\n`;
+		text += progressYaml(block.progress);
 	}
 	if (run !== null) {
 		const iso = (value: number | null): string => value === null ? "null" : quoted(new Date(value).toISOString());
@@ -203,9 +226,16 @@ function decodeReport(value: unknown): JudgeReport {
 	for (const [key, answer] of Object.entries(fields(v.answers))) Object.defineProperty(answers, key, { value: number(answer), enumerable: true, writable: true, configurable: true });
 	return { kind, answers };
 }
+function decodeEntryProgress(value: unknown): Progress {
+	const v = fields(value);
+	const kind = choice(v.kind, ["untracked", "tracked"]);
+	if (kind === "untracked") { keys(v, ["kind"]); return { kind }; }
+	keys(v, ["kind", "status", "report"]);
+	return { kind, status: status(v.status), report: nullable(v.report, string) };
+}
 function decodeEntryData(type: unknown, value: unknown): EntryData {
 	const v = fields(value);
-	const tag = choice(type, ["run_started", "run_finished", "block_edited", "block_added", "block_deleted", "content_replaced", "blocks_reordered", "done_changed", "launch_created", "agent_bound", "launch_closed", "event_sent", "interrupted", "check_reported", "post", "update_due", "update_snoozed"]);
+	const tag = choice(type, ["run_started", "run_finished", "block_edited", "block_added", "block_deleted", "content_replaced", "blocks_reordered", "progress_changed", "launch_created", "agent_bound", "launch_closed", "event_sent", "interrupted", "check_reported", "post", "update_due", "update_snoozed"]);
 	switch (tag) {
 		case "run_started": keys(v, ["name"]); return { type: tag, name: string(v.name) };
 		case "run_finished": keys(v, []); return { type: tag };
@@ -213,11 +243,11 @@ function decodeEntryData(type: unknown, value: unknown): EntryData {
 		case "block_added": case "block_deleted": return { type: tag, content: decodeContent(v, ["block", "title"]), block: blockId(v.block), title: string(v.title) };
 		case "content_replaced": return { type: tag, content: decodeContent(v, ["block"]), block: blockId(v.block) };
 		case "blocks_reordered": keys(v, ["order"]); return { type: tag, order: list(v.order, blockId) };
-		case "done_changed": keys(v, ["block", "done"]); return { type: tag, block: blockId(v.block), done: boolean(v.done) };
+		case "progress_changed": keys(v, ["block", "progress"]); return { type: tag, block: blockId(v.block), progress: decodeEntryProgress(v.progress) };
 		case "launch_created": keys(v, ["launch", "kind", "blocks"]); return { type: tag, launch: launchId(v.launch), kind: choice(v.kind, ["prompt", "orchestration"]), blocks: list(v.blocks, blockId) };
 		case "agent_bound": keys(v, ["launch", "agent"]); return { type: tag, launch: launchId(v.launch), agent: string(v.agent) };
 		case "launch_closed": keys(v, ["launch"]); return { type: tag, launch: launchId(v.launch) };
-		case "event_sent": keys(v, ["event", "data"]); return { type: tag, event: eventName(v.event), data: v.data };
+		case "event_sent": keys(v, ["event", "data"]); return { type: tag, event: string(v.event), data: v.data };
 		case "interrupted": keys(v, ["block", "request"]); return { type: tag, block: blockId(v.block), request: string(v.request) };
 		case "check_reported": keys(v, ["blocks", "version", "result"]); return { type: tag, blocks: list(v.blocks, blockId), version: string(v.version), result: decodeReport(v.result) };
 		case "post": {
@@ -299,7 +329,7 @@ function decodeLaunch(value: unknown): Launch {
 	const baselines = list(v.baselines, string);
 	if (baselines[0] !== result.text) throw new Error("First baseline must equal snapshot text");
 	return {
-		id: launchId(v.id), run: runId(v.run), session: string(v.session), blocks, kind: choice(v.kind, ["prompt", "orchestration"]),
+		id: launchId(v.id), run: nullable(v.run, runId), session: string(v.session), blocks, kind: choice(v.kind, ["prompt", "orchestration"]),
 		snapshot: { result, fetches: fetches(snapshot.fetches), results: list(snapshot.results, pair => tuple(pair, blockId, decodeBlockResult)) },
 		agents: list(v.agents, string), baselines, notified: nullable(v.notified, decodeCompile), dirty: list(v.dirty, pair => tuple(pair, blockId, positive)), fetches: fetches(v.fetches),
 		closed: nullable(v.closed, value => { const c = fields(value); keys(c, ["at", "by"]); return { at: number(c.at), by: choice(c.by, ["coordinator", "human", "run_finished"]) }; }),
@@ -348,10 +378,10 @@ export function createStore(templatePath: string): Store {
 	const baseDir = dirname(path);
 	const runsDir = join(baseDir, `${basename(path).replace(/\.yaml$/, "")}.runs`);
 	const filePath = (ref: DocRef): string => ref.kind === "template" ? path : join(runsDir, `${runId(ref.run)}.yaml`);
-	const logPath = (run: RunId): string => join(runsDir, `${runId(run)}.jsonl`);
+	const logPath = (ref: DocRef): string => ref.kind === "template" ? `${path}.log.jsonl` : join(runsDir, `${runId(ref.run)}.jsonl`);
 	const revisionsPath = (ref: DocRef): string => ref.kind === "template" ? `${path}.revisions.jsonl` : join(runsDir, `${runId(ref.run)}.revisions.jsonl`);
 	return {
-		templatePath: path, baseDir, serialize, parse,
+		templatePath: path, baseDir, serialize, parse, path: filePath,
 		readTemplate() {
 			try { return parse(readFileSync(path, "utf8"), false); }
 			catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
@@ -393,10 +423,11 @@ export function createStore(templatePath: string): Store {
 		},
 		readServiceRecords: () => readLines(`${path}.pb.jsonl`, decodeServiceRecord),
 		appendServiceRecord: record => append(`${path}.pb.jsonl`, record),
-		readRunLog(run) {
+		readLog(ref) {
 			const entries: TimelineEntry[] = [];
 			const launches = new Map<LaunchId, Launch>();
-			readLines(logPath(run), value => {
+			const run = ref.kind === "template" ? null : ref.run;
+			readLines(logPath(ref), value => {
 				const v = fields(value);
 				if (Object.hasOwn(v, "entry")) {
 					keys(v, ["entry"]);
@@ -406,16 +437,16 @@ export function createStore(templatePath: string): Store {
 				} else {
 					keys(v, ["launch"]);
 					const launch = decodeLaunch(v.launch);
-					if (launch.run !== run) throw new Error("Launch belongs to another Run");
+					if (launch.run !== run) throw new Error("Launch belongs to another document");
 					launches.set(launch.id, launch);
 				}
 			});
 			return { entries, launches };
 		},
-		appendEntry(run, entry) {
-			append(logPath(run), { entry: { seq: entry.seq, at: entry.at, type: entry.data.type, origin: entry.origin, data: encodeEntryData(entry.data) } });
+		appendEntry(ref, entry) {
+			append(logPath(ref), { entry: { seq: entry.seq, at: entry.at, type: entry.data.type, origin: entry.origin, data: encodeEntryData(entry.data) } });
 		},
-		appendLaunch: (run, launch) => append(logPath(run), { launch }),
+		appendLaunch: (ref, launch) => append(logPath(ref), { launch }),
 		readRevisions(ref) {
 			const revisions = readLines(revisionsPath(ref), decodeRevision);
 			revisions.forEach((revision, index) => { if (index > 0 && revision.seq <= revisions[index - 1]!.seq) throw new Error(`${revisionsPath(ref)}: revision sequence must increase`); });

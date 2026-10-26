@@ -2,18 +2,20 @@
 
 [English](README.md) | 简体中文
 
-omp-playbooks 把**设计、执行 prompt 和编排代码**放在一份可共同编辑的 Playbook 里。它由 omp 扩展和 Tern 文档服务组成：主会话通过 `playbook_*` 工具连接文档服务，人在旁边的 pane 中浏览块、改内容、提交修改要求。
+omp-playbooks 把**设计、执行 prompt 和编排代码**放在一份可共同编辑的 Playbook 里。它由 omp 扩展和 Tern 文档服务组成：主会话通过 `playbook_*` 工具连接文档服务，人在旁边的 pane 中把块当卡片读、就地编辑，并请求启动和设计修改。
 
 设计和执行是分开的：设计块对应一个设计或业务单元，执行块通过引用组合所需的需求、设计面板、上下文和先前结果。一个执行块可以引用多个设计块，并不要求设计与 task 一一对应。
 
+Playbook 文件自己携带执行状态：每个跟踪的块有 `status`（`todo`、`running`、`done`），执行这个块的 subagent 自己把状态和完成报告 `report` 写进文件。
+
 | 对象 | 在这里负责什么 |
 |---|---|
-| 人 | 直接改需求、执行正文和标题；查看可视化设计；手动提交设计的修改要求、请求启动或检查 |
-| omp 主会话（协调者） | 自己修订设计；调用工具建立 Run、编译 prompt；决定怎样启动和编排 subagent、处理变更通知及记录结果 |
+| 人 | 就地改标题、执行正文、需求和选项；查看可视化设计；请求设计修改、启动和打断；勾选完成 |
+| omp 主会话（协调者） | 自己修订设计；调用工具编译 prompt、建立 Launch；决定怎样启动和编排 subagent，按请求停止它们，处理变更通知及记录结果 |
 | 文档服务 | 保存文档、Run、Launch 和记录；解析引用；绘制面板与设计组件；加锁、做确定性检查、向协调者发通知 |
-| subagent | 执行协调者交给它的编译后 prompt；不拥有这份 Playbook 的工具或 UI |
+| subagent | 执行协调者交给它的编译后 prompt，再把所执行块的 `status` 和 `report` 写进 Playbook 文件；不拥有这份 Playbook 的工具或 UI |
 
-**按钮是请求，不是自动执行器。** “提交给协调者”把修改要求交给主会话；“启动”通知主会话去执行；“检查”请求主会话补做模型判定。扩展不会因收到通知就自行修订设计、启动 worker 或认可结果。
+**按钮是请求，不是自动执行器。** “启动”通知主会话去执行；“打断执行”请求它取消 worker；修改要求或在设计上选的选项把修改交给主会话。扩展不会因收到通知就自行修订设计、启动或取消 worker、认可结果。
 
 ## 安装与打开
 
@@ -53,16 +55,16 @@ bun install
 bun src/service/main.ts /绝对路径/playbook.yaml
 ```
 
-同一文件只有一个在线服务和一个协调者连接。另一个主会话在原协调者仍连接时会得到 `Busy`。原会话结束后，文档 pane 保留并显示“没有协调者连接”；新会话可以接管。没有 `TERN_PANE` 的 omp 也可以连接**已经启动**的服务，但不能从那里在旁边创建 pane。
+同一文件只有一个在线服务和一个协调者连接。另一个主会话在原协调者仍连接时会得到 `Busy`。原会话结束后，文档 pane 保留，底部状态栏显示“协调者离线”；新会话可以接管。没有 `TERN_PANE` 的 omp 也可以连接**已经启动**的服务，但不能从那里在旁边创建 pane。
 
 主会话命令：
 
 - `/playbook-show [文件路径]`：转到已连接文档的 pane。
-- `/playbook-add [文件路径]`：选择最近会话消息、Run、记录类别及可选块，加入时间线。
+- `/playbook-add [文件路径]`：选择最近会话消息、Playbook 本身或某个 Run、记录类别及可选块，加入对应的执行记录。
 
 这些命令和 `playbook_*` 工具只注册在主会话，subagent 看不到它们。
 
-## 文件与两种块
+## 文件与块
 
 下面保存成 `playbook.yaml` 即可打开；不需要网络、外部文件或 `am` CLI：
 
@@ -70,17 +72,15 @@ bun src/service/main.ts /绝对路径/playbook.yaml
 title: 缓存方案
 blocks:
   - id: b1
+    title: 执行通则
+    body: |
+      只读检查，不修改任何文件。
+    task: false
+  - id: b2
     title: 缓存设计
     requirement: |
       数据重启后不能丢。请求路径要简单。
     design: |
-      ---
-      template: sheet
-      title: 缓存设计
-      cols: 2
-      ---
-      先说明方案，再检查请求路径。
-
       ## A 结论
       ```callout ok 使用持久化缓存
       明确持久化策略，不把“用了 Redis”当成数据不会丢的保证。
@@ -90,84 +90,92 @@ blocks:
       ```flow LR
       Client -> Gateway -> [(Cache)]: read
       ```
-    done: false
-  - id: b2
+    status: todo
+  - id: b3
     title: 检查方案
     body: |
-      根据下面的需求和请求路径，列出三个需要验证的边界。
-      不修改文件，只输出检查清单。
-      ((b1 | requirement, panel(B)))
-    done: false
+      用 {{检查方式}} 列出三个需要验证的边界。
+      ((b1))
+      ((b2 | requirement, panel(B)))
+
+      ```slot 检查方式
+      = 清单
+      * 清单 | 每条一行
+      - 表格 | 边界、风险、验证方法三列
+      ```
+    status: todo
 ````
 
 | 块 | 文件字段 | 用途和编辑入口 |
 |---|---|---|
-| 设计块 | `requirement`、`design` | 人直接改需求；主会话改可视化设计稿。不能直接启动 |
-| 执行块 | `body`；可选 `agent`、`isolated` | 人或主会话直接改 Markdown/prompt；可以作为上下文被引用，也可以在 Run 中启动。`agent`、`isolated` 是它的执行契约：启动 subagent 时默认使用的 agent，以及是否让 worker 在独立 worktree 中工作 |
-| 编排块 | 同样是 `body`，正文整体为一个 `js` 或 `py` 代码围栏 | 执行协调者的编排代码，不把它当成普通 worker prompt |
+| 设计块 | `requirement`、`design`、`status` | 人就地改需求；主会话改可视化设计稿。不能启动 |
+| 执行块 | `body`、`status`；可选 `report`、`agent`、`isolated` | 人或主会话改正文；可以作为上下文被引用，也可以启动。`agent`、`isolated` 是它的执行契约：启动 subagent 时默认使用的 agent，以及是否让 worker 在独立 worktree 中工作 |
+| 编排块 | 同样是 `body`，正文整体为一个 `js` 或 `py` 代码围栏 | 执行协调者的编排代码，不把它当成普通 worker prompt；只能单独启动 |
+| 不跟踪的执行块 | `body`、`task: false`；可选 `agent`、`isolated` | 通则之类的共享上下文：没有状态和报告，不计数、不能启动，但可以被引用 |
 
-每个块必须有 `id`、`title`、`done`，以及对应的内容字段。ID 为 `b1`、`b2` 等正整数编号，不能重复。YAML **不写 `kind`**；类型由字段决定。混写 `body` 和 `requirement`/`design`、缺字段、未知字段会被拒绝。`agent`（去掉首尾空白后非空的字符串）和 `isolated`（布尔值）只能写在执行块上；不写时文件里也不出现。多行内容建议用 `|`，空需求或空设计用空字符串或空块标量。
+每个块必须有 `id`、`title` 和对应的内容字段，另外要么写 `status`，要么写 `task: false`。ID 为 `b1`、`b2` 等正整数编号，不能重复。YAML **不写 `kind`**；类型由字段决定。混写 `body` 和 `requirement`/`design`、缺字段、未知字段会被拒绝。`agent`（去掉首尾空白后非空的字符串）和 `isolated`（布尔值）只能写在执行块上；不写时文件里也不出现。`task` 只能是 `false`、只能写在执行块上，这样的块不能有 `status` 或 `report`。设计块不会是 `running`，也没有 `report`。多行内容建议用 `|`，空需求或空设计用空字符串或空块标量。
 
-`done` 是显式填写或勾选的标记，不是设计认可状态，也不从检查、subagent 返回值或 Launch 状态推导。现有只有 `body` 的文件仍可使用。
+`status` 是执行状态，不是设计认可，也不从检查、subagent 返回值或 Launch 记录推导。`report` 是完成报告：subagent 把块改成 `done` 时一并写入，面板只读显示。仍使用旧字段 `done:` 的文件会被拒绝；把 `done: false` 改成 `status: todo`，`done: true` 改成 `status: done`。
 
 ### 面板布局
 
-面板分两栏。左栏是块导航：每行列出块编号、类型、标题和状态标签；Run 中最上面另有“Run 记录与时间线”。右栏一次只显示一项：一个块、Run 的记录与时间线，或多块合并预览。点导航行打开对应的块。导航和右栏各自滚动，块顶部的工具栏和标题在右栏滚动时固定在顶部。
+面板单列显示 Playbook 文件本身；Run 不在面板里显示。最上面是文档标题（双击可改），下面按文件顺序每块一张卡片，底部是 dock。
 
-状态标签只写能从文档服务数据证实的事实，不写“已处理”“运行中”这类无法对应到某次请求的结论：
+- **卡片标题行：** 编号（不跟踪的块是 `--`，跟踪的块依次是 `01`、`02`…）、标题、状态图标（空心圆 `todo`、转圈 `running`、对勾 `done`）和折叠箭头。点标题或箭头展开/收起卡片；双击标题改标题。
+- **状态图标：** 点击在 `done` 和 `todo` 之间切换，并用 `status_changed` 通知协调者。勾选完成不改动块的报告。
+- **展开的卡片：** “⋯”打开菜单，里面是“删除此块”。正文用下文的组件绘制。执行块底部显示“SUBAGENT”（即 `agent`，未设置时为“默认”；双击修改）和“独立 WORKTREE”（双击切换 `isolated`），再下面是启动按钮。`done` 的块改为显示折叠的“完成报告”，点击展开。
+- **启动按钮：** “启动”为这个块发出 `launch_requested`；在协调者从这个块建立 Launch 之前，按钮显示“已请求启动”且不能再点。块在 `running` 时按钮变成“打断执行”：有未关闭的 Launch 时向协调者发 `stop_requested`；没有时说明并没有在执行，块直接改回 `todo`。
+- **一起启动多块：** ⌘ 点卡片标题选中跟踪的执行块；dock 显示“一起启动 N 块”和“取消”。这些块按文档顺序合成一个 Launch；编排块只能单独启动。
+- **dock 状态栏：** “协调者在线/离线”（点击转到协调者的 pane）和“N / M 已完成”（跟踪块中的完成数）。
 
-| 标签 | 含义 |
-|---|---|
-| `已完成`、`你在编辑`、`协调者编辑中` | 块的 `done` 与编辑锁 |
-| `已提交 #N，设计尚未改动`、`提交 #N 之后设计有改动` | 最近一条修改要求提交后，设计是否变化过。面板不知道协调者是否“处理完”这条要求。模板中的这项比较只在本次服务运行期间有效 |
-| `HH:MM 已请求启动` | 发出启动请求后，还没有从这个块创建 Launch |
-| `lN 等待绑定`、`lN 已绑定 X`、`lN 不活跃` | 从这个块启动、未关闭的 Launch |
-| `被 N 个未关闭 Launch 引用` | 其他块启动的 Launch 引用了这个块；改它可能让协调者收到这些 Launch 的变更通知 |
-| `有结果 · 待确认完成`、`有结果`、`失败` | 这个块最近一条记录的类别；结果不会自动变成 `done` |
-| `检查 N 项不通过`、`检查通过`、`检查：模型不可用` | 确定性检查与模型判定中能区分块的状态。常见的“自动检查通过、模型未判定”不在导航里显示，块底部的“检查”一栏写全了每项结果 |
-
-块顶部工具栏的按钮**只作用于这个块**：“已完成”“启动”（Run 中的执行块）“预览”“检查”“设为参考”“改标题”，设计块还没写需求时另有“写需求”。执行块设置了 `agent` 或 `isolated` 时，工具栏显示对应标识。导航里还没写任何内容的块标“空块”。要对多个块操作，在导航里勾选它们，选择栏固定在导航底部，列出所选块号；“一起启动”“合并预览”“一起检查”按文档顺序作用于这些块。
-
-要同时看两个块，点“设为参考”；执行块的引用行上也有“设为参考，对照阅读”。被设为参考的块以只读方式显示在当前块上方，切换到别的块时仍保留，点“取消参考”移除。设计块标题下有一行折叠的“被 N 个块引用：…”，列出引用它的块号；展开后点其中一项打开那个块。
+需要协调者的请求（启动、有 Launch 时的打断、修改要求、在设计上选选项）在协调者离线时会被拒绝并提示。
 
 ### 人怎么编辑
 
-1. 标题、执行正文、需求：点“改标题”（或点标题本身）、“编辑正文”、“编辑需求”（需求为空时是工具栏的“写需求”），改文字后点“保存”（标题是“保存标题”）。标题按 `Enter` 保存；正文和需求按 `Ctrl+Enter` 保存（终端要能传 kitty 键盘协议），普通 `Enter` 换行。保存后字段旁显示“已保存”，没有改动时显示“未修改”。点“放弃”丢弃当前草稿。
-2. 设计：看完绘制结果，点“写修改要求”，写下哪里要改、改成什么，再点“提交给协调者”（或 `Ctrl+Enter`）。主会话收到通知后读块并修订 `design`，不会改 `requirement`。
-3. `Esc` 在所有编辑框里**既不保存也不丢弃**：草稿和焦点都留着，继续输入接在草稿后面。空内容或没有协调者连接时提交被拒，草稿保留在编辑框里。
-4. 设计稿里的 `ask` 显示为单选或多选选项，初始都不选中，`*` 推荐项只带“建议”标签。点选一项，会在这个块的修改要求草稿里写一行 `针对问题「<问题>」，选择：<选项>`，没有草稿时自动打开；问题下方标出“仅在草稿中，未提交”，旁边有“提交修改要求”按钮，和草稿下方的“提交给协调者”是同一次提交。改选会替换这一行；多选全部取消时删除这一行。同一份草稿里可以接着写补充说明、回答其他问题，最后只提交一次，只产生一条修改要求。主会话修订设计时，把已回答的 `ask` 换成对应的设计结论。块被协调者锁住、存在其他草稿（本块修改要求草稿除外）或 Run 已结束时，选项不可用。
-5. 一个服务内，包括模板和各 Run，同时只能有一个人的字段草稿。编辑锁覆盖整个块；人正在编辑时，协调者不能写同一块。编辑时仍可在导航中打开其他块查看，草稿留在原来的块上；导航显示的始终是已保存的标题。协调者持锁时可点“收回编辑权”。
-6. 删除块：点“删除此块…”，再点“确认删除”。
+所有编辑都是就地的：双击文字，修改后按 `Enter`、`Esc` 或做任何其他操作即提交；多行文字中 `Shift+Enter` 换行。只有字段仍是开始编辑时的内容才会写入；期间协调者或文件改过它时，这次编辑被拒绝并提示，在最新内容上重新编辑即可。
 
-提交成功的修改要求进入只追加的修改记录，在设计块的“修改要求”栏中按原有换行显示，最新的在上。记录的是**人的修改要求**，不是设计版本快照、设计 diff 或 AI 回复；普通读块不会自动附带它。
+| 部分 | 人可以做什么 |
+|---|---|
+| 执行正文 | 双击段落、标题、列表项、`//` 注释、`kv` 的键或值、面板标题或 callout 文字，只改这一处。不按部分编辑的组件（代码、表格、非链式 `flow`、`er` 等）整体编辑它的围栏源码 |
+| 正文中的编号列表 | 点一项的抓手把它拿起，再点要放到的那一行；列表自动重新编号。再点同一个抓手放回原处。Tern 没有拖放，所以是“拿起-放下” |
+| 正文中的链式 `flow` | 只有一条路径的流程（`A -> B -> C`，没有分组和变更标记）画成一列节点。点节点显示“+ 下方节点”和“删除”；双击改名。流程至少保留两个节点；其他流程仍是图 |
+| 槽位 | `{{名称}}` 显示当前值；点击可从选项中选，或填自定义值。在执行正文里写回槽位的 `=` 行；在设计里作为修改要求发出 |
+| 需求 | 双击修改；为空时显示“// 双击写需求” |
+| 设计 | 对人只读。双击设计下方的 “//” 行，写下哪里要改、改成什么，`Enter` 作为修改要求发出；主会话修订 `design`，不会改 `requirement` |
+
+编辑协调者正持有的块会把它收回：释放协调者的锁，并向协调者发 `interrupted`。
+
+提交的修改要求进入只追加的记录。它记录**人的修改要求**，不是设计快照、设计 diff 或 AI 回复；普通读块不会包含它。
 
 ```json
-{"op":"revisions","block":"b1","after":0}
+{"op":"revisions","block":"b2","after":0}
 ```
 
-上面是 `playbook_read` 的参数；查询 Run 的记录还要加 `run`。`after` 是记录序号，返回比它大的记录。新 Run 不继承模板的修改历史。
+以上是 `playbook_read` 的参数；查询 Run 的日志还要加 `run`。`after` 是记录序号，返回序号更大的记录。新建 Run 不继承模板的修改历史。
 
-## 模板、Run、Launch
+## 执行：Playbook、Run、Launch
 
 | 对象 | 开始与结束 | 不会自动发生的事 |
 |---|---|---|
-| 模板 | 原始 YAML，供各次 Run 复制 | 改模板不会同步改已有 Run |
-| Run | “开始 Run”或 `playbook_run start` 复制模板；所有 `done` 重置为 `false`。结束后不能通过面板或工具编辑块 | 开始 Run 不启动 agent；结束 Run 不要求所有块已 done |
-| Launch | 对 Run 的执行块编译，冻结 prompt/编排代码并建立记录；显式关闭、`playbook.result` 收尾或结束 Run 时关闭 | `launch`/`bind` 不启动 worker；`playbook_timeline` 写结果本身不关闭 Launch；关闭记录不取消 worker |
+| Playbook（模板） | YAML 文件本身。有自己的执行记录和 Launch；面板上的启动直接执行它 | 启动除了 subagent 自己标记的块之外什么也不改 |
+| Run | `playbook_run start` 把 Playbook 复制成单独的文件，所有跟踪的块设为 `status: todo` 且没有报告。结束后不能再通过工具编辑它的块 | 开始 Run 不会启动 agent；结束 Run 不要求所有块完成；修改 Playbook 不会更新已有 Run |
+| Launch | 编译 Playbook 或某个 Run 的执行块，冻结 prompt/编排代码并建立记录；显式关闭、由收尾的 `playbook.result` 关闭，或随所属 Run 结束而关闭 | `launch`/`bind` 不会启动 worker；用 `playbook_timeline` 写结果不会关闭 Launch；关闭记录不会取消 worker |
 
-Run 有独立的块内容、修改记录和时间线。在模板顶栏填好 Run 名称后按 `Enter` 或点“开始 Run”，**面板会自动切换到新创建的 Run 标签**；若由协调者调用 `playbook_run start` 创建，也在该 Run 标签中编辑或启动，工具调用传返回的 Run ID，例如 `r1`。不传 `run` 的读、改、编译、检查工具操作的是模板。“结束 Run”要再点一次“确认结束”：确认框写明完成数、会关闭的 Launch 记录和会丢弃的草稿，并说明已在运行的 agent 不会被停止。
+Run 用来通过协调者工具以全新状态重复执行同一份 Playbook；把返回的 Run ID（例如 `r1`）作为 `run` 传入。不带 `run` 的操作作用于 Playbook 文件本身。
 
-Run 中点执行块工具栏的“启动”，向协调者发 `launch_requested`，目标只有这个块；在协调者从这个块创建 Launch 之前，按钮显示“已请求启动”且不可再点。要把多个块组合成一次启动，在导航中勾选后点选择栏的“一起启动”，按文档顺序组合；设计块不能启动，编排块只能单独启动。主会话再调用执行工具，worker 才会真正开始工作。
+每个 prompt Launch 的末尾都有文档服务追加在编译结果之后的执行记录要求：告诉 subagent 它执行的是哪个文件的哪些块，开始前把它们的 `status:` 改成 `running`，结束时改成 `status: done` 并写 `report: |`，每行一件实际做了的事，最后一行写验证；没能完成时改回 `todo` 并写明停在哪里。它只改这些字段。编排 Launch 没有这段文字：状态由编排代码或协调者设置。
 
-Run 的写记录表单、时间线和 Launch 记录在导航的“Run 记录与时间线”里；状态更新到期时，导航和顶栏都会提示，点顶栏的“写状态更新”直接打开表单。表单的“关联块”默认是最近打开的块，只列出它和有 Launch、启动请求或记录的块，其余块点“更多块”展开。每个块的详情里，工具栏下方先是最近一条记录；协调者记下结果后，这一栏标题写“协调者已记录结果，核对后标记完成”，右侧就是“标记已完成”按钮。再往下是从它启动的未关闭 Launch、引用它的其他 Launch、正文，点“预览”后的编译结果显示在正文下方，最后是它在本 Run 中的经过。
+subagent 收到的是冻结文本，不是 UI、实时设计页或隐式 Playbook 上下文。
 
-一个执行块可以引用多个设计块，也可以把多个执行块一起编译成同一个 Launch。subagent 得到的是冻结后的文本，不是 UI、实时设计页面或隐式的 Playbook 上下文。
+### 打断执行
+
+“打断执行”发送 `stop_requested`，带上这个块未关闭的 Launch 及其绑定的 agent。协调者在 JS eval 中执行 `await playbook.stop("l3")`：它取消本会话用 `playbook.agent`/`playbook.spawn` 为该 Launch 启动的所有 subagent，并把该 Launch 中仍是 `running` 的块改回 `todo`；正在等待的 `playbook.result` 随后记录失败并关闭 Launch。用别的方式启动的 worker 由协调者用自己的方式停止，再调用 `playbook_edit {op:"status", block, value:"todo"}`。
 
 ### 执行中的变更
 
-文档服务会重新编译受影响的活跃 Launch，与基线比较；编译文本改变或编译失败时，经过约 2 秒合并通知协调者。人的内容修改、磁盘内容修改，以及协调者修订设计，都可能触发通知；标题、`done`、协调者自己修改执行正文不会触发同样的内容变更通知。活跃指未关闭且属于当前连接的协调者会话；新会话接管文档不会接管旧会话的 Launch。
+文档服务会重新编译受影响的活跃 Launch，与基线比较；编译文本改变或编译失败时，经过约 2 秒合并通知协调者。人的内容修改、磁盘内容修改，以及协调者修订设计，都可能触发通知；标题、`status`、`report`、协调者自己修改执行正文不会触发同样的内容变更通知。活跃指未关闭且属于当前连接的协调者会话；新会话接管文档不会接管旧会话的 Launch。
 
-通知不会自动改正在运行的 worker prompt。协调者决定是否告知 worker、重新安排工作或调用 `playbook_launch rebase` 接受当前编译结果为新基线。`rebase` 把当前编译结果追加为新基线，最初冻结的快照仍留在 Launch 记录里；之后 `playbook.spawn` 和编排块的 `playbook.exec` 使用最新基线。已关闭的 Launch 不能再 `bind` 或 `rebase`。
+通知不会改变正在运行的 worker 的 prompt。协调者决定是否告诉 worker、重新安排工作，或调用 `playbook_launch rebase` 把当前编译结果接受为新基线。`rebase` 追加当前编译结果作为新基线，Launch 记录中保留最初冻结的快照；之后的 `playbook.spawn` 以及编排块的 `playbook.exec` 都使用最新基线。已关闭的 Launch 不能再绑定或 rebase。
 
 ### 记录与文件
 
@@ -175,130 +183,129 @@ Run 的写记录表单、时间线和 Launch 记录在导航的“Run 记录与�
 
 | 文件 | 内容 |
 |---|---|
-| `playbook.yaml` | 模板 |
-| `playbook.yaml.revisions.jsonl` | 模板的修改要求历史 |
-| `playbook.yaml.pb.jsonl` | 服务编号分配记录 |
-| `playbook.runs/r1.yaml` | Run 的块和运行元数据 |
-| `playbook.runs/r1.jsonl` | Run 时间线及 Launch 记录 |
+| `playbook.yaml` | Playbook：块、状态与报告 |
+| `playbook.yaml.log.jsonl` | Playbook 自己的时间线与 Launch 记录 |
+| `playbook.yaml.revisions.jsonl` | Playbook 的修改要求历史 |
+| `playbook.yaml.pb.jsonl` | 服务 ID 分配记录 |
+| `playbook.runs/r1.yaml` | Run 的块与运行元数据 |
+| `playbook.runs/r1.jsonl` | Run 的时间线与 Launch 记录 |
 | `playbook.runs/r1.revisions.jsonl` | Run 的修改要求历史 |
 
-`.yml` 文件的 Run 目录保留后缀，例如 `example.yml.runs/`。结束 Run 会关闭它的 Launch 记录、解除锁、丢弃未提交草稿并保存结束时间；不会回写模板，也不会替代对仍运行 agent 的停止操作。
+`.yml` 文件的 Run 目录保留后缀，例如 `example.yml.runs/`。结束 Run 会关闭其 Launch 记录、释放锁并保存结束时间；不会回写 Playbook，也不能代替停止仍在运行的 agent。仍含旧 `done_changed` 记录的日志会被拒绝。
 
-时间线可写 `update`、`result`、`failure`、`retrospective`。复盘只在 Run 结束后写。`update_every` 和 `next` 是正整数秒；到期只是通知，不会自动生成更新。结果只有关联到 `block` 时才可通过该块的 `.result` 引用读取。
+时间线接受 `update`、`result`、`failure`、`retrospective`。复盘只能在 Run 结束后写；`update_every` 和 `next` 只用于 Run，都是正整数秒，到期只提示，不会自动生成更新。结果只有关联了 `block` 时，才能通过该块的 `.result` 引用读取。
 
-服务约每秒检查磁盘文件，已提交的编辑约一秒后写回 YAML。直接修改 YAML 的内容字段也会载入，包括设计稿；面板中的编辑分工不是文件系统权限限制。无效 YAML 会显示解析错误并保留上次有效内容，恢复有效后才继续写回。磁盘改动不会替你提交人的草稿；同字段变化会提示，随后点“保存”仍会应用草稿。已结束 Run 的块只在 UI/工具路径禁止修改，不是磁盘文件不可变。
+服务约每秒检查一次磁盘文件，并在写回前再读一次，所以 subagent 写入的状态和报告会与面板或协调者的修改合并，而不会被覆盖；已提交的编辑约一秒后写回 YAML。直接修改 YAML 的内容字段也会被载入，包括设计稿；面板中的编辑分工不是文件系统权限。YAML 无效时显示解析错误并保留最后一次有效内容；文件恢复有效后继续写回。已结束 Run 的块只在工具路径上受保护；磁盘文件本身不是只读的。
 
 ## 引用与编译
 
-执行正文使用 `((target))` 或 `((target | selector, selector))`。多个选择结果按书写顺序用空行连接。引用必须在一行内；行内代码和代码围栏中的引用不会展开。
+执行正文使用 `((target))` 或 `((target | selector, selector))`。多个选择结果按书写顺序用空行连接。引用必须在一行内；行内代码和代码围栏中的引用不会展开。编译时解析槽位：已声明槽位的每个 `{{名称}}` 换成当前值，`slot` 围栏本身被去掉。
 
-| 目标 | 示例 | 编译得到什么 |
+| 目标 | 示例 | 编译结果 |
 |---|---|---|
-| 设计块 | `((b1))` | 原始需求与设计，分别包在 `<requirement>`、`<design>` 中；需求为空时不输出 `<requirement>` |
-| 设计字段/面板 | `((b1 \| requirement, panel(B)))` | 原始需求与显式 `## B …` 面板全文，包含面板标题；空需求不输出任何文字 |
-| 执行块 | `((b2))` | 递归展开的正文；可用 `lines(1..3)`、`section("标题")` 先选原文再展开 |
-| Run 中的块结果 | `((b2.result))` | 最新关联到该块的 `result` 记录；也支持 `lines`、`section`，不递归展开 |
-| 本地文本文件 | `((file:notes.md \| section("背景")))` | 相对 Playbook 所在目录取回的文本；也支持 `lines`，不会递归展开 |
-| GitHub issue/PR | `((https://github.com/owner/repo/issues/1 \| title, body))` | issue/PR 标题、正文或讨论评论；需已有 `gh` 认证 |
+| 设计块 | `((b2))` | 原始需求和设计稿，分别包在 `<requirement>`、`<design>` 中；需求为空时不输出 `<requirement>` |
+| 设计字段/面板 | `((b2 \| requirement, panel(B)))` | 原始需求和完整的显式 `## B …` 面板，包含面板标题；需求为空时不输出内容 |
+| 执行块 | `((b1))` | 正文，并递归展开；`lines(1..3)`、`section("标题")` 先从源文选取再展开 |
+| 块结果 | `((b3.result))` | 同一 Playbook 或同一 Run 中关联该块的最新 `result` 记录；也可用 `lines`、`section`，不递归展开 |
+| 本地文本文件 | `((file:notes.md \| section("背景")))` | 相对 Playbook 所在目录取文本；也可用 `lines`，不递归展开 |
+| GitHub issue/PR | `((https://github.com/owner/repo/issues/1 \| title, body))` | issue/PR 的标题、正文或讨论评论；需要已认证的 `gh` |
 
-规则与边界：
+规则和限制：
 
-- 设计块支持 `requirement`、`design`、`panel(A)`；面板必须在标题里手写单个大写字母 ID，例如 `## A 结论`。自动显示编号不是可引用 ID。需求和设计里的 `((…))` 都保持原样，不取回、不递归展开。
-- `lines` 是从 1 开始的闭区间，写成 `lines(1..3)`；`section` 不包含选中标题，包含其下级章节。它们不能用于设计块。
-- GitHub 只支持标准 `https://github.com/<owner>/<repo>/issues/<n>` 或 `/pull/<n>` 地址。`comments`、`comments(1..2)`、`comments(-1)` 选择按时间排序的讨论评论；PR 不包含 diff、文件、review 或行内 review comments。任意网页 URL 不支持。
-- 外部文本使用 `<external source="…" fetched="…">` 包装，显示取回时间。取回是副本，不是持续同步；需要最新内容时手动“重新取回”或用 `refetch`。
-- `file:` 允许 `../`，**没有**设计稿图片/`src=` 的目录沙箱或秘密扫描；只引用愿意交给 subagent 的文件。
-- 不存在的块、面板、结果、章节，越界行号、取回失败、循环引用都会编译失败。块引用链最多 8 层，包含根块。
+- 设计块支持 `requirement`、`design`、`panel(A)`；面板必须在标题中写单个大写字母 ID，例如 `## A 结论`。自动显示的编号不能作为引用 ID。需求和设计稿中的 `((…))` 原样保留，不会取回或展开。
+- `lines` 是 1 开始的闭区间，写作 `lines(1..3)`；`section` 不含所选标题本身，包含其下级小节。两者都不能用于设计块。
+- GitHub 只支持标准的 `https://github.com/<owner>/<repo>/issues/<n>` 或 `/pull/<n>`。`comments`、`comments(1..2)`、`comments(-1)` 按时间顺序选择讨论评论；PR 不包含 diff、文件、review 或行内 review 评论。不支持任意网页 URL。
+- 外部文本包在 `<external source="…" fetched="…">` 中，显示取回时间。取回的是副本，不实时同步；需要最新内容时用 `playbook_compile {op:"refetch"}`。
+- `file:` 允许 `../`，**没有**设计图片/`src=` 那样的目录沙箱或 secret 扫描；只引用愿意交给 subagent 的文件。
+- 缺少块、面板、结果或小节，行号越界，取回失败，或引用成环，都会编译失败。块引用链最多 8 层，含根块。
 
-“预览”与 `playbook_compile` 只展示编译结果，不启动工作。
+`playbook_compile` 只显示编译结果，不启动工作。
 
-## 设计稿与组件
+## 正文、设计稿与组件
 
-组件格式参考 [answer-me-with-html](https://github.com/QingYunA/answer-me-with-html)，**解析与渲染由本仓库实现，不调用它的 CLI，也不是嵌入浏览器页面**。正文与公式交给 Tern 的原生 Markdown 节点；图类组件生成静态 SVG，其余使用原生 TSP 节点。
+执行正文和设计稿使用同一套组件解析器绘制。组件格式参考 [answer-me-with-html](https://github.com/QingYunA/answer-me-with-html)，**解析与渲染由本仓库实现，不调用它的 CLI，也不是嵌入浏览器页面**。段落、标题、列表和 `//` 注释行画成原生文字，公式交给 Tern 的原生 Markdown 节点，图类组件生成静态 SVG，其余使用原生 TSP 节点。
 
 ### 稿头与面板
 
 - 可选稿头必须在第一行，以 `---` 开始/结束；只支持逐行 `key: value`，不是完整 YAML。
-- `template: sheet` 为多栏，`doc` 为单列。`cols` 范围 1–6，默认 3，是每行面板数的上限：面板最窄 300px，含图（`flow`、`er`、`sequence`、`tree`、`timeline`、`annot`、`svg`、图片）的面板最窄 560px，宽度不够时自动换行，图保持原始尺寸。支持 `title`、`subtitle`；未设置稿头 `title` 时，正文第一条非空行若为 `# 标题`，会提取为稿头标题并从正文移除；先写说明再写标题不会触发提取。
-- `## A 标题 {span=2 bare meta="说明"}` 开始面板。`span` 指定占几栏（不超过 `cols`），`bare` 去掉面板外框，`meta` 显示补充文字；面板高度随内容。`rows` 被解析但不参与布局。
-- `lang` 忽略；`theme`、`mode`、`style` 忽略并提示警告；其余稿头键作为文字元数据显示。
-- 面板 ID 为单个大写字母，不能重复。部分组件的原生文本标签支持行内代码、粗体、斜体和删除线；flow 与 ER 标签按普通文字显示，sequence 标签移除这些标记后显示纯文本。不要把组件标签当成完整 Markdown 渲染器。
+- 面板按书写顺序单列绘制。显示 `title`、`subtitle`；未设置稿头 `title` 时，正文第一条非空行若为 `# 标题`，会提取为稿头标题并从正文移除；先写说明再写标题不会触发提取。`template`（`sheet`/`doc`）和 `cols`（1–6）为了格式兼容仍会校验，但不改变布局。
+- `## A 标题 {bare meta="备注"}` 开始一个面板。`bare` 去掉面板标题行，`meta` 显示附加文字。`span`、`rows` 会校验但不改变布局。
+- `lang` 被忽略；`theme`、`mode`、`style` 被忽略并提示；其他稿头键作为文字元数据显示。
+- 面板 ID 是单个大写字母，不能重复。部分组件的原生文字标签支持行内代码、粗体、斜体和删除线；flow、ER 标签显示为纯文字，sequence 标签会去掉这些标记后显示纯文字。不要把组件标签当成完整 Markdown 渲染器。
+- 以 `//` 开头的行是注释行：以淡色注释样式绘制，仍属于 agent 收到的文本。
 
 ### 当前支持的写法
 
-下面都是**设计稿内**的组件。执行正文不会用这套组件解析器绘图。
-
 | 组件 | 围栏首行与正文写法 |
 |---|---|
-| `flow` | `flow LR`；`Client -> [API] -> [(Cache)]: read`；方向 `TB/LR/BT/RL`，默认 `TB`；`-->` 虚线，`{Choice}` 菱形、`(Reply)` 圆角 |
+| `slot` | `slot 名称`；一行 `= 当前值`，再写选项 `* 建议项 \| 说明`、`- 选项 \| 说明`、`~ 曾提出的选项 \| 说明`；在要用值的地方写 `{{名称}}`（文字、列表项、`kv` 值、flow 节点；flow 节点必须带括号，例如 `({{名称}})`）。围栏本身不绘制。不在选项中的自定义值会保留为 `~` 选项 |
+| `flow` | `flow LR`；`Client -> [API] -> [(Cache)]: read`；方向 `TB/LR/BT/RL`，默认 `TB`；`-->` 虚线，`{Choice}` 菱形，`(Reply)` 圆角。单一路径画成可编辑的节点列，见[人怎么编辑](#人怎么编辑) |
 | `er` | `er LR`；实体独占一行，缩进字段如 `id uuid PK`、`user_id uuid FK -> User`；关系如 `User 1--* Order: owns` |
-| `sequence` | `sequence num`；`participants: Client, API`，`Client -> API: request`，`API --> Client: reply`；支持 `note API: 说明` 与 `== 阶段 ==` |
-| `tree` | `tree list`；缩进表示父子，`名称 \| 说明`；省略 `list` 时自动选布局 |
-| `timeline` | `timeline h` 或 `timeline v`；`09:00 \| 开始 \| 说明`，时间前加 `*` 突出 |
-| `limits` | `limits`；`Latency \| 13 / 20 \| ms \| p95` 或 `Workers \| max 8 \| count` |
-| `annot` | `annot`；正文 `结果可能[过期]{!读取前刷新}`，`# 标题 \| 旁注`、`> 图注` |
-| `kv` | `kv cols=2`；`存储: Redis`，`*不变量: 一个源头` 为通栏项 |
-| `callout` | `callout warn 缓存失效`；正文为 Markdown；类型 `info/ok/warn/err` |
-| `ask` | `ask` 或 `ask multi`；首行问题，随后 2–6 个 `* 推荐项 \| 说明` 或 `- 其他项 \| 说明`；单选必须恰有一个推荐项；面板中点选会写入修改要求草稿，见[人怎么编辑](#人怎么编辑) |
-| `diff` | `diff file=src/value.ts title="变更"`；正文直接贴 unified diff，不从 `file` 加载；支持 `start`、`hl` |
-| `html` | `html`；结构化标签如 `<section><h3>方案</h3><p><strong>结论</strong></p></section>`，转换为 TSP，不运行网页 |
-| `svg` | `svg`；完整、静态、安全的 `<svg>`，建议明确 `viewBox` 或 `width`/`height` |
-| 代码 | 其他语言围栏如 `ts title="片段" start=18 hl=19`；正文直接写代码，或用 `ts src=sample.ts lines=1-2 hl=2` 读取文件 |
-| 表格 | Markdown 表格；数据单元格的独立小写状态词 `ok`、`no`、`warn`（可跟空格和说明）显示状态图标 |
-| 图片 | 单独一行 `![说明](image.png)`，读取本地图片文件 |
+| `sequence` | `sequence num`；`participants: Client, API`、`Client -> API: request`、`API --> Client: reply`；支持 `note API: text` 和 `== 阶段 ==` |
+| `tree` | `tree list`；缩进表示父子，`名称 \| 说明`；不写 `list` 时自动选布局 |
+| `timeline` | `timeline h` 或 `timeline v`；`09:00 \| 开始 \| 说明`，时间前加 `*` 高亮 |
+| `limits` | `limits`；`延迟 \| 13 / 20 \| ms \| p95` 或 `Worker \| max 8 \| 个` |
+| `annot` | `annot`；正文 `结果可能[过期]{!读取前刷新}`，`# 标题 \| 旁注`，`> 说明` |
+| `kv` | `kv cols=2`；`存储: Redis`，`*不变量: 一个源头` 为整行项 |
+| `callout` | `callout warn 缓存失效`；正文为 Markdown；类型 `info/ok/warn/err`；画成注释样式 |
+| `diff` | `diff file=src/value.ts title="变更"`；正文贴 unified diff，不会从 `file` 读取；支持 `start`、`hl` |
+| `html` | `html`；结构化标签如 `<section><h3>方案</h3><p><strong>结论</strong></p></section>`，转换为 TSP；不运行网页 |
+| `svg` | `svg`；完整、静态、安全的 `<svg>`，建议带明确的 `viewBox` 或 `width`/`height` |
+| 代码 | 其他语言围栏如 `ts title="片段" start=18 hl=19`；代码写在正文中，或用 `ts src=sample.ts lines=1-2 hl=2` 读取文件 |
+| 表格 | Markdown 表格；数据单元格中独立的小写状态词 `ok`、`no`、`warn`（后面可空一格跟说明）显示为状态图标 |
+| 图片 | 独占一行的 `![说明](image.png)` 读取本地图片文件 |
 
-`flow`、`er`、`tree` 支持 `+ `、`- `、`~ ` 变更标记，并提供“变更/之前/之后”视图。`~` 标出已修改声明，不储存两份旧新内容；flow 的边、ER 的关系要用一删一增表达修改。新增/删除的 tree 父节点、ER 实体会把标记传给子项。
+`flow`、`er`、`tree` 支持 `+ `、`- `、`~ ` 变更标记，并提供“变更/之前/之后”视图。`~` 表示声明被修改，但不保存新旧两份；改 flow 边或 ER 关系时写成一删一增。tree 父节点或 ER 实体标为新增/删除时，标记会传给子项。
 
 ### 不要当成浏览器能力
 
 - `html` 不保留普通 `class/style/id` 等属性；链接显示为文字与地址，按钮没有动作；脚本、样式和嵌入页面被移除。不是任意 HTML/CSS 页面、交互表单或 web app 渲染器。
 - `svg` 拒绝脚本、事件、`foreignObject`、外部链接和外部 CSS 资源。HTML 内嵌 SVG 会清理不安全内容并提示。具体 SVG 绘制能力仍由 Tern 决定。
-- Mermaid 围栏在这里按普通代码显示，不转成图。`flow/er/sequence` 有各自语法，不能直接粘 Mermaid DSL。
-- 图片仅从 Playbook 目录内加载，远程 URL 或 data URL 只展示说明/地址并警告。图片及 `src=` 都检查真实路径，不能通过 `../` 或符号链接越出目录。
-- 本地嵌入文件上限 5 MiB；代码 `src=` 还有 2 MiB 上限、二进制/凭据路径/秘密内容检查。`lines=1-2` 的写法与引用的 `lines(1..2)` 不同；`hl` 使用显示行号。`src=` 的整个文件先做秘密扫描，再截取行号。
-- 单个围栏正文超过 1000 行不绘制；代码与 diff 超过 200 行报错，超过 40 行警告。错误和警告都显示行号，只有错误使 `draft` 检查不通过。空设计不会因此自动判错。
+- Mermaid 围栏在这里显示为普通代码，不会转成图。`flow/er/sequence` 有各自的写法，不能直接粘贴 Mermaid DSL。
+- 图片只从 Playbook 目录内加载；远程 URL 或 data URL 只显示说明/地址并提示。图片和 `src=` 都按真实路径检查，`../` 或符号链接都不能越出目录。
+- 嵌入的本地文件上限 5 MiB；代码 `src=` 另有 2 MiB 上限，以及二进制、凭据路径和 secret 内容检查。`lines=1-2` 与引用写法 `lines(1..2)` 不同；`hl` 使用显示行号。`src=` 先扫描整个文件中的 secret，再截取行。
+- 单个围栏正文超过 1000 行不绘制；代码和 diff 超过 200 行为错误，超过 40 行为警告。错误和警告都显示行号，只有错误会让 `draft` 检查不通过。空正文或空设计不会因此报错。
 
 ## 协调者工具
 
-下面是工具参数，不是 shell 命令。只有恰好连接了一份文档时才能省略 `doc`；所有输入严格校验，不接受额外字段。普通 `playbook_read` **不写 `op: "read"`**。
+下面是工具参数，不是 shell 命令。只有恰好连接了一份文档时才能省略 `doc`；省略 `run` 即作用于 Playbook 文件本身。所有输入严格校验，不接受额外字段。普通 `playbook_read` **不写 `op: "read"`**。
 
-| 工具 | 调用参数 |
+| 工具 | 参数 |
 |---|---|
 | `playbook_open` | `{doc}` |
-| `playbook_read` | `{doc?, run?, block?}`；历史 `{doc?, run?, op:"revisions", block?, after?}` |
-| `playbook_edit` | `{doc?, run?, op:"title"或"done", block, value}`；`replace` 用 `{block, find, replace}`；`write` 用 `{block, text}`；`panel` 用 `{block, panel, text}`；`insert` 用 `{after?, title, body, agent?, isolated?}`；`insert_design` 用 `{after?, title, design}`；`delete` 用 `{block}`；`move` 用 `{block, after}`，`after` 为块 ID 或 `null`（移到首部）；`agent` 用 `{block, value}`，值为字符串或 `null`（清除）；`isolated` 用 `{block, value}`，值为布尔或 `null`；每项还要传 `op` |
+| `playbook_read` | `{doc?, run?, block?}`；历史 `{doc?, run?, op:"revisions", block?, after?}`。块带 `status` 和 `report`，或 `task: false` |
+| `playbook_edit` | `{doc?, run?, op:"title", block, value}`；`status` 用 `{block, value}`，值为 `todo`、`running` 或 `done`；`task` 用 `{block, value}`，`false` 为不跟踪、`true` 为跟踪（`todo`）；`replace` 用 `{block, find, replace}`；`write` 用 `{block, text}`；`panel` 用 `{block, panel, text}`；`insert` 用 `{after?, title, body, agent?, isolated?}`；`insert_design` 用 `{after?, title, design}`；`delete` 用 `{block}`；`move` 用 `{block, after}`，`after` 为块 ID 或 `null`（移到最前）；`agent` 用 `{block, value}`，值为字符串或 `null`（清除）；`isolated` 用 `{block, value}`，值为布尔或 `null`；以上都另传 `op` |
 | `playbook_compile` | `{doc?, run?, op:"compile", blocks:[…]}`；重新取回 `{doc?, run?, op:"refetch", targets:[…]}` |
 | `playbook_check` | `{doc?, run?, op:"inspect", blocks:[…]}`；报告 `{doc?, run?, op:"report", blocks:[…], version, result}` |
 | `playbook_run` | `{doc?, op:"start", name, update_every?}`、`{doc?, op:"finish", run}`、`{doc?, op:"list"}` |
-| `playbook_timeline` | `{doc?, op:"read", run, after?}`；`{doc?, op:"post", run, kind, text, block?, launch?, next?, quote?}`；`{doc?, op:"snooze", run, after}` |
-| `playbook_launch` | `{doc?, op:"launch", run, blocks:[…]}` → `{launch, kind, text, agent?, isolated?}`；`{doc?, op:"bind", launch, agent}`；`{doc?, op:"info"或"rebase"或"close", launch}` |
+| `playbook_timeline` | `{doc?, op:"read", run?, after?}`；`{doc?, op:"post", run?, kind, text, block?, launch?, next?, quote?}`；`{doc?, op:"snooze", run, after}` |
+| `playbook_launch` | `{doc?, op:"launch", run?, blocks:[…]}` → `{launch, kind, text, agent?, isolated?}`；`{doc?, op:"bind", launch, agent}`；`{doc?, op:"info" 或 "rebase" 或 "close", launch}` |
 
-`playbook_edit` 的 `write/replace` 只改执行正文或设计稿，不能改需求；`replace` 的 `find` 必须恰好出现一次。`panel` 的 `text` 必须是以 `## <ID> 标题` 开始的整个替换面板。`insert_design` 的需求固定从空开始，由人填写。`move` 在位置不变时不写记录。`agent`、`isolated` 只用于执行块，修改它们不改变编译文本，不触发执行中的变更通知；`launch` 只在所有根块对某一项预设了相同值时返回该项。修改已有块时，一个调用内完成加锁、修改、解锁。
+`playbook_edit` 的 `write/replace` 只改执行正文或设计稿，不能改需求；`replace` 的 `find` 必须恰好出现一次。`panel` 的 `text` 必须是以 `## <ID> 标题` 开始的整个替换面板，可用于执行正文和设计稿。`insert`、`insert_design` 建立的块是 `todo`；`insert_design` 的需求固定从空开始，由人填写。`task` 只用于执行块。`move` 在位置不变时不写记录。`agent`、`isolated` 只用于执行块，修改它们不改变编译文本，不触发执行中的变更通知；`launch` 只在所有根块对某一项预设了相同值时返回该项。修改已有块时，一个调用内完成加锁、修改、解锁。
 
 ### 跑一次执行块
 
 以上面的文件为例，由主会话依次调用：
 
 1. `playbook_open {doc: "/绝对路径/playbook.yaml"}`。
-2. `playbook_compile {op: "compile", blocks: ["b2"]}`：查看展开的需求和 B 面板。
-3. `playbook_run {op: "start", name: "检查缓存方案"}`：取得返回的 Run ID。以下假设为 `r1`，实际以返回值为准。
-4. 在主会话的 **JS eval** 中启动 worker：
+2. `playbook_compile {op: "compile", blocks: ["b3"]}`：查看展开的通则、需求、B 面板和槽位值，以及末尾的执行记录要求。
+3. 在主会话的 **JS eval** 中启动 worker：
 
 ```js
 var worker = await playbook.agent({
-  run: "r1", blocks: ["b2"], agent: "task:mid", label: "检查缓存方案"
+  blocks: ["b3"], agent: "task:mid", label: "检查缓存方案"
 });
 ```
 
-`playbook.agent` 在 worker 启动并绑定后立即返回。`worker` 是顶层变量，后续 eval 单元仍可使用；用 omp 的 `wait` 工具等待 worker，期间主会话照常处理面板上的修改请求和变更通知。worker 结束后另发一个 eval：
+`playbook.agent` 在 worker 启动并绑定后立即返回。`worker` 是顶层变量，后续 eval 单元仍可使用；用 omp 的 `wait` 工具等待 worker，期间主会话照常处理面板上的请求和变更通知。subagent 把 b3 改成 `running`，结束时改成 `done` 并写报告。之后另发一个 eval：
 
 ```js
 return await playbook.result(worker);
 ```
 
-它把结果记到 b2（Launch 只有一个块时自动关联）并关闭这个 Launch。不需要中途响应面板时，也可以用一次阻塞调用 `await playbook.run({ run: "r1", blocks: ["b2"], agent: "task:mid" })` 完成启动、等待、记录和关闭。
+它把 worker 的最终消息作为结果记到 b3（Launch 只有一个块时自动关联）并关闭这个 Launch。不需要中途响应面板时，也可以用一次阻塞调用 `await playbook.run({ blocks: ["b3"], agent: "task:mid" })` 完成启动、等待、记录和关闭。人在面板上点“启动”会以 `launch_requested` 到达，通知里给出同样的调用。
 
-5. 检查输出；需要时显式 `playbook_edit {op:"done", run:"r1", block:"b2", value:true}`，或者由人勾选。最后 `playbook_run {op:"finish", run:"r1"}`，再写复盘。
+要在不动文件的情况下从干净状态再执行一遍，调用 `playbook_run {op: "start", name: "检查缓存方案"}`，把返回的 Run ID 作为 `run` 传给上面的调用；最后 `playbook_run {op:"finish", run}`。
 
 `task:mid` 必须是当前 omp 可用的 agent；扩展不提供或配置它。调用时没有指定 `agent` 就用块上预设的 `agent`，块也没有预设时用 omp 的默认 agent；默认被禁用时必须显式指定或在块上预设。`isolated` 同样按“显式传参 > 块上预设 > 不传”决定。
 
@@ -306,37 +313,36 @@ JS eval 的 `playbook` 由扩展注入，不要自行加导入行。辅助方法
 
 | 方法 | 行为 |
 |---|---|
-| `playbook.run({run, blocks, …})` | `playbook.agent` 加 `playbook.result`：创建 Launch、启动并绑定一个 worker、等待、记结果并关闭 Launch |
-| `playbook.agent({run, blocks, …})` | 创建 Launch 并启动、绑定 worker，返回 `{launch, blocks, id, handle, …}`，不等待；未传的 `agent`、`isolated` 取块上的预设；对编排块先关闭刚建的 Launch 再报错 |
-| `playbook.result(worker, {block?, close?})` | 等待并写 `result`，未给 `block` 时关联到 Launch 唯一的块；等待异常写 `failure` 并抛出。写完后按 `close` 关闭 Launch，默认在 worker 由 `playbook.agent` 创建时关闭 |
+| `playbook.run({run?, blocks, …})` | `playbook.agent` 加 `playbook.result`：创建 Launch、启动并绑定一个 worker、等待、记结果并关闭 Launch |
+| `playbook.agent({run?, blocks, …})` | 创建 Launch 并启动、绑定 worker，返回 `{launch, blocks, id, handle, …}`，不等待；未传的 `agent`、`isolated` 取块上的预设；对编排块先关闭刚建的 Launch 再报错 |
+| `playbook.result(worker, {block?, close?})` | 等待并写 `result`，未给 `block` 时关联到 Launch 唯一的块；等待异常（包括被 `playbook.stop` 取消）写 `failure` 并抛出。写完后按 `close` 关闭 Launch，默认在 worker 由 `playbook.agent` 创建时关闭 |
 | `playbook.spawn(launch, {…})` | 在未关闭的 prompt Launch 上增加 worker，使用最新基线（`rebase` 后即新文本）；它不拥有该 Launch，`result` 默认不关闭；Launch 已关闭时报错 |
+| `playbook.stop(launch, {doc?})` | 取消本 eval 内核为该 Launch 启动的所有 worker，并把其中仍是 `running` 的块改回 `todo`；返回 `{cancelled}`；本会话没有为它启动过 worker 时报错 |
 | `playbook.read({run?, block?})` | 读块；没有历史查询辅助，历史仍用 `playbook_read` 工具 |
-| `playbook.post({run, kind, text, …})` | 写记录 |
-| `playbook.timeline({run, after?})` | 读时间线 |
-| `playbook.context` | 编排执行时的 `{doc, run, launch}`；普通 eval 中为空 |
+| `playbook.post({run?, kind, text, …})` | 写记录 |
+| `playbook.timeline({run?, after?})` | 读时间线 |
+| `playbook.context` | 编排执行时的 `{doc, run?, launch}`（Playbook 本身没有 `run`）；普通 eval 中为空 |
 
-辅助方法不会自动设 `done` 或结束 Run。并行时用多个 `playbook.agent` 启动 worker，各自存进顶层变量，之后分别 `result`；多个 worker 共用一个 Launch 时用 `playbook.spawn` 加入，最后收尾的那个传 `{close: true}`，或调用 `playbook_launch {op:"close"}`。含 `playbook.run/result` 且未显式给 `timeout` 的单元会设置 `timeout: 0`。
+辅助方法不会自动设 `status` 或结束 Run；状态由 subagent 自己写。并行时用多个 `playbook.agent` 启动 worker，各自存进顶层变量，之后分别 `result`；多个 worker 共用一个 Launch 时用 `playbook.spawn` 加入，最后收尾的那个传 `{close: true}`，或调用 `playbook_launch {op:"close"}`。含 `playbook.run/result` 且未显式给 `timeout` 的单元会设置 `timeout: 0`。
 
 ### 编排块
 
 可把下面的块加到示例文件的 `blocks` 下；使用恰好三个反引号的 `js`/`py` 围栏，正文不能另外夹说明文字：
 
 ````yaml
-  - id: b3
+  - id: b4
     title: 编排检查
     body: |
       ```js
-      var worker = await playbook.agent({ blocks: ["b2"], agent: "task:mid" });
+      var worker = await playbook.agent({ blocks: ["b3"], agent: "task:mid" });
       var result = await playbook.result(worker);
       await tool.playbook_launch({ doc: playbook.context.doc, op: "close", launch: playbook.context.launch });
       return result;
       ```
-    done: false
+    status: todo
 ````
 
-修改模板不会把新块带入已有 Run。把编排块加入模板后，再调用 `playbook_run {op:"start", name:"编排检查"}`，使用这次返回的 Run ID；下面假设为 `r2`，实际以返回值为准。
-
-调用 `playbook_launch {op:"launch", run:"r2", blocks:["b3"]}` 取得返回的 Launch ID；下面假设为 `l2`，实际以返回值为准。然后发**一个完整代码只有下面这一句**的 eval：
+调用 `playbook_launch {op:"launch", blocks:["b4"]}`（要在 Run 中启动就加 `run`）取得返回的 Launch ID；下面假设为 `l2`，实际以返回值为准。然后发**一个完整代码只有下面这一句**的 eval：
 
 ```js
 await playbook.exec("l2")
@@ -344,20 +350,20 @@ await playbook.exec("l2")
 
 `exec` 是扩展拦截并替换整个单元的入口，不是普通辅助方法；不允许在这句前后追加代码。连接多份文档时可写 `await playbook.exec("l2", "/绝对路径/playbook.yaml")`。执行的是 Launch 当前基线里的编排代码（没有 `rebase` 过就是启动时冻结的代码），强制设置 `timeout: 0`；JS 辅助默认取该 Launch 的文档与 Run。原始 `tool.playbook_*` 调用不继承这些默认值：连接多份文档时需显式传 `doc`，操作 Run 时还需按工具参数要求显式传 `run`。
 
-Python 编排会设置 **Python 变量** `PLAYBOOK_DOC`、`PLAYBOOK_RUN`、`PLAYBOOK_LAUNCH`，不是环境变量，也不注入 JS 的 `playbook` 辅助；直接使用 Python eval 的 `tool`、`agent` 接口，需要 omp 的 Python 后端可用。
+Python 编排会设置 **Python 变量** `PLAYBOOK_DOC`、`PLAYBOOK_RUN`（Playbook 本身为 `None`）、`PLAYBOOK_LAUNCH`，不是环境变量，也不注入 JS 的 `playbook` 辅助；直接使用 Python eval 的 `tool`、`agent` 接口，需要 omp 的 Python 后端可用。
 
 ## 检查不等于完成或认可
 
-块详情和导航显示确定性检查：`compile`、`render_error`、`render_pending`；执行块另检查 `empty_expansion` 与表格图表，设计块检查 `draft`。检查不负责证明业务设计正确；除编译失败等 Launch 自身约束外，其他检查不通过不是启动门禁。
+`playbook_check inspect` 返回确定性检查：`compile`、`render_error`、`render_pending`；执行块另检查 `empty_expansion`，执行正文和设计稿检查 `draft`。面板不显示检查，组件错误在原处显示。检查不负责证明业务设计正确；除编译失败等 Launch 自身约束外，其他检查不通过不是启动门禁。
 
 `jev` 是另行报告的模型判定：
 
 - `playbook_check inspect` 返回 `{blocks, source, compiled, view, findings, version}`，**当前不返回问题定义**。
 - 当前固定问题 `missing`：完整编译 prompt 是否提到未包含其中的日志、讨论、文件或先前结果内容？主会话可以在 eval 中用可用的 `judge` 回答。
-- 报告形状为 `result: {kind:"answers", answers:{missing: P(yes)}}`，概率必须在 0–1；`P(yes) >= 0.5` 显示不通过。judge 不可用时报告 `{kind:"judge_unavailable"}`，显示未判定，不当作通过。
+- 报告形状为 `result: {kind:"answers", answers:{missing: P(yes)}}`，概率必须在 0–1；`P(yes) >= 0.5` 记为不通过。judge 不可用时报告 `{kind:"judge_unavailable"}`，记为未判定，不当作通过。
 - 报告须带同一文档、同一 Run、同一顺序块列表的最新 `version`。过期报告会被忽略；输入变化使旧判定失效。
 
-“检查”按钮会更新确定性检查并通知协调者；不会自己调用模型。没有设计认可状态，没有从检查到 `done` 的自动转换。
+没有设计认可状态，没有从检查到 `done` 的自动转换。
 
 ## 开发检查
 

@@ -1,17 +1,13 @@
-import { diagnostic, type FenceInput, type Parsed, type RenderContext, type Rendered } from "./contract.ts";
+import { diagnostic, type FenceInput, type Parsed, type RenderContext, type Rendered, type Span } from "./contract.ts";
 
 export interface CalloutSpec {
 	readonly type: "info" | "ok" | "warn" | "err";
 	readonly title: string;
 	readonly body: string;
+	readonly span: Span;
 }
 
-const presentation = {
-	info: { head: "信息", tone: "info" },
-	ok: { head: "成功", tone: "success" },
-	warn: { head: "警告", tone: "warning" },
-	err: { head: "错误", tone: "error" },
-} as const satisfies Record<CalloutSpec["type"], { readonly head: string; readonly tone: "info" | "success" | "warning" | "error" }>;
+const tones = { info: "muted", ok: "success", warn: "warning", err: "error" } as const satisfies Record<CalloutSpec["type"], string>;
 
 export function parseCallout(input: FenceInput): Parsed<CalloutSpec> {
 	const args = input.args.trim();
@@ -50,20 +46,25 @@ export function parseCallout(input: FenceInput): Parsed<CalloutSpec> {
 			diagnostics: [diagnostic("callout", input.line + firstLine, `类型应写在围栏行而非正文，例如：\`\`\`callout ${suggested} [标题]`)],
 		};
 	}
-	return { ok: true, value: { type, title, body }, diagnostics: [] };
+	return { ok: true, value: { type, title, body, span: input.body }, diagnostics: [] };
 }
 
 export function renderCallout(spec: CalloutSpec, ctx: RenderContext): Rendered {
-	const { head } = presentation[spec.type];
-	// A tinted block with a semantic start edge: the conclusion or warning is seen before it is read.
+	// A note in comment style, not a box: `//`, the title in the callout's tone, then the text.
 	return {
 		nodes: [{
-			id: `${ctx.id}.card`,
+			id: `${ctx.id}.note`,
 			k: "el",
-			p: { tag: "div", class: `am-callout am-callout-${spec.type}` },
+			p: { tag: "div", class: "pb-comment" },
 			c: [
-				{ id: `${ctx.id}.head`, k: "el", p: { tag: "strong", class: "am-callout-title", text: spec.title || head } },
-				...(spec.body.trim() ? [{ id: `${ctx.id}.body`, k: "md", p: { text: spec.body } }] : []),
+				{ id: `${ctx.id}.slash`, k: "el", p: { tag: "span", class: "pb-comment-slash", text: "//" } },
+				ctx.edit.text(`${ctx.id}.text`, spec.span, true, {
+					id: `${ctx.id}.view`, k: "el", p: { tag: "div", class: "pb-comment-text" },
+					c: [
+						...(spec.title ? [{ id: `${ctx.id}.title`, k: "el", p: { tag: "strong", tone: tones[spec.type], text: spec.title } }] : []),
+						...(spec.body.trim() ? [{ id: `${ctx.id}.body`, k: "md", p: { text: spec.body } }] : []),
+					],
+				}),
 			],
 		}],
 		diagnostics: [],

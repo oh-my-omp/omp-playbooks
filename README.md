@@ -2,18 +2,20 @@
 
 English | [简体中文](README.zh-CN.md)
 
-omp-playbooks keeps **design, execution prompts and orchestration code** in one Playbook that people and agents edit together. It consists of an omp extension and a Tern document service: the main session connects to the document service through the `playbook_*` tools, while a person browses the blocks, edits content and submits change requests in the pane beside it.
+omp-playbooks keeps **design, execution prompts and orchestration code** in one Playbook that people and agents edit together. It consists of an omp extension and a Tern document service: the main session connects to the document service through the `playbook_*` tools, while a person reads the blocks as cards, edits them in place and asks for launches and design changes in the pane beside it.
 
 Design and execution are separate. A design block covers one design or business unit; an execution block composes the requirements, design panels, context and earlier results it needs through references. One execution block can reference several design blocks; designs and tasks do not have to map one to one.
 
+The Playbook file also carries its own execution state: every tracked block has a `status` (`todo`, `running`, `done`), and the subagent that executes a block writes that status and a completion `report` into the file itself.
+
 | Party | Responsible here for |
 |---|---|
-| Person | Editing requirements, execution bodies and titles directly; viewing the rendered design; submitting design change requests and requesting launches or checks by hand |
-| omp main session (coordinator) | Revising designs itself; calling tools to create Runs and compile prompts; deciding how to launch and orchestrate subagents, handle change notices and record results |
-| Document service | Storing documents, Runs, Launches and records; resolving references; drawing the pane and design components; locking, running deterministic checks and notifying the coordinator |
-| Subagent | Executing the compiled prompt the coordinator hands it; it owns none of this Playbook's tools or UI |
+| Person | Editing titles, execution bodies, requirements and picks in place; reading the rendered design; asking for design changes, launches and stops; ticking blocks done |
+| omp main session (coordinator) | Revising designs itself; calling tools to compile prompts and create Launches; deciding how to launch and orchestrate subagents, stopping them on request, handling change notices and recording results |
+| Document service | Storing the document, Runs, Launches and records; resolving references; drawing the pane and design components; locking, running deterministic checks and notifying the coordinator |
+| Subagent | Executing the compiled prompt the coordinator hands it, then writing its blocks' `status` and `report` into the Playbook file; it owns none of this Playbook's tools or UI |
 
-**Buttons are requests, not automatic executors.** "提交给协调者" (submit to coordinator) hands the change request to the main session; "启动" (Launch) notifies the main session to execute; "检查" (Check) asks the main session to add the model judgment. The extension never revises a design, starts a worker or accepts a result on its own because a notice arrived.
+**Buttons are requests, not automatic executors.** "启动" (Launch) notifies the main session to execute; "打断执行" (stop) asks it to cancel the worker; a change request or a pick on a design hands the change to the main session. The extension never revises a design, starts or cancels a worker, or accepts a result on its own because a notice arrived.
 
 ## Install and open
 
@@ -53,16 +55,16 @@ bun install
 bun src/service/main.ts /absolute/path/playbook.yaml
 ```
 
-One file has one live service and one coordinator connection. Another main session gets `Busy` while the original coordinator is still connected. When the original session ends, the document pane stays and shows "没有协调者连接" (no coordinator connected); a new session can take over. An omp without `TERN_PANE` can still connect to a service that is **already running**, but cannot create a pane beside itself from there.
+One file has one live service and one coordinator connection. Another main session gets `Busy` while the original coordinator is still connected. When the original session ends, the document pane stays and its status strip shows "协调者离线" (coordinator offline); a new session can take over. An omp without `TERN_PANE` can still connect to a service that is **already running**, but cannot create a pane beside itself from there.
 
 Main-session commands:
 
 - `/playbook-show [file path]`: jump to the pane of a connected document.
-- `/playbook-add [file path]`: pick recent session messages, a Run, a record kind and optionally a block, and add them to the timeline.
+- `/playbook-add [file path]`: pick recent session messages, the Playbook itself or a Run, a record kind and optionally a block, and add them to that execution log.
 
 These commands and the `playbook_*` tools are registered only in the main session; subagents do not see them.
 
-## The file and its two kinds of block
+## The file and its blocks
 
 Save the following as `playbook.yaml` and it can be opened; it needs no network, external files or `am` CLI:
 
@@ -70,17 +72,15 @@ Save the following as `playbook.yaml` and it can be opened; it needs no network,
 title: 缓存方案
 blocks:
   - id: b1
+    title: 执行通则
+    body: |
+      只读检查，不修改任何文件。
+    task: false
+  - id: b2
     title: 缓存设计
     requirement: |
       数据重启后不能丢。请求路径要简单。
     design: |
-      ---
-      template: sheet
-      title: 缓存设计
-      cols: 2
-      ---
-      先说明方案，再检查请求路径。
-
       ## A 结论
       ```callout ok 使用持久化缓存
       明确持久化策略，不把“用了 Redis”当成数据不会丢的保证。
@@ -90,82 +90,90 @@ blocks:
       ```flow LR
       Client -> Gateway -> [(Cache)]: read
       ```
-    done: false
-  - id: b2
+    status: todo
+  - id: b3
     title: 检查方案
     body: |
-      根据下面的需求和请求路径，列出三个需要验证的边界。
-      不修改文件，只输出检查清单。
-      ((b1 | requirement, panel(B)))
-    done: false
+      用 {{检查方式}} 列出三个需要验证的边界。
+      ((b1))
+      ((b2 | requirement, panel(B)))
+
+      ```slot 检查方式
+      = 清单
+      * 清单 | 每条一行
+      - 表格 | 边界、风险、验证方法三列
+      ```
+    status: todo
 ````
 
 | Block | File fields | Purpose and where it is edited |
 |---|---|---|
-| Design block | `requirement`, `design` | A person edits the requirement directly; the main session edits the rendered design. Cannot be launched directly |
-| Execution block | `body`; optional `agent`, `isolated` | A person or the main session edits the Markdown/prompt directly; it can be referenced as context or launched in a Run. `agent` and `isolated` are its execution contract: the agent its subagent uses by default, and whether that worker gets its own worktree |
-| Orchestration block | Also `body`, whose whole content is one `js` or `py` code fence | Orchestration code run by the coordinator, not treated as an ordinary worker prompt |
+| Design block | `requirement`, `design`, `status` | A person edits the requirement in place; the main session edits the rendered design. Cannot be launched |
+| Execution block | `body`, `status`; optional `report`, `agent`, `isolated` | A person or the main session edits the body; it can be referenced as context or launched. `agent` and `isolated` are its execution contract: the agent its subagent uses by default, and whether that worker gets its own worktree |
+| Orchestration block | Also `body`, whose whole content is one `js` or `py` code fence | Orchestration code run by the coordinator, not treated as an ordinary worker prompt; it can only be launched alone |
+| Untracked execution block | `body`, `task: false`; optional `agent`, `isolated` | Shared context such as general rules: it has no status or report, is not counted and cannot be launched, but can be referenced |
 
-Every block needs `id`, `title`, `done` and the matching content fields. IDs are positive integers such as `b1`, `b2` and must be unique. The YAML **has no `kind`**; the type follows from the fields. Mixing `body` with `requirement`/`design`, missing fields and unknown fields are rejected. `agent` (a string that is not blank after trimming) and `isolated` (a boolean) are allowed only on execution blocks; when unset they do not appear in the file. Use `|` for multi-line content; an empty requirement or design is an empty string or an empty block scalar.
+Every block needs `id`, `title` and the matching content fields, plus either `status` or `task: false`. IDs are positive integers such as `b1`, `b2` and must be unique. The YAML **has no `kind`**; the type follows from the fields. Mixing `body` with `requirement`/`design`, missing fields and unknown fields are rejected. `agent` (a string that is not blank after trimming) and `isolated` (a boolean) are allowed only on execution blocks; when unset they do not appear in the file. `task` may only be `false`, only on an execution block, and such a block has no `status` or `report`. A design block is never `running` and has no `report`. Use `|` for multi-line content; an empty requirement or design is an empty string or an empty block scalar.
 
-`done` is a flag that is set explicitly or ticked; it is not a design-approval state and is never derived from checks, subagent return values or Launch state. Existing files with only `body` blocks still work.
+`status` is execution state, not design approval, and is never derived from checks, subagent return values or Launch records. `report` is the completion report: the subagent writes it when it sets its block to `done`, and the pane shows it read-only. Files that still use the old `done:` field are rejected; replace `done: false` with `status: todo` and `done: true` with `status: done`.
 
 ### Pane layout
 
-The pane has two columns. The left column is the block navigator: each row shows a block's ID, type, title and state chips; in a Run, "Run 记录与时间线" (Run records and timeline) sits on top. The right column shows one thing at a time: a block, the Run's records and timeline, or a merged preview of several blocks. Clicking a navigator row opens that block. The navigator and the right column scroll separately, and a block's toolbar and title stay pinned at the top while the right column scrolls.
+The pane shows the Playbook file itself in one column; Runs are not shown there. The document title sits on top (double-click to edit), followed by one card per block in file order, and a dock at the bottom.
 
-State chips state only facts the document service's data can prove; they never claim "handled" or "running", which no data ties to a particular request:
+- **Card header:** a number (`--` for untracked blocks, then `01`, `02`… for tracked ones), the title, a status icon (empty ring `todo`, spinner `running`, check `done`) and a chevron. Clicking the title or the chevron opens or folds the card; double-clicking the title edits it.
+- **Status icon:** clicking it toggles `done` and `todo` and notifies the coordinator with `status_changed`. Ticking a block done does not touch its report.
+- **Open card:** "⋯" opens a menu with "删除此块" (delete this block). The body is drawn with the components below. An execution block's foot shows "SUBAGENT" (its `agent`, "默认" when unset; double-click to edit) and "独立 WORKTREE" (double-click toggles `isolated`), then the launch button. A `done` block shows a folded "完成报告" (completion report) instead; click to unfold.
+- **Launch button:** "启动" (Launch) sends `launch_requested` for this block; until the coordinator creates a Launch from it, the button reads "已请求启动" (launch requested) and cannot be clicked again. While the block is `running` the button reads "打断执行" (stop): with an open Launch it sends `stop_requested` to the coordinator; with none, nothing is executing and the block simply goes back to `todo`.
+- **Launching several blocks:** ⌘-click card titles to select tracked execution blocks; the dock shows "一起启动 N 块" (launch N together) and "取消" (clear). The blocks are combined into one Launch in document order; an orchestration block can only be launched alone.
+- **Dock status strip:** "协调者在线/离线" (coordinator online/offline; click to focus the coordinator's pane) and "N / M 已完成" (done count over tracked blocks).
 
-| Chip | Meaning |
-|---|---|
-| `已完成`, `你在编辑`, `协调者编辑中` (done, you are editing, coordinator is editing) | The block's `done` and edit lock |
-| `已提交 #N，设计尚未改动`, `提交 #N 之后设计有改动` (submitted #N, design unchanged / design changed after #N) | Whether the design changed after the latest change request was submitted. The pane does not know whether the coordinator has "handled" that request. In the template this comparison holds only for the current service run |
-| `HH:MM 已请求启动` (launch requested at HH:MM) | A launch was requested and no Launch has been created from this block since |
-| `lN 等待绑定`, `lN 已绑定 X`, `lN 不活跃` (waiting for a worker, bound to X, inactive) | Open Launches started from this block |
-| `被 N 个未关闭 Launch 引用` (referenced by N open Launches) | Launches started from other blocks reference this one; editing it may send the coordinator change notices for them |
-| `有结果 · 待确认完成`, `有结果`, `失败` (result, awaiting done / result / failure) | The kind of the block's latest record; a result never turns into `done` by itself |
-| `检查 N 项不通过`, `检查通过`, `检查：模型不可用` (N failed, passed, model unavailable) | The check states that tell blocks apart. The usual "deterministic checks passed, model not asked" is not shown in the navigator; the "检查" (Check) section at the bottom of the block lists every result |
-
-The buttons in a block's top toolbar **act on that block only**: "已完成" (done), "启动" (Launch, execution blocks in a Run), "预览" (Preview), "检查" (Check), "设为参考" (pin as reference), "改标题" (edit title), and "写需求" (write requirement) on a design block whose requirement is still empty. An execution block with `agent` or `isolated` set shows them in the toolbar. A block with nothing written yet is marked "空块" (empty block) in the navigator. To act on several blocks, tick them in the navigator; a selection bar listing the ticked IDs stays pinned at the navigator's bottom, and its "一起启动" (launch together), "合并预览" (merged preview) and "一起检查" (check together) act on those blocks in document order.
-
-To read two blocks together, click "设为参考"; a reference row in an execution block also offers "设为参考，对照阅读" (pin to compare). The pinned block is shown read-only above whichever block is open, stays while you switch blocks, and "取消参考" (unpin) removes it. Under a design block's title, a folded line "被 N 个块引用：…" (referenced by N blocks) lists the referencing block IDs; unfold it and click an entry to open that block.
+Requests that need the coordinator (launch, stop with an open Launch, change requests, picks on a design) are refused with a notice while it is offline.
 
 ### How a person edits
 
-1. Title, execution body, requirement: click "改标题" (edit title, or the title itself), "编辑正文" (Edit body) or "编辑需求" (Edit requirement; "写需求" in the toolbar while the requirement is empty), edit the text, then click "保存" (Save; "保存标题" for the title). `Enter` saves a title; `Ctrl+Enter` saves a body or requirement (the terminal must pass the kitty keyboard protocol), and plain `Enter` is a new line there. After saving, the field shows "已保存" (saved), or "未修改" (unchanged) when nothing changed. "放弃" (Discard) drops the current draft.
-2. Design: look at the rendered result, click "写修改要求" (write a change request), state exactly what should change and how, then click "提交给协调者" (submit to coordinator) or press `Ctrl+Enter`. On the notice, the main session reads the block and revises `design`; it does not touch `requirement`.
-3. `Esc` **neither saves nor discards** in any editor: the draft and the focus stay, and further typing continues the draft. An empty request, or submitting with no coordinator connected, is rejected and the draft stays in the editor.
-4. An `ask` in a design is drawn as single- or multiple-choice options with nothing selected; the `*` recommended options only carry a "建议" (suggested) tag. Picking an option writes one line `针对问题「<question>」，选择：<options>` into this block's change-request draft, opening the draft when there is none; under the question the pick is marked "仅在草稿中，未提交" (only in the draft, not submitted) next to a "提交修改要求" (submit change request) button, the same submission as "提交给协调者" under the draft. Changing the pick replaces that line; clearing every option of a multiple choice removes it. The same draft can take further notes and answers to other asks; it is submitted once, as a single change request. When revising, the main session replaces each answered `ask` with the matching design decision. The options are unavailable while the coordinator holds the block, while any other draft exists (this block's own change-request draft excepted), or after the Run has finished.
-5. Within one service, templates and all Runs included, only one person's field draft can exist at a time. The edit lock covers the whole block; while a person is editing, the coordinator cannot write that block. Other blocks can still be opened from the navigator while editing; the draft stays with its block, and the navigator always shows the saved title. While the coordinator holds the lock, "收回编辑权" (take the block back) does so.
-6. Deleting a block: click "删除此块…" (delete this block), then "确认删除" (confirm).
+Every edit is in place: double-click the text, edit, and `Enter`, `Esc` or any other action commits; `Shift+Enter` is a new line in multi-line text. An edit is written only when the field still holds the text you started from; if the coordinator or the file changed it meanwhile, the edit is refused with a notice and you edit the latest content again.
 
-A submitted request goes into an append-only change log, listed newest first with its line breaks in the design block's "修改要求" (change requests) section. It records **the person's change requests**, not design snapshots, design diffs or AI replies; an ordinary block read does not include it.
+| Part | What a person can do |
+|---|---|
+| Execution body | Double-click a paragraph, heading, list item, `//` comment, `kv` key or value, panel heading or callout text to edit just that part. Components that are not edited part by part (code, tables, non-chain `flow`, `er`, …) are edited as their whole fence source |
+| Numbered list in a body | Click an item's grip to pick it up, then click the row where it goes; the list is renumbered. Clicking the grip again puts it back. Tern has no drag and drop, so this is pick-and-place |
+| Chain `flow` in a body | A flow that is one path (`A -> B -> C`, no groups or change markers) is drawn as a column of nodes. Click a node to show "+ 下方节点" (add below) and "删除" (delete); double-click to rename. A flow keeps at least two nodes; other flows stay drawings |
+| Slot | A `{{name}}` shows its current value; click it to pick another option or type your own. In an execution body the pick is written to the slot's `=` line; in a design it is sent as a change request |
+| Requirement | Double-click to edit; "// 双击写需求" (double-click to write) while empty |
+| Design | Read-only for a person. Double-click the "//" line under the design, write what should change and how, and `Enter` sends it as a change request; the main session revises `design` and does not touch `requirement` |
+
+Editing a block that the coordinator holds takes it back: the coordinator's lock is released and it receives `interrupted`.
+
+A submitted change request goes into an append-only log. It records **the person's change requests**, not design snapshots, design diffs or AI replies; an ordinary block read does not include it.
 
 ```json
-{"op":"revisions","block":"b1","after":0}
+{"op":"revisions","block":"b2","after":0}
 ```
 
 The above are `playbook_read` arguments; querying a Run's log also needs `run`. `after` is a record sequence number; records with a larger number are returned. A new Run does not inherit the template's change history.
 
-## Template, Run, Launch
+## Execution: the Playbook, Runs, Launches
 
 | Object | Start and end | What never happens automatically |
 |---|---|---|
-| Template | The original YAML, copied by each Run | Changing the template does not update existing Runs |
-| Run | "开始 Run" (Start Run) or `playbook_run start` copies the template and resets every `done` to `false`. After it finishes, its blocks can no longer be edited through the pane or tools | Starting a Run starts no agent; finishing a Run does not require every block to be done |
-| Launch | Compiles a Run's execution blocks, freezes the prompt/orchestration code and creates a record; closed explicitly, by `playbook.result` when it finishes up, or when the Run finishes | `launch`/`bind` start no worker; writing a result with `playbook_timeline` does not close the Launch; a close record does not cancel the worker |
+| The Playbook (template) | The YAML file. It has its own execution log and Launches; the pane's launches run it directly | Launching changes nothing but the blocks the subagent itself marks |
+| Run | `playbook_run start` copies the Playbook into a separate file, setting every tracked block to `status: todo` without a report. After it finishes, its blocks can no longer be edited through tools | Starting a Run starts no agent; finishing a Run does not require every block to be done; changing the Playbook does not update existing Runs |
+| Launch | Compiles execution blocks of the Playbook or of a Run, freezes the prompt/orchestration code and creates a record; closed explicitly, by `playbook.result` when it finishes up, or when its Run finishes | `launch`/`bind` start no worker; writing a result with `playbook_timeline` does not close the Launch; a close record does not cancel the worker |
 
-A Run has its own block contents, change log and timeline. Type a Run name in the template's top bar and press `Enter` or click "开始 Run"; **the pane automatically switches to the new Run's tab**. When a Run is started through `playbook_run start`, edit or launch in that Run's tab and pass the returned Run ID (for example `r1`) to tool calls. Read, edit, compile and check operations without `run` act on the template. "结束 Run" (finish Run) needs a second click on "确认结束" (confirm): the confirmation states the done count, the Launch records that will be closed and the drafts that will be discarded, and that agents already running are not stopped.
+Runs are for repeating the same Playbook with fresh state through the coordinator tools; pass the returned Run ID (for example `r1`) as `run`. Operations without `run` act on the Playbook file itself.
 
-Clicking "启动" (Launch) in an execution block's toolbar in a Run sends `launch_requested` to the coordinator for that block only; until the coordinator creates a Launch from that block, the button reads "已请求启动" (launch requested) and cannot be clicked again. To combine several blocks into one launch, tick them in the navigator and click "一起启动" (launch together) in the selection bar; the targets are combined in document order, design blocks cannot be launched, and an orchestration block can only be launched alone. The worker only starts working once the main session calls the execution tools.
+Every prompt Launch ends with execution-record instructions the document service appends after the compiled prompt: the subagent is told which file and blocks it is executing, to set their `status:` to `running` before it starts, and when it finishes to set `status: done` and write a `report: |` with one line per thing it actually did and a last line on verification; if it cannot finish it sets `todo` and reports where it stopped. It changes only those fields. Orchestration Launches get no such text: the orchestration code or the coordinator sets status there.
 
-A Run's record form, timeline and Launch records live under "Run 记录与时间线" in the navigator; when a status update comes due, both the navigator and the top bar say so, and "写状态更新" (write status update) in the top bar opens the form directly. The form's related block defaults to the block opened last and lists only it and the blocks with a Launch, launch request or record; "更多块" (more blocks) lists the rest. In each block's detail the latest record comes first under the toolbar; once the coordinator records a result, that panel is titled "协调者已记录结果，核对后标记完成" (result recorded, check then mark done) with the "标记已完成" (mark done) button beside it. Below it come the open Launches started from the block, other Launches that reference it, the body, the compiled result of "预览" (Preview) right after the body, and finally the block's history in this Run.
+A subagent receives the frozen text, not the UI, a live design page or any implicit Playbook context.
 
-An execution block can reference several design blocks, and several execution blocks can be compiled into one Launch. A subagent receives the frozen text, not the UI, a live design page or any implicit Playbook context.
+### Stopping
+
+"打断执行" sends `stop_requested` with the block's open Launches and their bound agents. The coordinator runs `await playbook.stop("l3")` in JS eval: it cancels every subagent this session started for that Launch with `playbook.agent`/`playbook.spawn` and sets the Launch's blocks that are still `running` back to `todo`; a pending `playbook.result` then records the failure and closes the Launch. A worker started some other way is stopped by the coordinator its own way, followed by `playbook_edit {op:"status", block, value:"todo"}`.
 
 ### Changes during execution
 
-The document service recompiles the affected active Launches and compares them with their baseline; when the compiled text changes or compilation fails, it notifies the coordinator after about two seconds of coalescing. A person's content edits, edits on disk and the coordinator's design revisions can all trigger the notice; titles, `done` and the coordinator's own edits to an execution body do not trigger the same content-change notice. Active means not closed and belonging to the currently connected coordinator session; a new session that takes over the document does not take over the old session's Launches.
+The document service recompiles the affected active Launches and compares them with their baseline; when the compiled text changes or compilation fails, it notifies the coordinator after about two seconds of coalescing. A person's content edits, edits on disk and the coordinator's design revisions can all trigger the notice; titles, `status`, `report` and the coordinator's own edits to an execution body do not trigger the same content-change notice. Active means not closed and belonging to the currently connected coordinator session; a new session that takes over the document does not take over the old session's Launches.
 
 The notice does not change a running worker's prompt. The coordinator decides whether to tell the worker, rearrange the work, or call `playbook_launch rebase` to accept the current compilation as the new baseline. `rebase` appends the current compilation as the new baseline and keeps the originally frozen snapshot in the Launch record; a later `playbook.spawn`, and `playbook.exec` of an orchestration block, use the latest baseline. A closed Launch can no longer be bound or rebased.
 
@@ -175,29 +183,30 @@ For `playbook.yaml`:
 
 | File | Content |
 |---|---|
-| `playbook.yaml` | Template |
-| `playbook.yaml.revisions.jsonl` | Template change-request history |
+| `playbook.yaml` | The Playbook: blocks, status and reports |
+| `playbook.yaml.log.jsonl` | The Playbook's own timeline and Launch records |
+| `playbook.yaml.revisions.jsonl` | The Playbook's change-request history |
 | `playbook.yaml.pb.jsonl` | Service ID allocation records |
 | `playbook.runs/r1.yaml` | The Run's blocks and run metadata |
 | `playbook.runs/r1.jsonl` | The Run's timeline and Launch records |
 | `playbook.runs/r1.revisions.jsonl` | The Run's change-request history |
 
-For a `.yml` file the Run directory keeps the suffix, for example `example.yml.runs/`. Finishing a Run closes its Launch records, releases locks, discards uncommitted drafts and saves the finish time; it does not write back to the template and does not replace stopping agents that are still running.
+For a `.yml` file the Run directory keeps the suffix, for example `example.yml.runs/`. Finishing a Run closes its Launch records, releases locks and saves the finish time; it does not write back to the Playbook and does not replace stopping agents that are still running. Logs that still contain the old `done_changed` record are rejected.
 
-The timeline accepts `update`, `result`, `failure` and `retrospective`. A retrospective is written only after the Run finishes. `update_every` and `next` are positive integer seconds; when they come due it is only a notice, and no update is generated automatically. A result can be read through that block's `.result` reference only when it is associated with a `block`.
+The timeline accepts `update`, `result`, `failure` and `retrospective`. A retrospective is written only after a Run finishes; `update_every` and `next` apply only to Runs. Both are positive integer seconds; when they come due it is only a notice, and no update is generated automatically. A result can be read through that block's `.result` reference only when it is associated with a `block`.
 
-The service checks the files on disk about once a second, and committed edits are written back to the YAML about a second later. Direct edits to the YAML content fields are loaded too, designs included; the editing split in the pane is not a file-system permission. Invalid YAML shows the parse error and keeps the last valid content; write-back resumes once the file is valid again. Disk changes do not commit a person's draft for them; a change to the same field is flagged, and clicking "保存" (Save) afterwards still applies the draft. Blocks of a finished Run are protected only on the UI/tool paths; the files on disk are not immutable.
+The service checks the file on disk about once a second and reads it again right before writing back, so status and report changes a subagent writes are merged with edits made in the pane or by the coordinator rather than overwritten; committed edits are written back about a second later. Direct edits to the YAML content fields are loaded too, designs included; the editing split in the pane is not a file-system permission. Invalid YAML shows the parse error and keeps the last valid content; write-back resumes once the file is valid again. Blocks of a finished Run are protected only on the tool paths; the files on disk are not immutable.
 
 ## References and compilation
 
-Execution bodies use `((target))` or `((target | selector, selector))`. Several selected results are joined with blank lines in the order written. A reference must fit on one line; references inside inline code or code fences are not expanded.
+Execution bodies use `((target))` or `((target | selector, selector))`. Several selected results are joined with blank lines in the order written. A reference must fit on one line; references inside inline code or code fences are not expanded. Slots are resolved when compiling: every `{{name}}` of a declared slot becomes its current value and the `slot` fence is dropped.
 
 | Target | Example | What it compiles to |
 |---|---|---|
-| Design block | `((b1))` | The raw requirement and design, wrapped in `<requirement>` and `<design>`; an empty requirement emits no `<requirement>` |
-| Design field/panel | `((b1 \| requirement, panel(B)))` | The raw requirement and the full explicit `## B …` panel, panel heading included; an empty requirement emits nothing |
-| Execution block | `((b2))` | The body, expanded recursively; `lines(1..3)` and `section("标题")` select from the source before expansion |
-| Block result in a Run | `((b2.result))` | The latest `result` record associated with that block; `lines` and `section` also work, with no recursive expansion |
+| Design block | `((b2))` | The raw requirement and design, wrapped in `<requirement>` and `<design>`; an empty requirement emits no `<requirement>` |
+| Design field/panel | `((b2 \| requirement, panel(B)))` | The raw requirement and the full explicit `## B …` panel, panel heading included; an empty requirement emits nothing |
+| Execution block | `((b1))` | The body, expanded recursively; `lines(1..3)` and `section("标题")` select from the source before expansion |
+| Block result | `((b3.result))` | The latest `result` record associated with that block in the same Playbook or Run; `lines` and `section` also work, with no recursive expansion |
 | Local text file | `((file:notes.md \| section("背景")))` | Text fetched relative to the Playbook's directory; `lines` also works, with no recursive expansion |
 | GitHub issue/PR | `((https://github.com/owner/repo/issues/1 \| title, body))` | The issue/PR title, body or discussion comments; needs an authenticated `gh` |
 
@@ -206,31 +215,31 @@ Rules and limits:
 - Design blocks support `requirement`, `design` and `panel(A)`; a panel needs a single uppercase-letter ID written in its heading, such as `## A 结论`. Automatically displayed numbers are not referenceable IDs. `((…))` inside requirements and designs stays as written: it is not fetched or expanded.
 - `lines` is a 1-based closed range written `lines(1..3)`; `section` excludes the selected heading and includes its subsections. Neither works on design blocks.
 - GitHub supports only standard `https://github.com/<owner>/<repo>/issues/<n>` or `/pull/<n>` URLs. `comments`, `comments(1..2)` and `comments(-1)` select discussion comments in time order; a PR does not include its diff, files, reviews or inline review comments. Arbitrary web URLs are not supported.
-- External text is wrapped in `<external source="…" fetched="…">`, showing when it was fetched. A fetch is a copy, not a live sync; for the latest content click "重新取回" (refetch) or use `refetch`.
+- External text is wrapped in `<external source="…" fetched="…">`, showing when it was fetched. A fetch is a copy, not a live sync; for the latest content use `playbook_compile {op:"refetch"}`.
 - `file:` allows `../` and has **no** directory sandbox or secret scanning like the design images/`src=` have; reference only files you are willing to hand to a subagent.
 - A missing block, panel, result or section, out-of-range lines, a failed fetch or a reference cycle fails compilation. A block reference chain is at most 8 levels deep, root included.
 
-"预览" (Preview) and `playbook_compile` only show the compiled result; they start no work.
+`playbook_compile` only shows the compiled result; it starts no work.
 
-## Designs and components
+## Bodies, designs and components
 
-The component format follows [answer-me-with-html](https://github.com/QingYunA/answer-me-with-html), but **parsing and rendering are implemented in this repository; it does not call that project's CLI and is not an embedded browser page**. Prose and formulas go to Tern's native Markdown nodes; diagram components become static SVG, and the rest use native TSP nodes.
+Execution bodies and designs are drawn with the same component parser. The component format follows [answer-me-with-html](https://github.com/QingYunA/answer-me-with-html), but **parsing and rendering are implemented in this repository; it does not call that project's CLI and is not an embedded browser page**. Paragraphs, headings, lists and `//` comment lines are drawn as native text, formulas go to Tern's native Markdown nodes, diagram components become static SVG, and the rest use native TSP nodes.
 
 ### Header and panels
 
 - The optional header must start on the first line, opened and closed with `---`; it supports only line-by-line `key: value`, not full YAML.
-- `template: sheet` lays panels in columns and `doc` in a single column. `cols` ranges 1–6, default 3, and caps the panels per row: a panel is at least 300px wide, and a panel holding a drawing (`flow`, `er`, `sequence`, `tree`, `timeline`, `annot`, `svg`, an image) at least 560px, so panels wrap when the pane is narrow and drawings keep their natural size. `title` and `subtitle` are supported; without a header `title`, if the first non-empty body line is `# Title`, it becomes the header title and is removed from the body; writing prose before the heading does not trigger this.
-- `## A Title {span=2 bare meta="note"}` starts a panel. `span` sets how many columns it takes (at most `cols`), `bare` drops the panel frame and `meta` shows extra text; panel height follows its content. `rows` is parsed but does not affect layout.
+- Panels are drawn in one column, in the order written. `title` and `subtitle` are shown; without a header `title`, if the first non-empty body line is `# Title`, it becomes the header title and is removed from the body; writing prose before the heading does not trigger this. `template` (`sheet`/`doc`) and `cols` (1–6) are validated for format compatibility but do not change the layout.
+- `## A Title {bare meta="note"}` starts a panel. `bare` drops the panel heading and `meta` shows extra text. `span` and `rows` are validated but do not change the layout.
 - `lang` is ignored; `theme`, `mode` and `style` are ignored with a warning; other header keys are shown as text metadata.
 - A panel ID is a single uppercase letter and must be unique. The native text labels of some components support inline code, bold, italic and strikethrough; flow and ER labels show as plain text, and sequence labels have these marks removed and show as plain text. Do not treat component labels as a full Markdown renderer.
+- A line starting with `//` is a comment line: it is drawn in the muted comment style and is still part of the text the agent receives.
 
 ### Supported syntax
 
-All of these are components **inside a design**. Execution bodies are not drawn with this component parser.
-
 | Component | Fence opening line and body |
 |---|---|
-| `flow` | `flow LR`; `Client -> [API] -> [(Cache)]: read`; direction `TB/LR/BT/RL`, default `TB`; `-->` dashed, `{Choice}` diamond, `(Reply)` rounded |
+| `slot` | `slot 名称`; one `= current value` line, then options `* recommended \| note`, `- option \| note` and `~ option offered earlier \| note`; written `{{名称}}` where the value goes (prose, list items, `kv` values, flow nodes, where the node must be bracketed, such as `({{名称}})`). The fence itself is not drawn. A custom value that is none of the options is kept as a `~` option |
+| `flow` | `flow LR`; `Client -> [API] -> [(Cache)]: read`; direction `TB/LR/BT/RL`, default `TB`; `-->` dashed, `{Choice}` diamond, `(Reply)` rounded. A single path is drawn as an editable node column, see [How a person edits](#how-a-person-edits) |
 | `er` | `er LR`; one entity per line, indented fields such as `id uuid PK`, `user_id uuid FK -> User`; relations such as `User 1--* Order: owns` |
 | `sequence` | `sequence num`; `participants: Client, API`, `Client -> API: request`, `API --> Client: reply`; supports `note API: text` and `== phase ==` |
 | `tree` | `tree list`; indentation means parent/child, `name \| note`; without `list` the layout is chosen automatically |
@@ -238,8 +247,7 @@ All of these are components **inside a design**. Execution bodies are not drawn 
 | `limits` | `limits`; `Latency \| 13 / 20 \| ms \| p95` or `Workers \| max 8 \| count` |
 | `annot` | `annot`; body `结果可能[过期]{!读取前刷新}`, `# Title \| side note`, `> caption` |
 | `kv` | `kv cols=2`; `存储: Redis`, `*不变量: 一个源头` is a full-width item |
-| `callout` | `callout warn 缓存失效`; the body is Markdown; types `info/ok/warn/err` |
-| `ask` | `ask` or `ask multi`; the first line is the question, followed by 2–6 `* recommended \| note` or `- other \| note`; single choice needs exactly one recommended option; in the pane a pick is written into the change-request draft, see [How a person edits](#how-a-person-edits) |
+| `callout` | `callout warn 缓存失效`; the body is Markdown; types `info/ok/warn/err`; drawn as a comment |
 | `diff` | `diff file=src/value.ts title="变更"`; paste a unified diff as the body, it is not loaded from `file`; supports `start`, `hl` |
 | `html` | `html`; structured tags such as `<section><h3>方案</h3><p><strong>结论</strong></p></section>`, converted to TSP; no web page runs |
 | `svg` | `svg`; a complete, static, safe `<svg>`, preferably with an explicit `viewBox` or `width`/`height` |
@@ -256,49 +264,48 @@ All of these are components **inside a design**. Execution bodies are not drawn 
 - Mermaid fences show as plain code here and are not turned into diagrams. `flow/er/sequence` have their own syntax; Mermaid DSL cannot be pasted in directly.
 - Images load only from inside the Playbook directory; remote URLs or data URLs show only their caption/address with a warning. Images and `src=` both check the real path, so `../` or symbolic links cannot escape the directory.
 - Embedded local files are capped at 5 MiB; code `src=` also has a 2 MiB cap and binary/credential-path/secret-content checks. `lines=1-2` is written differently from the reference form `lines(1..2)`; `hl` uses displayed line numbers. For `src=` the whole file is scanned for secrets before the lines are cut.
-- A single fence body over 1000 lines is not drawn; code and diffs over 200 lines are an error, over 40 lines a warning. Errors and warnings both show line numbers, and only errors fail the `draft` check. An empty design is not treated as an error by this.
+- A single fence body over 1000 lines is not drawn; code and diffs over 200 lines are an error, over 40 lines a warning. Errors and warnings both show line numbers, and only errors fail the `draft` check. An empty body or design is not treated as an error by this.
 
 ## Coordinator tools
 
-These are tool arguments, not shell commands. `doc` can be omitted only when exactly one document is connected; all input is strictly validated and extra fields are rejected. A plain `playbook_read` **has no `op: "read"`**.
+These are tool arguments, not shell commands. `doc` can be omitted only when exactly one document is connected; `run` is omitted to act on the Playbook file itself. All input is strictly validated and extra fields are rejected. A plain `playbook_read` **has no `op: "read"`**.
 
 | Tool | Arguments |
 |---|---|
 | `playbook_open` | `{doc}` |
-| `playbook_read` | `{doc?, run?, block?}`; history `{doc?, run?, op:"revisions", block?, after?}` |
-| `playbook_edit` | `{doc?, run?, op:"title" or "done", block, value}`; `replace` takes `{block, find, replace}`; `write` takes `{block, text}`; `panel` takes `{block, panel, text}`; `insert` takes `{after?, title, body, agent?, isolated?}`; `insert_design` takes `{after?, title, design}`; `delete` takes `{block}`; `move` takes `{block, after}` with `after` a block ID or `null` (to the top); `agent` takes `{block, value}` with a string or `null` (clear); `isolated` takes `{block, value}` with a boolean or `null`; each also passes `op` |
+| `playbook_read` | `{doc?, run?, block?}`; history `{doc?, run?, op:"revisions", block?, after?}`. Blocks carry `status` and `report`, or `task: false` |
+| `playbook_edit` | `{doc?, run?, op:"title", block, value}`; `status` takes `{block, value}` with `todo`, `running` or `done`; `task` takes `{block, value}` with `false` (untracked) or `true` (tracked, `todo`); `replace` takes `{block, find, replace}`; `write` takes `{block, text}`; `panel` takes `{block, panel, text}`; `insert` takes `{after?, title, body, agent?, isolated?}`; `insert_design` takes `{after?, title, design}`; `delete` takes `{block}`; `move` takes `{block, after}` with `after` a block ID or `null` (to the top); `agent` takes `{block, value}` with a string or `null` (clear); `isolated` takes `{block, value}` with a boolean or `null`; each also passes `op` |
 | `playbook_compile` | `{doc?, run?, op:"compile", blocks:[…]}`; refetch `{doc?, run?, op:"refetch", targets:[…]}` |
 | `playbook_check` | `{doc?, run?, op:"inspect", blocks:[…]}`; report `{doc?, run?, op:"report", blocks:[…], version, result}` |
 | `playbook_run` | `{doc?, op:"start", name, update_every?}`, `{doc?, op:"finish", run}`, `{doc?, op:"list"}` |
-| `playbook_timeline` | `{doc?, op:"read", run, after?}`; `{doc?, op:"post", run, kind, text, block?, launch?, next?, quote?}`; `{doc?, op:"snooze", run, after}` |
-| `playbook_launch` | `{doc?, op:"launch", run, blocks:[…]}` → `{launch, kind, text, agent?, isolated?}`; `{doc?, op:"bind", launch, agent}`; `{doc?, op:"info" or "rebase" or "close", launch}` |
+| `playbook_timeline` | `{doc?, op:"read", run?, after?}`; `{doc?, op:"post", run?, kind, text, block?, launch?, next?, quote?}`; `{doc?, op:"snooze", run, after}` |
+| `playbook_launch` | `{doc?, op:"launch", run?, blocks:[…]}` → `{launch, kind, text, agent?, isolated?}`; `{doc?, op:"bind", launch, agent}`; `{doc?, op:"info" or "rebase" or "close", launch}` |
 
-`write/replace` in `playbook_edit` change only an execution body or a design, never a requirement; the `find` of `replace` must occur exactly once. The `text` of `panel` must be the whole replacement panel, starting with `## <ID> Title`. `insert_design` always starts with an empty requirement for a person to fill in. `move` records nothing when the position does not change. `agent` and `isolated` apply only to execution blocks; changing them does not change the compiled text or trigger a change-during-execution notice, and `launch` returns one only when every root block presets the same value. When editing an existing block, one call takes the lock, edits and releases it.
+`write/replace` in `playbook_edit` change only an execution body or a design, never a requirement; the `find` of `replace` must occur exactly once. The `text` of `panel` must be the whole replacement panel, starting with `## <ID> Title`, and works on execution bodies and designs. `insert` and `insert_design` create a `todo` block; `insert_design` always starts with an empty requirement for a person to fill in. `task` applies only to execution blocks. `move` records nothing when the position does not change. `agent` and `isolated` apply only to execution blocks; changing them does not change the compiled text or trigger a change-during-execution notice, and `launch` returns one only when every root block presets the same value. When editing an existing block, one call takes the lock, edits and releases it.
 
 ### Running one execution block
 
 With the file above, the main session calls in order:
 
 1. `playbook_open {doc: "/absolute/path/playbook.yaml"}`.
-2. `playbook_compile {op: "compile", blocks: ["b2"]}`: check the expanded requirement and panel B.
-3. `playbook_run {op: "start", name: "检查缓存方案"}`: take the returned Run ID. Below it is assumed to be `r1`; use the actual returned value.
-4. In the main session's **JS eval**, start the worker:
+2. `playbook_compile {op: "compile", blocks: ["b3"]}`: check the expanded rules, requirement, panel B and slot value, followed by the execution-record instructions.
+3. In the main session's **JS eval**, start the worker:
 
 ```js
 var worker = await playbook.agent({
-  run: "r1", blocks: ["b2"], agent: "task:mid", label: "检查缓存方案"
+  blocks: ["b3"], agent: "task:mid", label: "检查缓存方案"
 });
 ```
 
-`playbook.agent` returns as soon as the worker is started and bound. `worker` is a top-level variable that later eval cells can still use; wait for the worker with omp's `wait` tool, and the main session keeps handling change requests and change notices from the pane meanwhile. When the worker has finished, send another eval:
+`playbook.agent` returns as soon as the worker is started and bound. `worker` is a top-level variable that later eval cells can still use; wait for the worker with omp's `wait` tool, and the main session keeps handling requests and change notices from the pane meanwhile. The subagent sets b3 to `running`, and when it finishes to `done` with its report. Then send another eval:
 
 ```js
 return await playbook.result(worker);
 ```
 
-It records the result on b2 (a Launch with a single block is associated automatically) and closes this Launch. When nothing needs answering in between, one blocking call `await playbook.run({ run: "r1", blocks: ["b2"], agent: "task:mid" })` starts, waits, records and closes in one go.
+It records the worker's final message as a result on b3 (a Launch with a single block is associated automatically) and closes this Launch. When nothing needs answering in between, one blocking call `await playbook.run({ blocks: ["b3"], agent: "task:mid" })` starts, waits, records and closes in one go. A person's "启动" in the pane arrives as `launch_requested`, and the notice gives the same calls.
 
-5. Check the output; when appropriate, set `playbook_edit {op:"done", run:"r1", block:"b2", value:true}` explicitly, or let a person tick it. Finally call `playbook_run {op:"finish", run:"r1"}` and write the retrospective.
+To execute the Playbook again from a clean state without touching the file, call `playbook_run {op: "start", name: "检查缓存方案"}`, take the returned Run ID and pass it as `run` to the calls above; finish with `playbook_run {op:"finish", run}`.
 
 `task:mid` must be an agent available in the current omp; the extension neither provides nor configures it. A call without `agent` uses the block's preset `agent`, and with no preset either, omp's default agent; when the default is disabled, `agent` must be given or preset on the block. `isolated` follows the same order: explicit argument, then the block's preset, then nothing.
 
@@ -306,37 +313,36 @@ The `playbook` object in JS eval is injected by the extension; do not add an imp
 
 | Method | Behavior |
 |---|---|
-| `playbook.run({run, blocks, …})` | `playbook.agent` plus `playbook.result`: creates a Launch, starts and binds one worker, waits, records the result and closes the Launch |
-| `playbook.agent({run, blocks, …})` | Creates a Launch, starts and binds a worker, returns `{launch, blocks, id, handle, …}` without waiting; `agent` and `isolated` left out come from the blocks' presets; on an orchestration block it closes the Launch it just created and throws |
-| `playbook.result(worker, {block?, close?})` | Waits and writes `result`, associated with the Launch's only block when `block` is not given; a wait error writes `failure` and throws. Afterwards it closes the Launch as `close` says, by default when the worker was created by `playbook.agent` |
+| `playbook.run({run?, blocks, …})` | `playbook.agent` plus `playbook.result`: creates a Launch, starts and binds one worker, waits, records the result and closes the Launch |
+| `playbook.agent({run?, blocks, …})` | Creates a Launch, starts and binds a worker, returns `{launch, blocks, id, handle, …}` without waiting; `agent` and `isolated` left out come from the blocks' presets; on an orchestration block it closes the Launch it just created and throws |
+| `playbook.result(worker, {block?, close?})` | Waits and writes `result`, associated with the Launch's only block when `block` is not given; a wait error, including a cancellation by `playbook.stop`, writes `failure` and throws. Afterwards it closes the Launch as `close` says, by default when the worker was created by `playbook.agent` |
 | `playbook.spawn(launch, {…})` | Adds a worker to an open prompt Launch, using its latest baseline (the new text after `rebase`); the worker does not own the Launch, so its `result` does not close it by default; a closed Launch is refused |
+| `playbook.stop(launch, {doc?})` | Cancels every worker this eval kernel started for the Launch and sets its blocks that are still `running` back to `todo`; returns `{cancelled}`; throws when this session started no worker for it |
 | `playbook.read({run?, block?})` | Reads blocks; there is no history helper, so history still uses the `playbook_read` tool |
-| `playbook.post({run, kind, text, …})` | Writes a record |
-| `playbook.timeline({run, after?})` | Reads the timeline |
-| `playbook.context` | `{doc, run, launch}` during orchestration; empty in an ordinary eval |
+| `playbook.post({run?, kind, text, …})` | Writes a record |
+| `playbook.timeline({run?, after?})` | Reads the timeline |
+| `playbook.context` | `{doc, run?, launch}` during orchestration (no `run` for the Playbook itself); empty in an ordinary eval |
 
-The helpers never set `done` or finish a Run on their own. For parallel work, start workers with several `playbook.agent` calls, keep each in a top-level variable and `result` each one later; for several workers on one Launch, add them with `playbook.spawn` and pass `{close: true}` to the one that finishes up, or call `playbook_launch {op:"close"}`. A cell containing `playbook.run/result` with no explicit `timeout` gets `timeout: 0`.
+The helpers never set `status` or finish a Run on their own; the subagent writes its own status. For parallel work, start workers with several `playbook.agent` calls, keep each in a top-level variable and `result` each one later; for several workers on one Launch, add them with `playbook.spawn` and pass `{close: true}` to the one that finishes up, or call `playbook_launch {op:"close"}`. A cell containing `playbook.run/result` with no explicit `timeout` gets `timeout: 0`.
 
 ### Orchestration blocks
 
 The block below can be added under `blocks` in the example file; use a `js`/`py` fence of exactly three backticks, with no other prose in the body:
 
 ````yaml
-  - id: b3
+  - id: b4
     title: 编排检查
     body: |
       ```js
-      var worker = await playbook.agent({ blocks: ["b2"], agent: "task:mid" });
+      var worker = await playbook.agent({ blocks: ["b3"], agent: "task:mid" });
       var result = await playbook.result(worker);
       await tool.playbook_launch({ doc: playbook.context.doc, op: "close", launch: playbook.context.launch });
       return result;
       ```
-    done: false
+    status: todo
 ````
 
-Changing the template does not bring new blocks into existing Runs. After adding the orchestration block to the template, call `playbook_run {op:"start", name:"编排检查"}` and use the Run ID it returns; below it is assumed to be `r2`, use the actual returned value.
-
-Call `playbook_launch {op:"launch", run:"r2", blocks:["b3"]}` to get the Launch ID; below it is assumed to be `l2`, use the actual returned value. Then send an eval whose **entire code is just this one line**:
+Call `playbook_launch {op:"launch", blocks:["b4"]}` (add `run` to launch it in a Run) to get the Launch ID; below it is assumed to be `l2`, use the actual returned value. Then send an eval whose **entire code is just this one line**:
 
 ```js
 await playbook.exec("l2")
@@ -344,20 +350,20 @@ await playbook.exec("l2")
 
 `exec` is an entry point that the extension intercepts and replaces the whole cell with; it is not an ordinary helper, and no code may come before or after it. With several documents connected, write `await playbook.exec("l2", "/absolute/path/playbook.yaml")`. What runs is the orchestration code in the Launch's current baseline (the code frozen at launch until a `rebase`), with `timeout: 0` forced; the JS helpers default to that Launch's document and Run. Raw `tool.playbook_*` calls do not inherit those defaults: with several documents connected pass `doc` explicitly, and for Run operations also pass `run` as the tool arguments require.
 
-Python orchestration sets the **Python variables** `PLAYBOOK_DOC`, `PLAYBOOK_RUN` and `PLAYBOOK_LAUNCH`, not environment variables, and does not inject the JS `playbook` helpers; use the `tool` and `agent` interfaces of Python eval directly, which needs omp's Python backend.
+Python orchestration sets the **Python variables** `PLAYBOOK_DOC`, `PLAYBOOK_RUN` (`None` for the Playbook itself) and `PLAYBOOK_LAUNCH`, not environment variables, and does not inject the JS `playbook` helpers; use the `tool` and `agent` interfaces of Python eval directly, which needs omp's Python backend.
 
 ## Checks are not completion or approval
 
-A block's detail and its navigator row show the deterministic checks `compile`, `render_error` and `render_pending`; execution blocks also check `empty_expansion` and table charts, design blocks check `draft`. Checks do not prove a business design correct; apart from Launch constraints such as compile failures, a failed check does not gate a launch.
+`playbook_check inspect` returns the deterministic checks `compile`, `render_error` and `render_pending`; execution blocks also check `empty_expansion`, and execution bodies and designs check `draft`. The pane does not show checks; it shows component errors in place. Checks do not prove a business design correct; apart from Launch constraints such as compile failures, a failed check does not gate a launch.
 
 `jev` is a separately reported model judgment:
 
 - `playbook_check inspect` returns `{blocks, source, compiled, view, findings, version}` and **currently returns no question definitions**.
 - The current fixed question is `missing`: does the full compiled prompt mention logs, discussions, files or earlier results whose content it does not include? The main session can answer it in eval with an available `judge`.
-- The report shape is `result: {kind:"answers", answers:{missing: P(yes)}}`, with the probability in 0–1; `P(yes) >= 0.5` shows as failed. With no judge available, report `{kind:"judge_unavailable"}`, which shows as not judged, not as passed.
+- The report shape is `result: {kind:"answers", answers:{missing: P(yes)}}`, with the probability in 0–1; `P(yes) >= 0.5` counts as failed. With no judge available, report `{kind:"judge_unavailable"}`, which counts as not judged, not as passed.
 - The report must carry the latest `version` for the same document, the same Run and the same ordered block list. Stale reports are ignored; a change to the input invalidates the old judgment.
 
-The "检查" (Check) button refreshes the deterministic checks and notifies the coordinator; it never calls a model itself. There is no design-approval state and no automatic transition from checks to `done`.
+There is no design-approval state and no automatic transition from checks to `done`.
 
 ## Development checks
 

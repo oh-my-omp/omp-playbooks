@@ -1,5 +1,5 @@
 // K1 document service ⇄ coordinator extension (contracts.md §K1).
-import type { BlockId, CompileResult, EventName, JudgeReport, LaunchId, LaunchKind, RecordKind, RunId, RunStatus } from "./model";
+import type { BlockId, CompileResult, EventName, JudgeReport, LaunchId, LaunchKind, RecordKind, RunId, RunStatus, Status } from "./model";
 
 /** Requests, closed. `run` absent = template. */
 export type Request =
@@ -11,7 +11,9 @@ export type Request =
 		readonly op: "set";
 		readonly args:
 			| { readonly run?: RunId; readonly block: BlockId; readonly field: "title"; readonly value: string }
-			| { readonly run?: RunId; readonly block: BlockId; readonly field: "done"; readonly value: boolean }
+			| { readonly run?: RunId; readonly block: BlockId; readonly field: "status"; readonly value: Status }
+			/** `false` declares a task block untracked (not a piece of work); `true` tracks it again from todo. */
+			| { readonly run?: RunId; readonly block: BlockId; readonly field: "task"; readonly value: boolean }
 			/** A task block's default agent; null clears it. */
 			| { readonly run?: RunId; readonly block: BlockId; readonly field: "agent"; readonly value: string | null }
 			/** Whether a task block's workers default to their own worktree; null clears it. */
@@ -33,7 +35,7 @@ export type Request =
 	| { readonly op: "compile"; readonly args: { readonly run?: RunId; readonly blocks: readonly BlockId[] } }
 	| { readonly op: "inspect"; readonly args: { readonly run?: RunId; readonly blocks: readonly BlockId[] } }
 	| { readonly op: "report"; readonly args: { readonly run?: RunId; readonly blocks: readonly BlockId[]; readonly version: string; readonly result: JudgeReport } }
-	| { readonly op: "launch"; readonly args: { readonly run: RunId; readonly blocks: readonly BlockId[] } }
+	| { readonly op: "launch"; readonly args: { readonly run?: RunId; readonly blocks: readonly BlockId[] } }
 	| { readonly op: "bind"; readonly args: { readonly launch: LaunchId; readonly agent: string } }
 	| { readonly op: "rebase"; readonly args: { readonly launch: LaunchId } }
 	| { readonly op: "close"; readonly args: { readonly launch: LaunchId } }
@@ -41,11 +43,11 @@ export type Request =
 	| { readonly op: "start_run"; readonly args: { readonly name: string; readonly update_every?: number } }
 	| { readonly op: "finish_run"; readonly args: { readonly run: RunId } }
 	| { readonly op: "runs"; readonly args: Record<string, never> }
-	| { readonly op: "timeline"; readonly args: { readonly run: RunId; readonly after?: number } }
+	| { readonly op: "timeline"; readonly args: { readonly run?: RunId; readonly after?: number } }
 	| {
 			readonly op: "post";
 			readonly args: {
-				readonly run: RunId;
+				readonly run?: RunId;
 				readonly kind: RecordKind;
 				readonly text: string;
 				readonly block?: BlockId;
@@ -120,18 +122,17 @@ export type EventPayload =
 			readonly event: "block_changed";
 			readonly data: {
 				readonly id: string;
-				readonly launch: { readonly id: LaunchId; readonly kind: LaunchKind; readonly run: RunId };
+				readonly launch: { readonly id: LaunchId; readonly kind: LaunchKind; readonly run?: RunId };
 				readonly agents: readonly string[];
 				readonly changed: readonly BlockId[];
 				readonly diff: string;
 				readonly current: CompileResult;
 			};
 	  }
-	| { readonly event: "launch_requested"; readonly data: { readonly run: RunId; readonly blocks: readonly BlockId[] } }
-	| { readonly event: "check_requested"; readonly data: { readonly run: RunId | null; readonly blocks: readonly BlockId[] } }
-	| { readonly event: "run_started"; readonly data: { readonly run: RunId; readonly name: string } }
-	| { readonly event: "run_finished"; readonly data: { readonly run: RunId } }
-	| { readonly event: "done_changed"; readonly data: { readonly run: RunId; readonly block: BlockId; readonly done: boolean } }
+	| { readonly event: "launch_requested"; readonly data: { readonly run?: RunId; readonly blocks: readonly BlockId[] } }
+	/** The person asked to stop the block's execution; `launches` are its open root Launches with their bound agents. */
+	| { readonly event: "stop_requested"; readonly data: { readonly run?: RunId; readonly block: BlockId; readonly launches: readonly { readonly id: LaunchId; readonly agents: readonly string[] }[] } }
+	| { readonly event: "status_changed"; readonly data: { readonly run?: RunId; readonly block: BlockId; readonly status: Status } }
 	| { readonly event: "update_due"; readonly data: { readonly run: RunId; readonly due: number; readonly last_update: number | null } }
 	| { readonly event: "interrupted"; readonly data: { readonly run?: RunId; readonly block: BlockId; readonly request: string } }
 	/** The person submitted a change request for a design block; read it with `revisions`. */

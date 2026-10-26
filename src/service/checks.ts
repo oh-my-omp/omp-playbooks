@@ -1,13 +1,6 @@
-import { setTableCharts, splitTableCharts } from "@oh-my-pi/pi-tui/chat/table-chart";
-import { initThemeSync } from "@oh-my-pi/pi-tui/theme/theme";
 import type { CompileError, CompileResult, Source } from "../domain/model";
 import type { ChecksModule } from "../domain/ports";
 import { draftDiagnostics } from "./draft/components";
-
-// `always` draws charts synchronously. Initialize once, not on each check:
-// setTableCharts also clears the chart library's cache shared with the view.
-initThemeSync();
-setTableCharts("always");
 
 function unreachable(value: never): never {
 	throw new Error(`Unexpected checks variant: ${JSON.stringify(value)}`);
@@ -54,27 +47,6 @@ function normalizedCompile(compiled: CompileResult) {
 	return unreachable(compiled);
 }
 
-/** A `((reference))` line directly under a Markdown table would be parsed as a table row; give it its own paragraph. */
-export function separateTableReferences(body: string): string {
-	return body.replace(/^([ \t]*\|[^\n]*)\n(?=[ \t]*\(\()/gm, "$1\n\n");
-}
-
-function chartableTables(body: string): number {
-	let count = 0;
-	for (const segment of splitTableCharts(separateTableReferences(body), false)) {
-		switch (segment.kind) {
-			case "chart":
-				count++;
-				break;
-			case "markdown":
-				break;
-			default:
-				unreachable(segment);
-		}
-	}
-	return count;
-}
-
 const questions: ChecksModule["questions"] = [
 	{
 		id: "missing",
@@ -87,25 +59,15 @@ const questions: ChecksModule["questions"] = [
 
 export const checks: ChecksModule = {
 	questions,
-	chartableTables,
 	findings({ compiled, expansions, content, render }) {
 		const common = { compile: compiled.kind === "Err", render_error: render.blockError || render.documentError, render_pending: render.pendingOverdue };
-		switch (content.kind) {
-			case "task":
-				return {
-					...common,
-					empty_expansion: expansions.some(expansion => expansion.kind === "Ok" && expansion.text.trim() === ""),
-					chart: chartableTables(content.body) > render.chartNodes,
-					draft: false,
-				};
-			case "design":
-				return {
-					...common,
-					empty_expansion: false,
-					chart: false,
-					draft: render.draftErrors > 0 || draftDiagnostics(content.design).some(found => found.severity === "error"),
-				};
-		}
+		// Task bodies and designs are drawn by the same component renderer, so both are checked for its syntax.
+		const text = content.kind === "task" ? content.body : content.design;
+		return {
+			...common,
+			empty_expansion: content.kind === "task" && expansions.some(expansion => expansion.kind === "Ok" && expansion.text.trim() === ""),
+			draft: render.draftErrors > 0 || draftDiagnostics(text).some(found => found.severity === "error"),
+		};
 	},
 	version({ closure, results, compiled }) {
 		// Preserve meaningful occurrence/path order, but not Map insertion order

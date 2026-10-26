@@ -1,5 +1,5 @@
-import { diagnostic, type DraftDiagnostic, type FenceInput, type Parsed, type RenderContext, type Rendered } from "./contract";
-import { inlineSpans } from "./text";
+import { diagnostic, type DraftDiagnostic, type FenceInput, type Parsed, type RenderContext, type Rendered, type Span } from "./contract";
+import { inlineText } from "./markdown";
 import type { TspNode } from "../tsp-types";
 
 export interface KvSpec {
@@ -8,6 +8,9 @@ export interface KvSpec {
 		readonly kind: "item" | "wide";
 		readonly key: string;
 		readonly value: string;
+		/** Where the key and the value are written. */
+		readonly keySpan: Span;
+		readonly valueSpan: Span;
 	}[];
 }
 
@@ -30,7 +33,8 @@ export function parseKv(input: FenceInput): Parsed<KvSpec> {
 
 	const items: KvSpec["items"][number][] = [];
 	for (let index = 0; index < input.lines.length; index++) {
-		const text = input.lines[index]!.trim();
+		const raw = input.lines[index]!;
+		const text = raw.trim();
 		if (!text || text.startsWith("//")) continue;
 		const kind = text.startsWith("*") ? "wide" : "item";
 		const body = kind === "wide" ? text.slice(1).trim() : text;
@@ -39,7 +43,16 @@ export function parseKv(input: FenceInput): Parsed<KvSpec> {
 			diagnostics.push(diagnostic("kv", input.line + index, "缺少键名或冒号；请写 key: value。"));
 			continue;
 		}
-		items.push({ kind, key: match[1]!.trim(), value: match[2]!.trim() });
+		const key = match[1]!.trim();
+		const value = match[2]!.trim();
+		const lineStart = input.starts[index]!;
+		const keyAt = raw.indexOf(key);
+		const valueAt = value ? raw.lastIndexOf(value) : raw.length;
+		items.push({
+			kind, key, value,
+			keySpan: { start: lineStart + keyAt, end: lineStart + keyAt + key.length },
+			valueSpan: { start: lineStart + valueAt, end: lineStart + valueAt + value.length },
+		});
 	}
 	if (items.length === 0) {
 		if (diagnostics.length === 0) diagnostics.push(diagnostic("kv", input.line, "至少需要一项；请写 key: value。"));
@@ -49,14 +62,13 @@ export function parseKv(input: FenceInput): Parsed<KvSpec> {
 }
 
 export function renderKv(spec: KvSpec, ctx: RenderContext): Rendered {
-	// am's grammar: a bordered cell grid, muted label above its value; a `*` item spans the row with a stronger value.
-	const cells = spec.items.map((item, index): TspNode => ({
-		id: `${ctx.id}.item.${index}`, k: "el",
-		p: { tag: "div", class: item.kind === "wide" ? "am-kv-cell am-kv-wide" : "am-kv-cell" },
-		c: [
-			{ id: `${ctx.id}.item.${index}.key`, k: "el", p: { tag: "span", class: "am-kv-key", text: item.key } },
-			{ id: `${ctx.id}.item.${index}.value`, k: "text", p: { spans: inlineSpans(item.value, item.kind === "wide" ? "strong" : "") } },
-		],
-	}));
-	return { nodes: [{ id: `${ctx.id}.grid`, k: "el", p: { tag: "div", class: `am-kv am-kv-${spec.cols}` }, c: cells }], diagnostics: [] };
+	// A two-column grid: muted keys, values beside them; a `*` item spans the row with a stronger value.
+	const cells = spec.items.flatMap((item, index): TspNode[] => {
+		const id = `${ctx.id}.item.${index}`;
+		return [
+			ctx.edit.text(`${id}.key`, item.keySpan, false, { id: `${id}.key.view`, k: "el", p: { tag: "span", class: "pb-kv-key", text: item.key } }),
+			ctx.edit.text(`${id}.value`, item.valueSpan, false, inlineText(ctx, `${id}.value.view`, item.value, "span")),
+		].map((node, position) => ({ id: `${id}.${position ? "v" : "k"}`, k: "el", p: { tag: "div", class: position ? `pb-kv-v${item.kind === "wide" ? " pb-kv-wide" : ""}` : "pb-kv-k" }, c: [node] }));
+	});
+	return { nodes: [{ id: `${ctx.id}.grid`, k: "el", p: { tag: "div", class: "pb-kv" }, c: cells }], diagnostics: [] };
 }

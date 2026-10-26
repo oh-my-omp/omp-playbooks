@@ -4,7 +4,7 @@
 // document service stays the single owner of Launch state.
 
 type ToolCall = (args: Record<string, unknown>) => Promise<unknown>;
-type AgentHandle = { readonly id: string; wait(timeout?: number): Promise<unknown> };
+type AgentHandle = { readonly id: string; wait(timeout?: number): Promise<unknown>; cancel(): unknown };
 type AgentOptions = { readonly agent?: string; readonly label?: string; readonly schema?: unknown; readonly schemaMode?: string; readonly isolated?: boolean };
 type Spawn = (prompt: string, options?: AgentOptions) => Promise<AgentHandle>;
 type RecordKind = "update" | "result" | "failure" | "retrospective";
@@ -21,10 +21,11 @@ export type PlaybookDeps = PlaybookContext & {
  * One subagent started for a Launch and already bound to it. `blocks` are the Launch's roots;
  * `ownsLaunch` says this subagent's Launch was created for it alone (`playbook.agent`), so recording
  * its result closes the Launch; a subagent added with `playbook.spawn` shares a Launch it does not own.
+ * `run` is absent for a Launch of the Playbook itself.
  */
 export type Spawned = {
 	readonly doc?: string;
-	readonly run: string;
+	readonly run?: string;
 	readonly launch: string;
 	readonly blocks: readonly string[];
 	readonly ownsLaunch: boolean;
@@ -36,10 +37,16 @@ export type AgentRequest = AgentOptions & { readonly doc?: string; readonly run?
 
 class PlaybookError extends Error {}
 
+/**
+ * Subagents this kernel started, by Launch: the module stays loaded across eval cells, so `playbook.stop`
+ * in a later cell reaches the handles `playbook.agent` and `playbook.spawn` returned earlier.
+ */
+const started = new Map<string, Spawned[]>();
+
 /** `playbook_launch {op: "launch"}`: the blocks' shared execution contract comes back with the Launch. */
 type Created = { readonly launch: string; readonly kind: string; readonly text: string; readonly agent?: string; readonly isolated?: boolean };
-/** `playbook_launch {op: "info"}`: `text` is the current baseline, the snapshot's text until a rebase. */
-type LaunchInfo = { readonly run: string; readonly kind: string; readonly text: string; readonly blocks: readonly string[]; readonly closed: boolean };
+/** `playbook_launch {op: "info"}`: `text` is the current baseline, the snapshot's text until a rebase; `run` is null for the Playbook itself. */
+type LaunchInfo = { readonly run: string | null; readonly kind: string; readonly text: string; readonly blocks: readonly string[]; readonly closed: boolean };
 
 function objectOf(value: unknown): object {
 	if (typeof value !== "object" || value === null) throw new PlaybookError(`unexpected tool result: ${JSON.stringify(value)}`);
@@ -83,8 +90,10 @@ function launchInfo(value: unknown): LaunchInfo {
 	const result = objectOf("result" in snapshot ? snapshot.result : undefined);
 	const baselines = strings("baselines" in record ? record.baselines : undefined, "baselines");
 	const closed: unknown = "closed" in record ? record.closed : undefined;
+	const run: unknown = "run" in record ? record.run : undefined;
+	if (run !== null && typeof run !== "string") throw new PlaybookError("launch info run is neither a Run id nor null");
 	return {
-		run: stringAt(record, "run"), kind: stringAt(record, "kind"),
+		run, kind: stringAt(record, "kind"),
 		text: baselines.at(-1) ?? stringAt(result, "text"),
 		blocks: strings("blocks" in record ? record.blocks : undefined, "blocks"),
 		closed: closed !== null && closed !== undefined,
@@ -112,10 +121,9 @@ export function createPlaybook(deps: PlaybookDeps) {
 		const file = doc ?? context.doc;
 		return file === undefined ? {} : { doc: file };
 	};
-	const scope = (doc: string | undefined, run: string | undefined): { doc?: string; run: string } => {
+	const scope = (doc: string | undefined, run: string | undefined): { doc?: string; run?: string } => {
 		const chosen = run ?? context.run;
-		if (!chosen) throw new PlaybookError("run is required (for example run: \"r1\")");
-		return { ...docArg(doc), run: chosen };
+		return { ...docArg(doc), ...(chosen ? { run: chosen } : {}) };
 	};
 	const agentOptions = (request: AgentOptions): AgentOptions => {
 		const { agent, label, schema, schemaMode, isolated } = request;
@@ -127,7 +135,7 @@ export function createPlaybook(deps: PlaybookDeps) {
 	 * When `agent()` itself fails on a Launch this call created, the Launch is closed so it does
 	 * not stay open with no agent; an existing Launch (spawn) is left as it is.
 	 */
-	async function start(target: { doc?: string; run: string }, launch: string, blocks: readonly string[], prompt: string, options: AgentOptions, fresh: boolean): Promise<Spawned> {
+	async function start(target: { doc?: string; run?: string }, launch: string, blocks: readonly string[], prompt: string, options: AgentOptions, fresh: boolean): Promise<Spawned> {
 		let handle: AgentHandle;
 		try {
 			handle = await deps.agent(prompt, options);
@@ -137,7 +145,9 @@ export function createPlaybook(deps: PlaybookDeps) {
 			throw new PlaybookError(`agent() failed for Launch ${launch}${fresh ? " (closed)" : ""}: ${reason}. When the default subagent is disabled, pass agent: "<name>", for example agent: "task:mid".`);
 		}
 		await call("playbook_launch", { ...docArg(target.doc), op: "bind", launch, agent: handle.id });
-		return { ...target, launch, blocks, ownsLaunch: fresh, id: handle.id, handle };
+		const spawned: Spawned = { ...target, launch, blocks, ownsLaunch: fresh, id: handle.id, handle };
+		started.set(launch, [...(started.get(launch) ?? []), spawned]);
+		return spawned;
 	}
 
 	/**
@@ -156,12 +166,12 @@ export function createPlaybook(deps: PlaybookDeps) {
 	}
 
 	/**
-	 * Wait for a spawned subagent and record its outcome on the Run timeline: about `block`, or the
+	 * Wait for a spawned subagent and record its outcome on the execution log: about `block`, or the
 	 * Launch's only block. Afterwards the Launch closes when `close` says so, by default when the
 	 * subagent owns it.
 	 */
 	async function result(spawned: Spawned, options: { readonly block?: string; readonly close?: boolean } = {}): Promise<unknown> {
-		const target = { ...docArg(spawned.doc), run: spawned.run };
+		const target = { ...docArg(spawned.doc), ...(spawned.run ? { run: spawned.run } : {}) };
 		const block = options.block ?? (spawned.blocks.length === 1 ? spawned.blocks[0] : undefined);
 		const about = { launch: spawned.launch, ...(block ? { block } : {}) };
 		const finish = async (kind: "result" | "failure", text: string): Promise<void> => {
@@ -189,7 +199,25 @@ export function createPlaybook(deps: PlaybookDeps) {
 			const info = launchInfo(await call("playbook_launch", { ...docArg(request.doc), op: "info", launch }));
 			if (info.closed) throw new PlaybookError(`${launch} is closed; start a new Launch instead`);
 			if (info.kind === "orchestration") throw new PlaybookError(`${launch} is an orchestration Launch; it is not a subagent prompt`);
-			return start(scope(request.doc, info.run), launch, info.blocks, info.text, agentOptions(request), false);
+			return start(scope(request.doc, info.run ?? undefined), launch, info.blocks, info.text, agentOptions(request), false);
+		},
+
+		/**
+		 * Cancel every subagent this kernel started for `launch`, then set the Launch's roots that are still
+		 * running back to todo. A pending `playbook.result` for them records the failure and closes the Launch.
+		 */
+		async stop(launch: string, request: { readonly doc?: string } = {}): Promise<{ readonly cancelled: readonly string[] }> {
+			const workers = started.get(launch) ?? [];
+			if (workers.length === 0) throw new PlaybookError(`no subagent of ${launch} was started in this session; stop it where it runs, then set its blocks back to todo with playbook_edit {op: "status"}`);
+			for (const worker of workers) await worker.handle.cancel();
+			started.delete(launch);
+			const info = launchInfo(await call("playbook_launch", { ...docArg(request.doc), op: "info", launch }));
+			const where = { ...docArg(request.doc), ...(info.run === null ? {} : { run: info.run }) };
+			for (const block of info.blocks) {
+				const current = objectOf(await call("playbook_read", { ...where, block }));
+				if ("status" in current && current.status === "running") await call("playbook_edit", { ...where, op: "status", block, value: "todo" });
+			}
+			return { cancelled: workers.map(worker => worker.id) };
 		},
 
 		/** agent() then result(): start one subagent for the blocks, record what it returns and close its Launch. */

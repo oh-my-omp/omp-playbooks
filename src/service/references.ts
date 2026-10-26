@@ -1,6 +1,7 @@
 import { parseBlockId } from "../domain/model";
 import type { BlockContent, BlockId, CompileInput, CompileResult, ErrorSite, ExternalTarget, IssueValue, Reference, Selector, Source, Target } from "../domain/model";
 import { panelText, replacePanel } from "./draft/document";
+import { resolveSlots } from "./draft/slot";
 import type { ReferencesModule } from "../domain/ports";
 
 type Span = { start: number; end: number };
@@ -315,8 +316,9 @@ function resultTargets(roots: readonly BlockId[], contents: ReadonlyMap<BlockId,
 	return [...targets];
 }
 
-/** A design block as prompt text: both parts by default, or what `selectors` pick (requirement, design, panels). */
-function selectDesign(content: Extract<BlockContent, { kind: "design" }>, selectors: readonly Selector[]): Selection {
+/** A design block as prompt text: both parts by default, or what `selectors` pick (requirement, design, panels). Slots read as their values. */
+function selectDesign(written: Extract<BlockContent, { kind: "design" }>, selectors: readonly Selector[]): Selection {
+	const content = { requirement: resolveSlots(written.requirement), design: resolveSlots(written.design) };
 	// An empty requirement is not a requirement: the agent gets no empty <requirement> element.
 	if (selectors.length === 0) return { ok: true, text: [...(content.requirement.trim() ? [`<requirement>\n${content.requirement}\n</requirement>`] : []), `<design>\n${content.design}\n</design>`].join("\n\n") };
 	const selected: string[] = [];
@@ -363,14 +365,14 @@ function compiler(input: CompileInput) {
 					sources.push({ kind: "block", target: key, expression: reference.expressionText });
 					return { kind: "Ok", text: selected.text, sources };
 				}
-				const selected = selectText(content.body, expression.selectors);
+				const selected = selectText(resolveSlots(content.body), expression.selectors);
 				if (!selected.ok) return badExpression(at, selected.reason);
 				sources.push({ kind: "block", target: key, expression: reference.expressionText });
 				return compileText(target.block, selected.text, [...path, target.block]);
 			}
 			case "result": {
 				const result = input.results.get(target.block);
-				if (input.inTemplate || !result) return { kind: "Err", error: { kind: "NoResult", block: target.block, at } };
+				if (!result) return { kind: "Err", error: { kind: "NoResult", block: target.block, at } };
 				const selected = selectText(result.text, expression.selectors);
 				if (!selected.ok) return badExpression(at, selected.reason);
 				sources.push({ kind: "result", target: key, expression: reference.expressionText, seq: result.seq, origin: result.origin, launch: result.launch });
@@ -415,7 +417,7 @@ function compile(order: readonly BlockId[], input: CompileInput): CompileResult 
 			parts.push(selected.text);
 			continue;
 		}
-		const compiled = context.compileText(block, content.body, [block]);
+		const compiled = context.compileText(block, resolveSlots(content.body), [block]);
 		if (compiled.kind === "Err") return compiled;
 		parts.push(compiled.text);
 	}

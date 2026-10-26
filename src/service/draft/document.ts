@@ -1,7 +1,8 @@
 // Document-level parser of a design draft (answer-me-with-html draft format, `am help format`):
 // frontmatter, lead, `## ` panels and the segments inside them. Component fences are only
-// located here; src/service/draft/components.ts parses and draws them.
-import { diagnostic, type DraftDiagnostic, type FenceInput } from "./contract";
+// located here; src/service/draft/components.ts parses and draws them. Every segment keeps the
+// UTF-16 range it came from, so the pane can edit the text it draws in place.
+import { diagnostic, type DraftDiagnostic, type FenceInput, type SourceLine, type Span } from "./contract";
 
 export interface DraftMeta {
 	readonly template: "sheet" | "doc";
@@ -14,19 +15,21 @@ export interface DraftMeta {
 }
 
 export type Segment =
-	| { readonly kind: "markdown"; readonly text: string; readonly line: number }
+	| { readonly kind: "markdown"; readonly text: string; readonly line: number; readonly lines: readonly SourceLine[]; readonly span: Span }
 	/** A fenced block; `name` is the fence language (a component name, a code language, or empty). */
-	| { readonly kind: "fence"; readonly name: string; readonly input: FenceInput; readonly line: number }
+	| { readonly kind: "fence"; readonly name: string; readonly input: FenceInput; readonly line: number; readonly span: Span }
 	/** A GFM table block (header, delimiter and body rows). */
-	| { readonly kind: "table"; readonly input: FenceInput }
+	| { readonly kind: "table"; readonly input: FenceInput; readonly span: Span }
 	/** An image on its own line: `![alt](path)`. */
-	| { readonly kind: "image"; readonly input: FenceInput };
+	| { readonly kind: "image"; readonly input: FenceInput; readonly span: Span };
 
 export interface Panel {
 	/** Letter ID: written in the heading (`explicit`) or assigned in order. */
 	readonly id: string;
 	readonly explicit: boolean;
 	readonly title: string;
+	/** Where the title is written in the heading line. */
+	readonly titleSpan: Span;
 	readonly span: number | null;
 	readonly rows: number | null;
 	readonly bare: boolean;
@@ -47,12 +50,9 @@ export interface DraftDocument {
 	readonly diagnostics: readonly DraftDiagnostic[];
 }
 
-interface Line {
-	readonly text: string;
+interface Line extends SourceLine {
 	/** 1-based line number. */
 	readonly number: number;
-	/** UTF-16 offset of the line start. */
-	readonly offset: number;
 	/** Inside a fenced block (fence delimiter lines included). */
 	readonly fenced: boolean;
 }
@@ -87,13 +87,19 @@ function splitLines(text: string): Line[] {
 	return lines;
 }
 
+/** The range of `lines`, from the first line's start to the last line's end (its newline excluded). */
+function spanOf(lines: readonly SourceLine[]): Span {
+	const last = lines.at(-1)!;
+	return { start: lines[0]!.offset, end: last.offset + last.text.length };
+}
+
 /** Segments of consecutive lines (a panel body or the lead). */
 function segmentsOf(lines: readonly Line[], diagnostics: DraftDiagnostic[]): Segment[] {
 	const segments: Segment[] = [];
 	let markdown: Line[] = [];
 	const flush = (): void => {
 		const text = markdown.map(line => line.text).join("\n");
-		if (text.trim()) segments.push({ kind: "markdown", text, line: markdown[0]!.number });
+		if (text.trim()) segments.push({ kind: "markdown", text, line: markdown[0]!.number, lines: markdown, span: spanOf(markdown) });
 		markdown = [];
 	};
 	for (let index = 0; index < lines.length; index++) {
@@ -101,21 +107,27 @@ function segmentsOf(lines: readonly Line[], diagnostics: DraftDiagnostic[]): Seg
 		const open = FENCE_OPEN.exec(line.text);
 		if (open) {
 			flush();
-			const body: string[] = [];
+			const body: Line[] = [];
 			let closed = false;
 			let next = index + 1;
 			for (; next < lines.length; next++) {
 				if (closes(open[1]!, lines[next]!.text)) { closed = true; break; }
-				body.push(lines[next]!.text);
+				body.push(lines[next]!);
 			}
 			if (!closed) diagnostics.push(diagnostic("draft", line.number, `代码块没有结束：在块末尾加一行 ${open[1]}`));
-			segments.push({ kind: "fence", name: open[2]!.toLowerCase(), input: { args: open[3]!, lines: body, line: line.number + 1 }, line: line.number });
+			const last = closed ? lines[next]! : body.at(-1) ?? line;
+			const bodyStart = body[0]?.offset ?? line.offset + line.text.length + 1;
+			segments.push({
+				kind: "fence", name: open[2]!.toLowerCase(), line: line.number,
+				input: { args: open[3]!, lines: body.map(item => item.text), line: line.number + 1, starts: body.map(item => item.offset), body: body.length ? spanOf(body) : { start: bodyStart, end: bodyStart } },
+				span: { start: line.offset, end: last.offset + last.text.length },
+			});
 			index = next;
 			continue;
 		}
 		if (IMAGE.test(line.text)) {
 			flush();
-			segments.push({ kind: "image", input: { args: "", lines: [line.text.trim()], line: line.number } });
+			segments.push({ kind: "image", input: { args: "", lines: [line.text.trim()], line: line.number, starts: [line.offset], body: spanOf([line]) }, span: spanOf([line]) });
 			continue;
 		}
 		const following = lines[index + 1];
@@ -124,7 +136,7 @@ function segmentsOf(lines: readonly Line[], diagnostics: DraftDiagnostic[]): Seg
 			const rows: Line[] = [line, following];
 			let next = index + 2;
 			while (next < lines.length && !lines[next]!.fenced && lines[next]!.text.trim() !== "" && lines[next]!.text.includes("|")) rows.push(lines[next++]!);
-			segments.push({ kind: "table", input: { args: "", lines: rows.map(row => row.text), line: line.number } });
+			segments.push({ kind: "table", input: { args: "", lines: rows.map(row => row.text), line: line.number, starts: rows.map(row => row.offset), body: spanOf(rows) }, span: spanOf(rows) });
 			index = next - 1;
 			continue;
 		}
@@ -232,8 +244,12 @@ export function parseDocument(text: string): DraftDocument {
 		}
 		const end = headings[index + 1];
 		const body = rest.slice(at + 1, end ?? rest.length);
+		const title = match[2] ?? "";
+		// The title sits after `## `, the optional letter ID and the spaces after it.
+		const titleAt = line.text.indexOf(title, 3 + (id === null ? 0 : 1));
+		const titleStart = line.offset + (title ? titleAt : line.text.length);
 		return {
-			id, title: match[2] ?? "", line,
+			id, title, line, titleSpan: { start: titleStart, end: titleStart + title.length },
 			attrs: attributes(match[3] ?? "", line.number, diagnostics),
 			end: end === undefined ? text.length : rest[end]!.offset,
 			segments: segmentsOf(body, diagnostics),
@@ -248,9 +264,15 @@ export function parseDocument(text: string): DraftDocument {
 			used.add(id);
 		}
 		if (!panel.title && !panel.attrs.bare && panel.segments.length === 0) diagnostics.push(diagnostic("draft", panel.line.number, "面板没有标题也没有内容", "warning"));
-		return { id, explicit: panel.id !== null, title: panel.title, ...panel.attrs, line: panel.line.number, start: panel.line.offset, end: panel.end, segments: panel.segments };
+		return { id, explicit: panel.id !== null, title: panel.title, titleSpan: panel.titleSpan, ...panel.attrs, line: panel.line.number, start: panel.line.offset, end: panel.end, segments: panel.segments };
 	});
 	return { meta, lead, panels, diagnostics };
+}
+
+/** Every fenced block of a text, lead and panels alike, in order. */
+export function fences(text: string): Extract<Segment, { kind: "fence" }>[] {
+	const document = parseDocument(text);
+	return [...document.lead, ...document.panels.flatMap(panel => panel.segments)].flatMap(segment => segment.kind === "fence" ? [segment] : []);
 }
 
 /** Text of the panel whose heading writes `id`; panels with assigned IDs cannot be addressed. */

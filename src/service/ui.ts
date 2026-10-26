@@ -3,253 +3,158 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { prepareSvg } from "@oh-my-pi/pi-tui/chat/svg-source";
 import { svgFigurePalette } from "@oh-my-pi/pi-tui/chat/svg-figure";
-import { lookupTableChart, setTableCharts, splitTableCharts } from "@oh-my-pi/pi-tui/chat/table-chart";
 import { initThemeSync, setTheme } from "@oh-my-pi/pi-tui/theme/theme";
-import type { BlockContent, BlockId, CompileError, CompileResult, DocRef, EntryData, EventName, FindingName, HumanField, Launch, LaunchId, RecordKind, Revision, RunId, RunStatus, Source, TimelineEntry } from "../domain/model";
-import { fieldText, parseRunId } from "../domain/model";
+import type { Block, BlockId, DocRef, HumanField } from "../domain/model";
 import type { BlockView, CoreApi, DocView, RenderStatus } from "../domain/ports";
-import type { RunSummary } from "../domain/protocol";
-import { separateTableReferences } from "./checks";
-import { isOrchestration } from "./core";
 import { renderDraft, type DraftHost } from "./draft/components";
-import type { AskSpec } from "./draft/ask";
-import type { ChangeView, FileRead } from "./draft/contract";
+import type { ChangeView, EditHost, FileRead, ListItem, Span } from "./draft/contract";
+import { parseSlots, setSlotValue, type SlotDecl } from "./draft/slot";
 import type { FrameOp, TspEvent, TspInput, TspNode, TspSession } from "./tsp-types";
 
 const SURFACE = "playbook";
 const ESC = "\x1b";
-const TYPES: readonly EntryData["type"][] = ["run_started", "run_finished", "block_edited", "block_added", "block_deleted", "content_replaced", "blocks_reordered", "done_changed", "launch_created", "agent_bound", "launch_closed", "event_sent", "interrupted", "check_reported", "post", "update_due", "update_snoozed"];
-const LABELS: Readonly<Record<HumanField, string>> = { title: "标题", body: "正文", requirement: "需求", prompt: "修改要求" };
-const FIELD_LABELS: Readonly<Record<"title" | "body" | "requirement" | "design", string>> = { title: "标题", body: "正文", requirement: "需求", design: "设计稿" };
-const RECORD_LABELS: Readonly<Record<RecordKind, string>> = { update: "状态更新", result: "执行结果", failure: "执行失败", retrospective: "复盘" };
-const SNOOZE_LABELS: Readonly<Record<string, string>> = { "300": "5 分钟", "900": "15 分钟", "3600": "1 小时", "86400": "1 天" };
-const FINDING_LABELS: Readonly<Record<FindingName, string>> = {
-	compile: "编译",
-	empty_expansion: "引用非空",
-	render_error: "渲染错误",
-	render_pending: "渲染响应",
-	chart: "表格图表",
-	draft: "设计稿语法",
-};
-const EVENT_LABELS: Readonly<Record<EventName, string>> = {
-	block_changed: "块内容变更",
-	launch_requested: "请求启动",
-	check_requested: "请求检查",
-	run_started: "Run 开始",
-	run_finished: "Run 结束",
-	done_changed: "完成状态变更",
-	update_due: "状态更新到期",
-	interrupted: "打断编辑",
-	revision_requested: "提交修改要求",
-};
-const TYPE_LABELS: Readonly<Record<EntryData["type"] | "all", string>> = {
-	all: "全部",
-	run_started: "Run 开始",
-	run_finished: "Run 结束",
-	block_edited: "块编辑",
-	block_added: "新建块",
-	block_deleted: "删除块",
-	content_replaced: "内容/配置替换",
-	blocks_reordered: "块顺序调整",
-	done_changed: "完成标记",
-	launch_created: "创建 Launch",
-	agent_bound: "绑定 Agent",
-	launch_closed: "关闭 Launch",
-	event_sent: "发送通知",
-	interrupted: "人工打断",
-	check_reported: "检查报告",
-	post: "记录与复盘",
-	update_due: "更新到期",
-	update_snoozed: "推迟提醒",
-};
-const ORIGIN_LABELS: Readonly<Record<TimelineEntry["origin"], string>> = { human: "人", coordinator: "协调者", disk: "磁盘", service: "服务" };
+/** The pane always shows the Playbook itself; Runs are copies the coordinator works in. */
+const REF: DocRef = { kind: "template" };
+/** A click on a title waits this long for a second click, which edits the title instead of folding the card. */
+const CLICK_DELAY_MS = 250;
 const VIEWS: readonly { readonly view: ChangeView; readonly label: string }[] = [{ view: "changes", label: "变更" }, { view: "before", label: "之前" }, { view: "after", label: "之后" }];
 
-/** TSP sheets reach only descendants of the region root, so every rule targets the `app` wrapper or nodes inside it. */
+/** TSP sheets reach only descendants of the region root, so every rule targets nodes inside a region. */
 const SURFACE_CSS = [
-	// The shell: one sans font, one spacing scale (4/8/12/16/24). The app fills the main region (which would
-	// otherwise scroll as one page), so the navigator and the detail each scroll on their own.
-	".pb-app { position: absolute; inset: 0; display: flex; flex-direction: column; min-height: 0; box-sizing: border-box; font-family: var(--sans); font-size: 13px; line-height: 1.5; color: var(--t1); }",
-	".pb-app .sf-text, .pb-app .sf-md, .pb-app .sf-badge, .pb-app .sf-input { font-family: var(--sans); }",
-	// Tern's Markdown sheet sets inline code to inherit the text face; code stays monospace here.
-	".pb-app code, .pb-app pre, .pb-app .sf-code { font-family: var(--mono) !important; }",
-	".pb-top { display: flex; flex-direction: column; gap: 8px; padding: 12px 24px; border-bottom: 1px solid var(--l2); background: var(--panel, transparent); }",
-	".pb-top-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }",
-	".pb-title { margin: 0; font-size: 16px; font-weight: 600; line-height: 1.4; color: var(--t1); }",
+	".pb-app { display: flex; flex-direction: column; gap: 14px; padding: 18px 16px 24px; font-family: var(--mono); font-size: 13px; line-height: 1.6; color: var(--t1); }",
+	".pb-doc-title { display: flex; align-items: baseline; gap: 8px; font-size: 15px; font-weight: 600; }",
+	".pb-hash { color: var(--t3); font-weight: 400; }",
+	".pb-errors { display: flex; flex-direction: column; gap: 2px; }",
+	// A folded card has no body; Tern keeps the empty body's bottom padding unless it is hidden.
+	".sf-card-body:empty { display: none; }",
+	".pb-cards { display: flex; flex-direction: column; gap: 6px; }",
+	".pb-empty { color: var(--t3); }",
+	// Card head: number, title, status icon, then the more and fold buttons at the far end.
+	".pb-head { display: flex; align-items: center; gap: 10px; min-width: 0; width: 100%; }",
+	".pb-nn { flex: 0 0 auto; color: var(--t3); }",
+	".pb-title { flex: 0 1 auto; min-width: 0; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: default; }",
+	".pb-open .pb-title { font-weight: 600; }",
 	".pb-spacer { flex: 1 1 auto; }",
-	".pb-body { display: grid; grid-template-columns: 264px minmax(0, 1fr); flex: 1 1 auto; min-height: 0; }",
-	".pb-nav { display: flex; flex-direction: column; gap: 4px; padding: 12px 8px; overflow-y: auto; overscroll-behavior: contain; min-height: 0; border-right: 1px solid var(--l2); }",
-	".pb-detail { display: flex; flex-direction: column; gap: 16px; padding: 0 24px 24px; overflow-y: auto; overscroll-behavior: contain; min-height: 0; }",
-	".pb-detail > .pb-block-title, .pb-detail > .pb-empty { margin-top: 16px; }",
-	".pb-detail-block { display: flex; flex-direction: column; gap: 16px; }",
-	".pb-nav-row { display: flex; align-items: flex-start; gap: 4px; }",
-	".pb-nav-row > .pb-choice { border-color: transparent; background: transparent; padding: 8px 4px; }",
-	".pb-nav-item { display: flex; flex-direction: column; gap: 4px; padding: 8px; border-radius: 6px; flex: 1 1 auto; min-width: 0; cursor: pointer; }",
-	".pb-nav-item:hover { background: var(--l1); }",
-	".pb-nav-active { background: rgb(from var(--accent) r g b / 12%); box-shadow: inset 2px 0 0 var(--accent); }",
-	".pb-nav-label { font-size: 11px; line-height: 1.3; color: var(--t3); }",
-	".pb-nav-title { font-weight: 600; line-height: 1.4; color: var(--t1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
-	".pb-nav-sep { height: 1px; background: var(--l2); margin: 8px 4px; }",
-	// Pinned to the navigator's bottom edge, so ticking a block shows its actions without scrolling the list.
-	".pb-select-bar { position: sticky; bottom: 0; z-index: 1; display: flex; flex-direction: column; gap: 8px; padding: 8px; margin-top: 8px; border-radius: 6px; background: var(--card, var(--panel)); border: 1px solid rgb(from var(--accent) r g b / 40%); box-shadow: 0 -4px 12px rgb(from var(--t1) r g b / 8%); }",
-	".pb-select-actions { display: flex; flex-wrap: wrap; gap: 4px; }",
-	".pb-select-actions .pb-button { padding: 4px 8px; }",
-	".pb-cite { padding: 4px 0; color: var(--t1); cursor: pointer; }",
-	".pb-cite:hover { color: var(--accent); }",
-	".pb-pinned { max-height: 420px; overflow: auto; padding: 4px; border-left: 3px solid rgb(from var(--accent) r g b / 50%); }",
-	".pb-chips { display: flex; flex-wrap: wrap; gap: 4px; }",
-	// The block head stays at the top of the detail while the block scrolls under it.
-	".pb-head { position: sticky; top: 0; z-index: 1; display: flex; flex-direction: column; gap: 8px; padding: 16px 0 12px; background: var(--page, var(--panel)); border-bottom: 1px solid var(--l2); }",
-	".pb-block-title { margin: 0; font-size: 18px; font-weight: 600; line-height: 1.4; color: var(--t1); cursor: text; }",
-	".pb-head .pb-choice { border-color: transparent; background: transparent; padding: 4px; }",
-	".pb-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }",
-	".pb-panel { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; border-radius: 8px; border: 1px solid var(--l2); background: var(--card, transparent); }",
-	".pb-panel-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }",
-	".pb-panel-title { font-size: 12px; font-weight: 600; color: var(--t2); }",
-	".pb-request { display: flex; flex-direction: column; gap: 4px; padding: 8px 12px; border-radius: 6px; background: var(--l1); }",
-	".pb-request-text { white-space: pre-wrap; color: var(--t1); line-height: 1.5; }",
-	".pb-form-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }",
-	".pb-field { display: flex; flex-direction: column; gap: 4px; width: 260px; max-width: 100%; }",
-	".pb-field-wide { display: flex; flex-direction: column; gap: 4px; width: 100%; }",
-	".pb-button { display: inline-flex; align-items: center; justify-content: center; align-self: flex-start; width: auto; padding: 4px 12px; border-radius: 6px; border: 1px solid var(--l3, var(--l2)); background: var(--raise, var(--l1)); color: var(--t1); font-weight: 500; line-height: 1.5; cursor: pointer; }",
-	".pb-button-primary { background: rgb(from var(--accent) r g b / 16%); border-color: rgb(from var(--accent) r g b / 45%); color: var(--accent-ink, var(--accent)); font-weight: 600; }",
-	".pb-button-danger { background: rgb(from var(--bad) r g b / 12%); border-color: rgb(from var(--bad) r g b / 45%); color: var(--bad); }",
-	".pb-button-ghost { background: transparent; border-color: transparent; color: var(--t2); padding: 4px 8px; }",
-	".pb-disabled { opacity: .42; cursor: default; }",
-	".pb-choice { display: inline-flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--l2); background: var(--card, transparent); cursor: pointer; align-self: flex-start; }",
-	".pb-choice-checked { border-color: rgb(from var(--accent) r g b / 45%); background: rgb(from var(--accent) r g b / 10%); color: var(--accent-ink, var(--t1)); }",
-	".pb-choice-disabled { opacity: .45; cursor: default; }",
-	".pb-timeline-entry { display: flex; flex-direction: column; gap: 4px; padding: 8px 12px; border-left: 2px solid var(--l3, var(--l2)); }",
-	".pb-empty { padding: 32px 0; color: var(--t3); }",
-	".pb-doc { display: flex; flex-direction: column; gap: 8px; }",
-	// Checks and deletion close the block: one quiet footer instead of loose lines.
-	".pb-foot { display: flex; flex-direction: column; gap: 4px; padding-top: 12px; border-top: 1px solid var(--l2); color: var(--t3); }",
-	".pb-confirm { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; border-radius: 8px; border: 1px solid rgb(from var(--bad) r g b / 40%); background: rgb(from var(--bad) r g b / 6%); }",
-	".am-draft { display: flex; flex-direction: column; gap: 14px; font-family: var(--sans); font-size: 14px; line-height: 1.55; color: var(--t1); }",
-	".am-draft .sf-md, .am-draft .sf-text { font-family: var(--sans); font-size: 14px; line-height: 1.55; }",
-	".am-title { margin: 0; font-size: 20px; font-weight: 600; line-height: 1.3; }",
-	".am-subtitle { margin: 0; color: var(--t2); }",
-	".am-sheet, .am-doc { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }",
-	".am-panel { flex: 1 1 100%; min-width: 300px; display: flex; flex-direction: column; border: 1px solid var(--l3, var(--l2)); border-radius: 8px; background: var(--card, transparent); overflow: hidden; }",
-	// `cols` caps the panels per row; a panel never narrows below 300px (560px with a drawing), so a narrow pane wraps.
-	...[2, 3, 4, 5, 6].flatMap(cols => Array.from({ length: cols - 1 }, (_, index) => `.am-cols-${cols} > .am-span-${index + 1} { flex-basis: ${Math.floor(((index + 1) / cols) * 100 - 10)}%; }`)),
-	".am-panel-wide { min-width: 560px; }",
-	".am-doc > .am-panel { flex-basis: 100%; }",
-	".am-panel-bare { border-color: transparent; background: transparent; }",
-	".am-panel-head { display: flex; align-items: stretch; gap: 10px; min-height: 34px; border-bottom: 1px solid var(--l2); }",
-	".am-panel-id { display: flex; align-items: center; justify-content: center; min-width: 32px; background: var(--t1); color: var(--card, #fff); font-weight: 700; font-size: 14px; }",
-	".am-panel-heading { margin: 0; align-self: center; font-size: 15px; font-weight: 600; }",
-	".am-panel-meta { margin-left: auto; align-self: center; padding-right: 12px; font-size: 12px; color: var(--t3); }",
-	".am-panel-body { display: flex; flex-direction: column; gap: 12px; padding: 14px 16px 16px; }",
-	".am-callout { display: flex; flex-direction: column; gap: 4px; padding: 10px 14px; border-left: 3px solid var(--accent); background: rgb(from var(--accent) r g b / 8%); }",
-	".am-callout-ok { border-left-color: var(--ok); background: rgb(from var(--ok) r g b / 10%); }",
-	".am-callout-warn { border-left-color: var(--warn); background: rgb(from var(--warn) r g b / 12%); }",
-	".am-callout-err { border-left-color: var(--bad); background: rgb(from var(--bad) r g b / 10%); }",
-	".am-callout-title { font-size: 14px; font-weight: 600; }",
-	".am-kv { display: grid; gap: 1px; background: var(--l3, var(--l2)); border: 1px solid var(--l3, var(--l2)); }",
-	...[1, 2, 3, 4, 5, 6].map(cols => `.am-kv-${cols} { grid-template-columns: repeat(${cols}, minmax(0, 1fr)); }`),
-	".am-kv-cell { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; background: var(--card, var(--panel)); }",
-	".am-kv-wide { grid-column: 1 / -1; }",
-	".am-kv-wide .sf-text { font-size: 17px; font-weight: 600; }",
-	".am-kv-key { font-size: 11px; color: var(--t3); }",
-	".am-ask { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border-radius: 6px; background: var(--l1); border: 1px solid var(--l2); }",
-	".am-option { display: flex; align-items: flex-start; gap: 10px; padding: 6px 8px; border-radius: 6px; cursor: pointer; }",
-	".am-option-checked { background: rgb(from var(--accent) r g b / 12%); }",
-	".am-option-text { display: flex; flex-direction: column; gap: 2px; }",
-	".am-option-name { display: flex; align-items: center; gap: 6px; font-weight: 500; }",
-	".am-option-note { font-size: 12px; color: var(--t3); }",
+	".pb-icon-btn { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 6px; color: var(--t2); cursor: pointer; }",
+	".pb-icon-btn:hover { background: var(--l1); }",
+	".pb-chev { transition: transform .12s; }",
+	".pb-open .pb-chev { transform: rotate(90deg); }",
+	".pb-st { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 6px; cursor: pointer; }",
+	".pb-st:hover { background: var(--l1); }",
+	".pb-st-todo { display: inline-block; width: 13px; height: 13px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--t3); }",
+	".pb-st-done { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--ok); color: var(--ok); }",
+	// Card body: one column of sections; a section is a bold head line over its content.
+	".pb-body { display: flex; flex-direction: column; gap: 18px; padding: 2px 4px 4px 0; }",
+	".pb-draft { display: flex; flex-direction: column; gap: 14px; }",
+	".pb-draft-title { margin: 0; font-size: 14px; font-weight: 600; }",
+	".pb-draft-subtitle { margin: 0; color: var(--t2); }",
+	".pb-section { display: flex; flex-direction: column; gap: 6px; }",
+	".pb-ph { display: flex; align-items: baseline; gap: 8px; font-weight: 600; }",
+	".pb-ph-id { color: var(--t3); font-weight: 400; }",
+	".pb-ph-meta { color: var(--t3); font-weight: 400; font-size: 12px; }",
+	".pb-lead { color: var(--t2); }",
+	".pb-editable { min-width: 0; cursor: text; }",
+	".pb-inline { white-space: pre-wrap; }",
+	".pb-inline code { font-family: var(--mono); padding: 0 3px; border-radius: 4px; background: var(--l1); }",
+	// Slot: the current value, underlined, opening its options.
+	".pb-slot { display: inline; padding: 0 2px; border-bottom: 1.5px dashed var(--t3); font-weight: 600; cursor: pointer; }",
+	".pb-slot-open { border-bottom-color: var(--accent); background: rgb(from var(--accent) r g b / 12%); }",
+	".pb-opt { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; width: 100%; padding: 6px 10px; border-radius: 6px; text-align: left; cursor: pointer; }",
+	".pb-opt:hover { background: var(--l1); }",
+	".pb-opt-on { background: rgb(from var(--accent) r g b / 12%); }",
+	".pb-opt-row { display: flex; align-items: center; gap: 8px; }",
+	".pb-opt-label { font-family: var(--sans); font-weight: 500; }",
+	".pb-opt-on .pb-opt-label { color: var(--accent); }",
+	".pb-opt-note { font-size: 12px; color: var(--t2); }",
+	".pb-opt-past { font-size: 11px; color: var(--t3); }",
+	// Lists: an ordered list's items carry a grip that picks the item up; a click on another item places it there.
+	".pb-list { display: flex; flex-direction: column; margin: 0; padding: 0; }",
+	".pb-li { display: flex; align-items: flex-start; gap: 8px; padding: 3px 6px 3px 2px; border-radius: 6px; }",
+	".pb-li-target { cursor: copy; }",
+	".pb-li-target:hover { box-shadow: inset 0 2px 0 var(--accent); }",
+	".pb-grip { flex: 0 0 auto; color: var(--t3); cursor: grab; }",
+	".pb-num { flex: 0 0 18px; color: var(--t2); }",
+	".pb-bullet { flex: 0 0 10px; color: var(--t2); }",
+	".pb-li-text { flex: 1 1 auto; min-width: 0; }",
+	// kv: muted keys beside their values.
+	".pb-kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: 14px; row-gap: 2px; }",
+	".pb-kv-k { color: var(--t2); }",
+	".pb-kv-v { overflow-wrap: anywhere; }",
+	".pb-kv-wide { grid-column: 1 / -1; font-weight: 600; }",
+	// A flow drawn as a chain of cards.
+	".pb-flow { display: flex; flex-direction: column; align-items: center; gap: 0; margin-top: 4px; }",
+	".pb-node { min-width: 200px; max-width: 320px; padding: 6px 14px; border-radius: 8px; box-shadow: inset 0 0 0 1px var(--l3, var(--l2)); background: var(--card, transparent); text-align: center; cursor: pointer; }",
+	".pb-node-round { border-radius: 17px; }",
+	".pb-node-diamond { border-radius: 2px; transform: none; box-shadow: inset 0 0 0 1px var(--l3, var(--l2)), inset 0 0 0 3px var(--l1); }",
+	".pb-node-cylinder { border-radius: 12px / 8px; }",
+	".pb-node-sel { box-shadow: inset 0 0 0 1px var(--accent), 0 0 0 3px rgb(from var(--accent) r g b / 18%); }",
+	".pb-arrow { display: flex; flex-direction: column; align-items: center; color: var(--t3); line-height: 1.2; padding: 2px 0; }",
+	".pb-arrow-dashed { opacity: .7; }",
+	".pb-edge-label { font-size: 11px; color: var(--t2); }",
+	".pb-node-tools { display: flex; gap: 4px; margin-top: 6px; font-family: var(--sans); }",
+	".pb-tool { padding: 2px 8px; border-radius: 6px; box-shadow: inset 0 0 0 1px var(--l2); font-size: 12px; cursor: pointer; }",
+	".pb-tool:hover { background: var(--l1); }",
+	".pb-danger { color: var(--bad); }",
+	// Comments: `//` and muted small text, never a box.
+	".pb-comment { display: flex; gap: 8px; align-items: flex-start; color: var(--t2); font-size: 12px; }",
+	".pb-comment-slash { flex: 0 0 auto; color: var(--t3); }",
+	".pb-comment-text { display: flex; flex-direction: column; gap: 2px; }",
+	".pb-comment .sf-md { font-size: 12px; color: var(--t2); }",
+	".pb-placeholder { color: var(--t3); }",
+	// Card foot: hairline, the SUBAGENT / WORKTREE columns or the completion report, then the full-width button.
+	".pb-foot { display: flex; flex-direction: column; padding-top: 2px; }",
+	".pb-rule { height: 1px; background: var(--l3, var(--l2)); }",
+	".pb-grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 12px; }",
+	".pb-grid2 > div:first-child { padding-right: 12px; min-width: 0; box-shadow: inset -1px 0 0 var(--l3, var(--l2)); }",
+	".pb-grid2 > div:last-child { padding-left: 14px; min-width: 0; }",
+	".pb-label { font-size: 12px; font-weight: 600; letter-spacing: .5px; color: var(--t2); }",
+	".pb-val { margin-top: 2px; font-size: 14px; overflow-wrap: anywhere; cursor: text; }",
+	".pb-launch { display: block; width: 100%; height: 32px; margin-top: 16px; border-radius: 4px; font-family: var(--sans); font-size: 14px; font-weight: 600; line-height: 32px; text-align: center; background: rgb(from var(--accent) r g b / 16%); color: var(--accent); box-shadow: inset 0 0 0 1px rgb(from var(--accent) r g b / 45%); cursor: pointer; }",
+	".pb-launch-stop { background: transparent; color: var(--bad); box-shadow: inset 0 0 0 1px rgb(from var(--bad) r g b / 50%); }",
+	".pb-launch-off { opacity: .5; cursor: default; }",
+	".pb-report-toggle { display: flex; align-items: center; gap: 6px; margin-top: 8px; height: 28px; font-size: 12px; font-weight: 600; letter-spacing: .5px; color: var(--ok); cursor: pointer; }",
+	".pb-report-meta { color: var(--t3); font-weight: 400; letter-spacing: 0; }",
+	".pb-report { margin: 2px 0 0 5px; padding: 2px 0 2px 24px; box-shadow: inset 1px 0 0 var(--l3, var(--l2)); }",
+	// The menu and the slot picker are overlays; their buttons need a look of their own.
+	".pb-menu-item { display: block; width: 100%; padding: 4px 10px; border-radius: 6px; font-family: var(--sans); text-align: left; cursor: pointer; }",
+	".pb-menu-item:hover { background: var(--l1); }",
+	".pb-bar { display: flex; gap: 8px; padding: 6px 16px; }",
+	".pb-bar .pb-launch { margin-top: 0; flex: 1 1 auto; }",
+	".pb-ghost { flex: 0 0 auto; padding: 0 12px; height: 32px; border-radius: 4px; color: var(--t2); box-shadow: inset 0 0 0 1px var(--l2); font-family: var(--sans); font-size: 14px; line-height: 32px; cursor: pointer; }",
+	".pb-view-switch { display: flex; gap: 6px; font-size: 12px; }",
+	".pb-view { padding: 0 6px; border-radius: 4px; color: var(--t2); cursor: pointer; }",
+	".pb-view-on { color: var(--accent); background: rgb(from var(--accent) r g b / 12%); }",
 ].join("\n");
 
-type ButtonKind = "default" | "primary" | "danger" | "ghost";
 type Caret = { cursor: number; anchor: number | null };
-type UndoStep = Caret & { text: string };
-type Field = { readonly multiline: boolean; text(): string; write(text: string): string | null };
-type Summary = Pick<RenderStatus, "chartNodes" | "view" | "draftErrors">;
-/** A refused human action, shown at the control that caused it until the next action. */
-type ActionError = { readonly message: string; readonly anchor: string | null; readonly needsCoordinator: boolean };
-/** What the detail column shows: one block, the Run's activity, or the compiled selection. */
-type Current = { readonly kind: "block"; readonly block: BlockId } | { readonly kind: "activity" } | { readonly kind: "selection" };
-type Chip = { readonly text: string; readonly tone: string };
 
-const text = (id: string, value: string, tone?: string): TspNode => ({ id, k: "text", p: { text: value, ...(tone ? { tone } : {}) } });
-const badge = (id: string, value: string, tone?: string): TspNode => ({ id, k: "badge", p: { text: value, ...(tone ? { tone } : {}) } });
-const col = (id: string, c: readonly TspNode[]): TspNode => ({ id, k: "col", p: { gap: "sm" }, c });
-const row = (id: string, c: readonly TspNode[]): TspNode => ({ id, k: "row", p: { gap: "sm", wrap: true, align: "center" }, c });
-const box = (id: string, className: string, c: readonly TspNode[], extra: Record<string, unknown> = {}): TspNode => ({ id, k: "el", p: { tag: "div", class: className, ...extra }, c });
-const time = (at: number | null): string => at === null ? "无" : `${new Date(at).toISOString().slice(0, 19).replace("T", " ")} UTC`;
-const clock = (at: number): string => new Date(at).toISOString().slice(11, 16);
-
-function blockKindLabel(content: BlockContent): "设计块" | "编排块" | "执行块" {
-	if (content.kind === "design") return "设计块";
-	return isOrchestration(content) ? "编排块" : "执行块";
+/** The one piece of text being edited in place; it is applied when editing ends (Enter, Esc, or another action). */
+interface Editing {
+	/** The editable node; its field is `${id}.edit`. */
+	readonly id: string;
+	readonly multiline: boolean;
+	readonly placeholder: string;
+	readonly initial: string;
+	/** Apply the edited text; an error message, or null. */
+	readonly commit: (text: string) => string | null;
+	text: string;
+	caret: Caret;
+	readonly undo: { text: string; caret: Caret }[];
 }
 
-function compileErrorText(error: CompileError): string {
-	const site = `（位于 ${error.at.block} 的引用 ${error.at.reference}）`;
-	switch (error.kind) {
-		case "UnknownBlock": return `引用的块 ${error.block} 不存在${site}`;
-		case "UnknownTarget": return `无法识别的引用目标${site}`;
-		case "BadExpression": return `引用选择器无效：${error.reason}${site}`;
-		case "Cycle": return `循环引用：${error.path.join(" → ")}${site}`;
-		case "TooDeep": return `块引用超过 8 层${site}`;
-		case "NoResult": return `块 ${error.block} 还没有关联的 result 记录${site}`;
-		case "FetchFailed": return `外部引用 ${error.target} 取回失败：${error.error}${site}`;
-	}
+/** An open slot picker: the slot, where it is drawn, and how a picked value is applied. */
+interface Picker {
+	readonly anchor: string;
+	readonly slot: SlotDecl;
+	readonly apply: (value: string) => string | null;
 }
 
-const compileText = (result: CompileResult): string => result.kind === "Ok" ? result.text : compileErrorText(result.error);
+type Handler = { click?: (mods: readonly string[]) => void; dblclick?: () => void };
 
-function sourcesText(sources: readonly Source[]): string {
-	if (sources.length === 0) return "引用来源：无";
-	return "引用来源：" + sources.map(source => {
-		const expression = source.expression ? ` | ${source.expression}` : "";
-		switch (source.kind) {
-			case "block": return `块 ${source.target}${expression}`;
-			case "result": return `结果 ${source.target}${expression} (#${source.seq})`;
-			case "external": return `外部 ${source.target}${expression}（${time(source.fetchedAt)}）`;
-		}
-	}).join("；");
-}
-
-function excerpt(value: string, max = 96): string {
-	const single = value.replace(/\s+/g, " ").trim();
-	if (!single) return "（空）";
-	return single.length <= max ? single : `${single.slice(0, max)}…`;
-}
-
-function describeEntry(data: Exclude<EntryData, { type: "post" }>): string {
-	switch (data.type) {
-		case "run_started": return `开始 Run「${data.name}」`;
-		case "run_finished": return "结束 Run";
-		case "block_edited": return `修改块 ${data.block} 的${FIELD_LABELS[data.field]}：${excerpt(data.text)}`;
-		case "block_added": return `新建${blockKindLabel(data.content)} ${data.block}${data.title.trim() ? `「${data.title.trim()}」` : ""}`;
-		case "block_deleted": return `删除${blockKindLabel(data.content)} ${data.block}${data.title.trim() ? `「${data.title.trim()}」` : ""}`;
-		case "content_replaced": return `替换块 ${data.block} 的内容或执行配置`;
-		case "blocks_reordered": return `调整块顺序：${data.order.join(" → ")}`;
-		case "done_changed": return `块 ${data.block} 标为${data.done ? "已完成" : "未完成"}`;
-		case "launch_created": return `创建 Launch ${data.launch}（${data.kind === "orchestration" ? "编排" : "执行"} · 块 ${data.blocks.join("、")}）`;
-		case "agent_bound": return `Launch ${data.launch} 绑定 Agent ${data.agent}`;
-		case "launch_closed": return `关闭 Launch ${data.launch}`;
-		case "event_sent": return `通知协调者：${EVENT_LABELS[data.event]}`;
-		case "interrupted": return `打断协调者在块 ${data.block} 上的编辑`;
-		case "check_reported": return `记录块 ${data.blocks.join("、")} 的检查报告`;
-		case "update_due": return `状态更新到期（${time(data.due)}）`;
-		case "update_snoozed": return `状态更新提醒推迟到 ${time(data.due)}`;
-	}
-}
-
-/** Blocks an event payload names; `event_sent` carries the K1 payload as `unknown`. */
-function eventBlocks(data: unknown): readonly string[] {
-	if (typeof data !== "object" || data === null) return [];
-	if ("blocks" in data && Array.isArray(data.blocks)) return data.blocks.filter((value): value is string => typeof value === "string");
-	if ("block" in data && typeof data.block === "string") return [data.block];
-	return [];
-}
-
-/** Largest file a draft may embed (am's image limit; code blocks stop far earlier). */
+/** Largest file a text may embed (am's image limit; code blocks stop far earlier). */
 const MAX_DRAFT_FILE_BYTES = 5 * 1024 * 1024;
 
-/** Read a file a design draft names: relative to the Playbook directory, only inside it, only a regular file of bounded size. */
+/** Read a file a drawn text names: relative to the Playbook directory, only inside it, only a regular file of bounded size. */
 function readDraftFile(baseDir: string, path: string): FileRead {
 	try {
 		const base = realpathSync(baseDir);
@@ -265,823 +170,465 @@ function readDraftFile(baseDir: string, path: string): FileRead {
 	}
 }
 
-/** K4 front end. Core owns every document, lock and draft; local state is only interaction state. */
+const el = (id: string, tag: string, className: string, c: readonly TspNode[] = [], extra: Record<string, unknown> = {}): TspNode => ({ id, k: "el", p: { tag, class: className, ...extra }, c });
+
+/** An ordered list's items in a new order, renumbered from `start`, keeping the separators the list had. */
+function reorderedList(source: string, span: Span, items: readonly ListItem[], order: readonly number[], start: number): string {
+	const texts = items.map(item => source.slice(item.span.start, item.span.end));
+	const gaps = items.slice(1).map((item, index) => source.slice(items[index]!.span.end, item.span.start));
+	return order.map((from, position) => texts[from]!.replace(/^( {0,3})\d{1,9}([.)])/, (_, indent: string, delimiter: string) => `${indent}${start + position}${delimiter}`) + (position < gaps.length ? gaps[position]! : "")).join("") + source.slice(items.at(-1)!.span.end, span.end);
+}
+
+/** K4 front end. Core owns every document; this keeps only what the pane shows and what is being edited. */
 export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 	initThemeSync();
-	setTableCharts("always");
-	let ref: DocRef = { kind: "template" };
 	let opened = false;
 	let mounted = false;
-	let focus: string | null = null;
-	/** The field committed last, until the human focuses a field again: input arriving for it is late (K4 错误). */
-	let committed: string | null = null;
-	/** Tern render or theme failure; stays until dismissed. */
+	/** Tern render or theme failure; stays until the next one. */
 	let renderError: string | null = null;
-	let actionError: ActionError | null = null;
-	let current: Current | null = null;
-	let confirmDelete: BlockId | null = null;
-	/** The Run whose 结束 Run is waiting for confirmation. */
-	let confirmFinish: RunId | null = null;
-	/** A block shown read-only above whichever block is open, for reading two blocks together. */
-	let pinned: BlockId | null = null;
-	let runName = "";
-	let runEvery = "";
-	let postText = "";
-	let postNext = "";
-	let postKind: RecordKind = "update";
-	let postBlock: BlockId | null = null;
-	/** The person picked the related block; until then it follows the last opened block. */
-	let postBlockChosen = false;
-	/** The related-block picker lists every block instead of the usual few. */
-	let allPostBlocks = false;
-	/** The block opened last in this view, the default subject of a new record. */
-	let lastBlock: BlockId | null = null;
-	let postKindChosen = false;
-	let filter: EntryData["type"] | "all" = "all";
-	let snoozeAfter = 900;
-	/** Last status seen per Run, to reset the record form once when a Run finishes. */
-	const runStatus = new Map<RunId, RunStatus>();
-	/**
-	 * The design text when this pane submitted a template change request, by block: the template has no
-	 * timeline, so "the design changed after the request" can only be seen by comparing with this.
-	 */
-	const designAtRequest = new Map<BlockId, { readonly seq: number; readonly design: string }>();
+	/** The one open card. */
+	let open: BlockId | null = null;
+	let openChosen = false;
+	let menu: BlockId | null = null;
+	let editing: Editing | null = null;
+	let picker: Picker | null = null;
+	/** An ordered list item picked up to be placed elsewhere. */
+	let picked: { readonly list: string; readonly from: number } | null = null;
+	/** The selected node of a chain flow, which shows its tools. */
+	let node: { readonly chain: string; readonly index: number } | null = null;
+	/** A notice shown once: it is added to the layer by itself and replaced by the next one. */
+	let toast: { readonly text: string; readonly tone: "error" | "success"; readonly n: number } | null = null;
+	let shownToast: number | null = null;
+	let toastCount = 0;
+	/** The slot picker as it was before the current action ended an edit, so a click on its slot closes it. */
+	let pickerBefore: string | null = null;
+	let titleTimer: Timer | undefined;
 	const selected = new Set<BlockId>();
-	const carets = new Map<string, Caret>();
-	const undo = new Map<string, UndoStep[]>();
-	/** A field's last outcome next to it: a refused late input, or the save that just happened. UI state only. */
-	const notices = new Map<string, { readonly text: string; readonly tone: "warning" | "success" }>();
-	const previews = new Map<string, CompileResult>();
-	const summaries = new Map<BlockId, Summary>();
-	const actions = new Map<string, () => void>();
-	const changes = new Map<string, (event: Extract<TspEvent, { ev: "change" }>) => void>();
-	const fields = new Map<string, Field>();
-	/** Opened Launch records: copies of `core.launchInfo(id)`, refreshed on every Core change. */
-	const info = new Map<LaunchId, Launch>();
-	/** View of each marked draft component, by `<block>.<component key>`; UI state only. */
+	const reports = new Set<BlockId>();
+	const handlers = new Map<string, Handler>();
 	const views = new Map<string, ChangeView>();
+	const summaries = new Map<BlockId, Pick<RenderStatus, "view" | "draftErrors">>();
 	const sentBlobs = new Set<string>();
+
+	function notify(text: string, tone: "error" | "success" = "error"): void {
+		toast = { text, tone, n: ++toastCount };
+	}
+	function outcome(error: string | null): void {
+		if (error) notify(error);
+	}
+	function on(id: string, handler: Handler): void {
+		handlers.set(id, { ...handlers.get(id), ...handler });
+	}
+
+	// ------------------------------------------------------------ in-place editing
+
+	function startEdit(id: string, initial: string, multiline: boolean, commit: (text: string) => string | null, placeholder = ""): void {
+		if (editing && editing.id !== id) finishEdit();
+		editing = { id, multiline, placeholder, initial, commit, text: initial, caret: { cursor: initial.length, anchor: null }, undo: [] };
+		menu = null;
+	}
+	function finishEdit(): void {
+		const done = editing;
+		if (!done) return;
+		editing = null;
+		// Enter or Esc in the picker's own field, or any action elsewhere, closes the picker.
+		if (done.id === "picker.custom") picker = null;
+		if (done.text !== done.initial) outcome(done.commit(done.text));
+	}
+	function editor(state: Editing): TspNode {
+		return { id: `${state.id}.edit`, k: state.multiline ? "editor" : "input", p: { text: state.text, cursor: state.caret.cursor, anchor: state.caret.anchor, placeholder: state.placeholder, aria: state.placeholder || "编辑", ...(state.multiline ? { maxLines: 18 } : {}) } };
+	}
+	/** A view that turns into its editor on double-click. */
+	function editable(id: string, view: TspNode, initial: () => string, multiline: boolean, commit: (text: string) => string | null, placeholder = "", tag = "div"): TspNode {
+		if (editing?.id === id) return editor(editing);
+		on(id, { dblclick: () => startEdit(id, initial(), multiline, commit, placeholder) });
+		return el(id, tag, "pb-editable", [view], { actions: { dblclick: "edit" } });
+	}
+
+	// ------------------------------------------------------------ drawing one block field
 
 	function imageNode(id: string, bytes: Uint8Array, mime: string, alt: string, size?: { readonly w: number; readonly h: number }): TspNode {
 		const blob = createHash("sha256").update(bytes).digest("hex");
 		if (!sentBlobs.has(blob)) { tsp.blob(blob, mime, bytes); sentBlobs.add(blob); }
-		// The cap is the SVG's own width in px (1 user unit = 1px): a `ch` cap shrank drawings by the font's ch/8px ratio.
-		return { id, k: "image", p: { blob, alt, ...(size ? { w: size.w, h: size.h, max: { w: `${Math.round(size.w)}px` } } : {}) } };
+		return { id, k: "image", p: { blob, alt, ...(size ? { w: size.w, h: size.h } : {}) } };
 	}
-	function draftHost(block: BlockId): DraftHost {
+
+	/**
+	 * How a person changes one field of a block: a task body is written directly; a design is the
+	 * coordinator's, so a person's change to it (a slot value) goes as a change request.
+	 */
+	function fieldHost(block: Block, field: "body" | "design", source: string): EditHost {
+		const slots = parseSlots(source).slots;
+		const writable = field === "body";
+		const write = (next: string): string | null => next === source ? null : core.edit(REF, block.id, "body", source, next);
+		const replace = (span: Span, text: string): string | null => write(source.slice(0, span.start) + text + source.slice(span.end));
 		return {
-			id: `${block}.design.view`,
+			text(id, span, multiline, view) {
+				return writable ? editable(id, view, () => source.slice(span.start, span.end), multiline, text => replace(span, text)) : view;
+			},
+			slot(id, name) {
+				const slot = slots.get(name)!;
+				const apply = (value: string): string | null => {
+					if (value === slot.value) return null;
+					if (!writable) return core.requestRevision(REF, block.id, `把槽位「${name}」改为「${value}」`);
+					const next = setSlotValue(source, name, value);
+					return next === null ? `槽位 ${name} 不存在` : write(next);
+				};
+				on(id, { click: () => {
+					if (pickerBefore === id) { picker = null; return; }
+					picker = { anchor: id, slot, apply };
+					startEdit("picker.custom", "", false, value => value.trim() ? apply(value.trim()) : null, "自定义…");
+				} });
+				return el(id, "span", `pb-slot${picker?.anchor === id ? " pb-slot-open" : ""}`, [], { text: slot.value, actions: { click: "invoke" } });
+			},
+			list(id, span, ordered, start, items) {
+				const sortable = ordered && writable && items.length > 1;
+				const holding = picked?.list === id ? picked.from : null;
+				return el(id, ordered ? "ol" : "ul", "pb-list", items.map((item, index): TspNode => {
+					const itemId = `${id}.li${index}`;
+					const marker: TspNode = ordered ? el(`${itemId}.num`, "span", "pb-num", [], { text: `${start + index}.` }) : el(`${itemId}.dot`, "span", "pb-bullet", [], { text: "•" });
+					const content = el(`${itemId}.text`, "div", "pb-li-text", [item.node]);
+					if (!sortable) return el(itemId, "li", "pb-li", [marker, content]);
+					const grip = `${itemId}.grip`;
+					on(grip, { click: () => { picked = holding === index ? null : { list: id, from: index }; } });
+					const target = holding !== null && holding !== index;
+					if (target) on(itemId, { click: () => {
+						const order = items.map((_, position) => position);
+						order.splice(index, 0, ...order.splice(holding, 1));
+						picked = null;
+						outcome(replace(span, reorderedList(source, span, items, order, start)));
+					} });
+					return el(itemId, "li", `pb-li${target ? " pb-li-target" : ""}`, [
+						{ id: grip, k: "icon", p: { name: "grip", aria: holding === index ? "放下" : "拾起", actions: { click: "invoke" } } },
+						marker, content,
+					], { ...(holding === index ? { mark: "pick" } : {}), ...(target ? { actions: { click: "invoke" } } : {}) });
+				}));
+			},
+			chain(id, body, chain) {
+				const chosen = node?.chain === id ? node.index : null;
+				const parts: TspNode[] = [];
+				chain.nodes.forEach((item, index) => {
+					if (index > 0) {
+						const edge = chain.edges[index - 1]!;
+						parts.push(el(`${id}.e${index}`, "div", `pb-arrow${edge.dashed ? " pb-arrow-dashed" : ""}`, [
+							el(`${id}.e${index}.glyph`, "span", "", [], { text: edge.dashed ? "┊" : "↓" }),
+							...(edge.label ? [el(`${id}.e${index}.label`, "span", "pb-edge-label", [], { text: edge.label })] : []),
+						]));
+					}
+					const nodeId = `${id}.n${index}`;
+					if (editing?.id === nodeId) { parts.push(editor(editing)); return; }
+					const card = el(nodeId, "div", `pb-node pb-node-${item.shape}${chosen === index ? " pb-node-sel" : ""}`, [], { text: item.label, ...(writable ? { actions: { click: "invoke", dblclick: "edit" } } : {}) });
+					parts.push(card);
+					if (!writable) return;
+					on(nodeId, {
+						click: () => { node = chosen === index ? null : { chain: id, index }; },
+						dblclick: () => {
+							node = { chain: id, index };
+							startEdit(nodeId, item.label, false, text => {
+								if (item.slot !== null) {
+									const next = setSlotValue(source, item.slot, text.trim());
+									return next === null ? `槽位 ${item.slot} 不存在` : write(next);
+								}
+								const next = chain.rename(index, text);
+								return next === null ? "节点名称不能为空，也不能与其他节点重名" : replace(body, next);
+							});
+						},
+					});
+					if (chosen !== index) return;
+					const tools: TspNode[] = [el(`${nodeId}.add`, "span", "pb-tool", [], { text: "+ 下方节点", actions: { click: "invoke" } })];
+					on(`${nodeId}.add`, { click: () => { node = { chain: id, index: index + 1 }; outcome(replace(body, chain.insertAfter(index))); } });
+					if (item.slot === null && chain.nodes.length > 2) {
+						tools.push(el(`${nodeId}.del`, "span", "pb-tool pb-danger", [], { text: "删除", actions: { click: "invoke" } }));
+						on(`${nodeId}.del`, { click: () => { node = null; const next = chain.remove(index); outcome(next === null ? "流程至少保留两个节点" : replace(body, next)); } });
+					}
+					parts.push(el(`${nodeId}.tools`, "div", "pb-node-tools", tools));
+				});
+				return el(id, "div", "pb-flow", parts);
+			},
+		};
+	}
+
+	function draft(block: Block, field: "body" | "design", source: string): { readonly nodes: readonly TspNode[]; readonly errors: number } {
+		const host: DraftHost = {
+			id: `${block.id}.${field}`,
 			context: {
 				// Resolved per draw, so a theme change redraws figures in the new palette.
 				svg: (id, svg, size, alt) => imageNode(id, new TextEncoder().encode(prepareSvg(svg, svgFigurePalette())), "image/svg+xml", alt, size),
 				image: (id, bytes, mime, alt) => imageNode(id, bytes, mime, alt),
 				readFile: path => readDraftFile(baseDir, path),
 			},
-			view: key => views.get(`${block}.${key}`) ?? "changes",
-			viewSwitch: (id, key, currentView) => row(id, VIEWS.map(option => check(`${id}.${option.view}`, option.label, currentView === option.view, false, checked => { if (checked) { views.set(`${block}.${key}`, option.view); redraw(); } }, id, option.view))),
+			edit: fieldHost(block, field, source),
+			view: key => views.get(`${block.id}.${key}`) ?? "changes",
+			viewSwitch: (id, key, current) => el(id, "div", "pb-view-switch", VIEWS.map(option => {
+				const optionId = `${id}.${option.view}`;
+				on(optionId, { click: () => { views.set(`${block.id}.${key}`, option.view); } });
+				return el(optionId, "span", `pb-view${current === option.view ? " pb-view-on" : ""}`, [], { text: option.label, actions: { click: "invoke" } });
+			})),
 		};
-	}
-	function startDraft(block: BlockId, name: HumanField): void {
-		const error = core.pencil(ref, block, name);
-		if (error) return showError(error, `${block}.${name}`);
-		current = { kind: "block", block };
-		focus = `${block}.${name}`; committed = null;
-		carets.delete(focus); undo.delete(focus); notices.delete(focus);
-		redraw();
-	}
-	function discardDraft(block: BlockId, fieldId: string): void {
-		const error = core.discard(ref, block);
-		if (error) return showError(error, fieldId);
-		if (focus === fieldId) focus = null;
-		carets.delete(fieldId); undo.delete(fieldId); notices.delete(fieldId);
-		redraw();
-	}
-	function draftField(block: BlockId, name: HumanField): TspNode {
-		return field(`${block}.${name}`, { multiline: name !== "title", text: () => {
-			const item = core.view(ref).blocks.find(candidate => candidate.block.id === block);
-			const lock = item?.lock;
-			if (lock?.kind === "human" && lock.field === name) return lock.draft;
-			return name === "prompt" || !item ? "" : fieldText(item.block, name) ?? "";
-		}, write: draft => core.setDraft(ref, block, draft) }, name === "prompt" ? "写给协调者：哪里要改、改成什么" : `${block} ${LABELS[name]}`);
-	}
-	/**
-	 * Option inputs of an ask in `block`'s visible draft. A pick is a line of the block's change-request
-	 * draft (Core holds it), so the shown selection is read back from that draft, never kept here.
-	 */
-	function askControl(block: BlockId, editable: boolean): NonNullable<DraftHost["askControl"]> {
-		return (id, _key, spec) => {
-			const item = core.view(ref).blocks.find(candidate => candidate.block.id === block);
-			const draft = item?.lock.kind === "human" && item.lock.field === "prompt" ? item.lock.draft : "";
-			const prefix = `针对问题「${spec.question}」，选择：`;
-			const line = draft.split("\n").find(entry => entry.startsWith(prefix));
-			const chosen = line ? line.slice(prefix.length).split("、").filter(Boolean) : [];
-			const options = spec.options.map((option, index): TspNode => {
-				const optionId = `${id}.${index}`;
-				const checked = chosen.includes(option.label);
-				if (editable) changes.set(optionId, event => {
-					if (typeof event.checked !== "boolean") return;
-					const next = spec.mode === "single"
-						? (event.checked ? [option.label] : chosen)
-						: spec.options.map(other => other.label).filter(label => label === option.label ? event.checked === true : chosen.includes(label));
-					writeAnswer(block, prefix, next);
-				});
-				return { id: `${optionId}.label`, k: "el", p: { tag: "label", class: `am-option${checked ? " am-option-checked" : ""}${editable ? "" : " pb-choice-disabled"}` }, c: [
-					{ id: optionId, k: "el", p: { tag: "input", type: spec.mode === "single" ? "radio" : "checkbox", name: spec.mode === "single" ? id : optionId, value: option.label, checked, disabled: !editable } },
-					{ id: `${optionId}.text`, k: "el", p: { tag: "div", class: "am-option-text" }, c: [
-						{ id: `${optionId}.name`, k: "el", p: { tag: "span", class: "am-option-name" }, c: [text(`${optionId}.label.text`, option.label), ...(option.suggested ? [badge(`${optionId}.suggested`, "建议", "accent")] : [])] },
-						...(option.note ? [{ id: `${optionId}.note`, k: "el", p: { tag: "span", class: "am-option-note", text: option.note } }] : []),
-					] },
-				] };
-			});
-			// A pick is only a draft line: say so next to the question and offer the submit right there.
-			const status = chosen.length
-				? row(`${id}.chosen`, [badge(`${id}.chosen.badge`, "仅在草稿中，未提交", "warning"), text(`${id}.chosen.text`, `已写入下方修改要求：${chosen.join("、")}`, "muted"), button(`${id}.submit`, "提交修改要求", () => submitPrompt(block), !editable, "primary")])
-				: text(`${id}.chosen`, "选择会写入下方修改要求草稿，不会立即发出", "muted");
-			return [col(`${id}.options`, options), status];
-		};
-	}
-	/** Put an ask's answer into the block's change-request draft as one line, opening the draft when needed. */
-	function writeAnswer(block: BlockId, prefix: string, labels: readonly string[]): void {
-		const item = core.view(ref).blocks.find(candidate => candidate.block.id === block);
-		if (!(item?.lock.kind === "human" && item.lock.field === "prompt")) {
-			const started = core.pencil(ref, block, "prompt");
-			if (started) return showError(started, `${block}.prompt`);
-			carets.delete(`${block}.prompt`); undo.delete(`${block}.prompt`);
-		}
-		const lock = core.view(ref).blocks.find(candidate => candidate.block.id === block)?.lock;
-		const draft = lock?.kind === "human" ? lock.draft : "";
-		// The person's own lines, blank ones included, stay as written; only this ask's line changes.
-		const lines = draft === "" ? [] : draft.split("\n");
-		const at = lines.findIndex(entry => entry.startsWith(prefix));
-		const answer = labels.length ? [`${prefix}${labels.join("、")}`] : [];
-		if (at >= 0) lines.splice(at, 1, ...answer);
-		else if (answer.length) {
-			if (lines.at(-1) === "") lines.pop();
-			lines.push(...answer);
-		}
-		const drafted = core.setDraft(ref, block, lines.join("\n"));
-		if (drafted) return showError(drafted, `${block}.prompt`);
-		carets.delete(`${block}.prompt`);
-		focus = `${block}.prompt`; committed = null;
-	}
-	function submitPrompt(block: BlockId): void {
-		const before = core.view(ref).blocks.find(item => item.block.id === block)?.block.content;
-		const error = core.commit(ref, block);
-		if (error) return showError(error, `${block}.prompt`);
-		const last = core.revisions(ref, block).at(-1);
-		if (last && before?.kind === "design") designAtRequest.set(block, { seq: last.seq, design: before.design });
-		// Input that arrives for the submitted editor is late and is shown, as for committed fields.
-		committed = `${block}.prompt`;
-		focus = null;
-		redraw();
-	}
-	/** Insert a block after the shown one, show it and open its title editor: the new id is read back from Core, never guessed. */
-	function insertAndEdit(after: BlockId | null, kind: BlockContent["kind"], anchor: string): void {
-		const before = new Set(core.view(ref).blocks.map(item => item.block.id));
-		const error = core.insertBlock(ref, after, kind);
-		if (error) return showError(error, anchor);
-		const created = core.view(ref).blocks.find(item => !before.has(item.block.id));
-		if (!created) return redraw();
-		current = { kind: "block", block: created.block.id };
-		if (anyDraft()) redraw(); else startDraft(created.block.id, "title");
-	}
-	function anyDraft(): boolean {
-		return [core.view({ kind: "template" }), ...core.runs().map(run => core.view({ kind: "run", run: run.id }))].some(doc => doc.blocks.some(item => item.lock.kind === "human"));
-	}
-	function resetRecordForm(): void {
-		postKind = "retrospective"; postBlock = null; postBlockChosen = false; postKindChosen = false; postNext = "";
+		const drawn = renderDraft(source, host);
+		return { nodes: drawn.nodes, errors: drawn.diagnostics.filter(found => found.severity === "error").length };
 	}
 
-	function showError(error: string | null, anchor: string | null = null): void {
-		if (!error) return;
-		actionError = { message: error, anchor, needsCoordinator: error.includes("没有协调者连接") };
-		redraw();
-	}
-	function inlineError(anchor: string): TspNode[] {
-		return actionError?.anchor === anchor ? [text(`${anchor}.error`, actionError.message, "error")] : [];
-	}
-	function button(id: string, label: string, action: () => void, disabled = false, kind: ButtonKind = "default"): TspNode {
-		if (!disabled) actions.set(id, action);
-		return { id, k: "el", p: { tag: "button", text: label, class: `pb-button${kind === "default" ? "" : ` pb-button-${kind}`}${disabled ? " pb-disabled" : ""}`, attrs: { "aria-disabled": disabled }, ...(disabled ? {} : { actions: { click: "invoke" } }) } };
-	}
-	function check(id: string, label: string, checked: boolean, disabled: boolean, change: (checked: boolean) => void, name?: string, value?: string): TspNode {
-		if (!disabled) changes.set(id, event => { if (typeof event.checked === "boolean") change(event.checked); });
-		return { id: `${id}.label`, k: "el", p: { tag: "label", class: `pb-choice${checked ? " pb-choice-checked" : ""}${disabled ? " pb-choice-disabled" : ""}` }, c: [{ id, k: "el", p: { tag: "input", type: name ? "radio" : "checkbox", name: name ?? id, value: value ?? id, checked, disabled } }, text(`${id}.text`, label)] };
-	}
-	function choices<T extends string>(id: string, values: readonly T[], value: T, change: (value: T) => void, disabled = false, labelOf: (value: T) => string = item => item): TspNode {
-		return row(id, values.map(item => check(`${id}.${item}`, labelOf(item), value === item, disabled, checked => { if (checked) { change(item); redraw(); } }, id, item)));
-	}
-	function field(id: string, value: Field, placeholder: string): TspNode {
-		fields.set(id, value);
-		const caret = carets.get(id) ?? { cursor: value.text().length, anchor: null };
-		carets.set(id, caret);
-		return { id, k: value.multiline ? "editor" : "input", p: { text: value.text(), cursor: caret.cursor, anchor: caret.anchor, placeholder, aria: placeholder, ...(value.multiline ? { maxLines: 18 } : {}) } };
-	}
-	function formField(id: string, get: () => string, put: (value: string) => void, placeholder: string, multiline = false): TspNode {
-		return field(id, { multiline, text: get, write: value => { put(value); return null; } }, placeholder);
-	}
-	function labeled(id: string, label: string, control: TspNode, wide = false): TspNode {
-		return box(`${id}.group`, wide ? "pb-field-wide" : "pb-field", [text(`${id}.caption`, label, "muted"), control]);
-	}
-	function section(id: string, head: string | TspNode, c: readonly TspNode[], key = id, startCollapsed = false): TspNode {
-		return { id, k: "section", p: { head: typeof head === "string" ? head : head.id, key, collapsible: true, collapsed: startCollapsed }, c: typeof head === "string" ? c : [head, ...c] };
-	}
-	function panel(id: string, title: string, head: readonly TspNode[], c: readonly TspNode[]): TspNode {
-		return box(id, "pb-panel", [box(`${id}.head`, "pb-panel-head", [{ id: `${id}.title`, k: "el", p: { tag: "span", class: "pb-panel-title", text: title } }, ...head]), ...c]);
-	}
-	function rendered(id: string, body: string): TspNode[] {
-		return splitTableCharts(separateTableReferences(body), false).flatMap((segment, index): TspNode[] => {
-			const nodeId = `${id}.${index}`;
-			if (segment.kind === "markdown") return [{ id: nodeId, k: "md", p: { text: segment.text } }];
-			const chart = lookupTableChart(segment.table);
-			if (!chart || chart instanceof Promise) throw new Error("always-mode chart lookup did not return a chart");
-			return [imageNode(nodeId, new TextEncoder().encode(prepareSvg(chart, svgFigurePalette())), "image/svg+xml", "表格图表")];
-		});
-	}
-	function record(id: string, entry: TimelineEntry): TspNode {
-		const data = entry.data;
-		const meta = text(`${id}.meta`, `#${entry.seq} · ${time(entry.at)} · ${TYPE_LABELS[data.type]} · ${ORIGIN_LABELS[entry.origin]}`, "muted");
-		if (data.type !== "post") return col(id, [meta, text(`${id}.content`, describeEntry(data))]);
-		const head = [`**${RECORD_LABELS[data.kind]}**`, ...(data.block ? [`关联块 ${data.block}`] : []), ...(data.launch ? [`Launch ${data.launch}`] : [])].join(" · ");
-		return col(id, [meta, { id: `${id}.content`, k: "md", p: { text: `${head}\n\n${data.text}` } }, ...(data.quote ? [text(`${id}.quote`, `取自会话 ${data.session ?? "未提供"} 的消息 ${data.quote}`, "muted")] : [])]);
-	}
+	// ------------------------------------------------------------ cards
 
-	// ------------------------------------------------------------ derived block state
-
-	/** Entries of the Run timeline that concern `block`, oldest first. */
-	function blockHistory(view: DocView, block: BlockId): TimelineEntry[] {
-		const launches = new Set<string>();
-		return view.timeline.filter(entry => {
-			const data = entry.data;
-			switch (data.type) {
-				case "launch_created": if (data.blocks.includes(block)) { launches.add(data.launch); return true; } return false;
-				case "agent_bound": case "launch_closed": return launches.has(data.launch);
-				case "post": return data.block === block;
-				case "done_changed": case "block_edited": case "content_replaced": case "interrupted": case "block_added": return data.block === block;
-				case "event_sent": return (data.event === "launch_requested" || data.event === "check_requested") && eventBlocks(data.data).includes(block);
-				case "check_reported": return data.blocks.includes(block);
-				case "run_started": case "run_finished": case "block_deleted": case "blocks_reordered": case "update_due": case "update_snoozed": return false;
-			}
-		});
-	}
-	/** Open Launches started for `item` itself; `item.launches` also lists Launches that only reference it. */
-	function rootLaunches(view: DocView, item: BlockView): BlockView["launches"] {
-		const roots = new Set(view.timeline.flatMap(entry => entry.data.type === "launch_created" && entry.data.blocks.includes(item.block.id) ? [entry.data.launch] : []));
-		return item.launches.filter(launch => roots.has(launch.id));
-	}
-	/** The pinned block, read-only: a design's drawing or a task's body, with a way to open or unpin it. */
-	function pinnedPanel(item: BlockView): TspNode {
-		const id = `pin.${item.block.id}`;
-		const body = item.block.content.kind === "design"
-			? renderDraft(item.block.content.design, { ...draftHost(item.block.id), id: `${id}.design`, view: () => "changes" }).nodes
-			: rendered(`${id}.body`, item.block.content.body);
-		return panel(id, `参考 · ${item.block.id} ${item.block.title.trim()}`, [
-			button(`${id}.open`, "打开", () => { current = { kind: "block", block: item.block.id }; redraw(); }, false, "ghost"),
-			button(`${id}.unpin`, "取消参考", () => { pinned = null; redraw(); }, false, "ghost"),
-		], [box(`${id}.doc`, "pb-pinned", body)]);
-	}
-	/** A launch request for `block` that no Launch has answered yet, read from the Run timeline. */
-	function launchPending(view: DocView, block: BlockId): TimelineEntry | null {
-		let pending: TimelineEntry | null = null;
-		for (const entry of view.timeline) {
-			const data = entry.data;
-			if (data.type === "event_sent" && data.event === "launch_requested" && eventBlocks(data.data).includes(block)) pending = entry;
-			if (data.type === "launch_created" && data.blocks.includes(block)) pending = null;
-		}
-		return pending;
-	}
-	/** Where the latest change request of a design block stands, from what this pane can observe. */
-	function requestState(view: DocView, item: BlockView, history: readonly Revision[]): Chip | null {
-		const last = history.at(-1);
-		if (!last || item.block.content.kind !== "design") return null;
-		// No data ties a coordinator lock or a design edit to a revision: state order and facts, never "handled".
-		if (item.lock.kind === "coordinator") return null;
-		const changed = view.run
-			? view.timeline.some(entry => entry.data.type === "block_edited" && entry.data.block === item.block.id && entry.data.field === "design" && entry.at >= last.at)
-			: (() => { const seen = designAtRequest.get(item.block.id); return seen?.seq === last.seq ? seen.design !== item.block.content.design : null; })();
-		if (changed === true) return { text: `提交 #${last.seq} 之后设计有改动`, tone: "success" };
-		if (changed === false) return { text: `已提交 #${last.seq}，设计尚未改动`, tone: "accent" };
-		return { text: `最近提交 #${last.seq} · ${clock(last.at)} UTC`, tone: "muted" };
-	}
-	function blockChips(view: DocView, item: BlockView): Chip[] {
-		const chips: Chip[] = [];
+	function statusIcon(item: BlockView): TspNode | null {
 		const block = item.block;
-		if (block.done) chips.push({ text: "已完成", tone: "success" });
-		// A block with nothing written yet says so, instead of passing for a real item of the plan.
-		const empty = block.content.kind === "design" ? !block.content.requirement.trim() && !block.content.design.trim() : !block.content.body.trim();
-		if (empty && item.lock.kind !== "human") chips.push({ text: "空块", tone: "warning" });
-		if (item.lock.kind === "coordinator") chips.push({ text: "协调者编辑中", tone: "warning" });
-		if (item.lock.kind === "human") chips.push({ text: "你在编辑", tone: "accent" });
-		if (view.run) {
-			for (const launch of rootLaunches(view, item)) chips.push({ text: !launch.active ? `${launch.id} 不活跃` : launch.agents.length ? `${launch.id} 已绑定 ${launch.agents.join("、")}` : `${launch.id} 等待绑定`, tone: launch.active ? "accent" : "neutral" });
-			const affecting = item.launches.length - rootLaunches(view, item).length;
-			if (affecting > 0) chips.push({ text: `被 ${affecting} 个未关闭 Launch 引用`, tone: "neutral" });
-			const pending = launchPending(view, block.id);
-			if (!rootLaunches(view, item).length && pending) chips.push({ text: `${clock(pending.at)} 已请求启动`, tone: "accent" });
-			const latest = item.latestRecord?.data;
-			if (latest?.type === "post" && (latest.kind === "result" || latest.kind === "failure")) chips.push({ text: latest.kind === "result" ? (block.done ? "有结果" : "有结果 · 待确认完成") : "失败", tone: latest.kind === "result" ? "success" : "error" });
-		}
-		const request = requestState(view, item, core.revisions(ref, block.id));
-		if (request && request.tone !== "muted") chips.push(request);
-		const failed = (item.findings ? Object.values(item.findings).filter(Boolean).length : 0) + (item.report?.result.kind === "answers" ? Object.values(item.report.result.answers).filter(probability => probability >= 0.5).length : 0);
-		const report = item.report?.result;
-		// Only a check state that tells blocks apart is a chip: the usual "auto checks passed, model not asked" is the detail's footer.
-		if (item.findings && failed) chips.push({ text: `检查 ${failed} 项不通过`, tone: "error" });
-		else if (item.findings && report?.kind === "answers") chips.push({ text: "检查通过", tone: "success" });
-		else if (item.findings && report?.kind === "judge_unavailable") chips.push({ text: "检查：模型不可用", tone: "warning" });
-		return chips;
-	}
-	function chipRow(id: string, chips: readonly Chip[]): TspNode {
-		return box(id, "pb-chips", chips.map((chip, index) => badge(`${id}.${index}`, chip.text, chip.tone)));
+		if (block.progress.kind === "untracked") return null;
+		const status = block.progress.status;
+		const id = `${block.id}.status`;
+		on(id, { click: () => outcome(core.setStatus(REF, block.id, status === "done" ? "todo" : "done")) });
+		const label = status === "done" ? "已完成" : status === "running" ? "执行中" : "未完成";
+		const glyph: TspNode = status === "done"
+			? el(`${id}.ring`, "span", "pb-st-done", [{ id: `${id}.check`, k: "icon", p: { name: "check" } }])
+			: status === "running" ? { id: `${id}.spin`, k: "spinner", p: { tone: "pending" } } : el(`${id}.ring`, "span", "pb-st-todo");
+		return el(id, "span", "pb-st", [glyph], { title: label, aria: label, actions: { click: "invoke" } });
 	}
 
-	// ------------------------------------------------------------ block detail
-
-	/**
-	 * Every block is drawn on every redraw so its render status and checks stay exact; only the shown
-	 * block is mounted. The check view (checks.md §1) is collected from the block's content nodes only.
-	 */
-	function blockDetail(view: DocView, item: BlockView, hasDraft: boolean): TspNode {
+	function head(item: BlockView, number: string, isOpen: boolean): TspNode {
 		const block = item.block;
-		const prefix = block.id;
-		const finished = view.run?.status === "finished";
-		const unlocked = item.lock.kind === "none";
-		const canEdit = unlocked && !hasDraft && !finished;
-		const contract = block.content.kind === "task" ? block.content : null;
-		const editingTitle = item.lock.kind === "human" && item.lock.field === "title";
-		const content: TspNode[] = [];
-
-		const titleNode: TspNode = editingTitle
-			? draftField(block.id, "title")
-			: { id: `${prefix}.title.view`, k: "md", p: { text: block.title } };
-		content.push(...(editingTitle ? [] : [titleNode]));
-		const head = box(`${prefix}.state`, "pb-head", [
-			row(`${prefix}.toolbar`, [
-				badge(`${prefix}.kind.badge`, `${block.id} · ${blockKindLabel(block.content)}`, "neutral"),
-				...(contract?.agent !== undefined ? [badge(`${prefix}.agent`, `agent: ${contract.agent}`, "accent")] : []),
-				...(contract?.isolated !== undefined ? [badge(`${prefix}.isolated`, `isolated: ${contract.isolated ? "true" : "false"}`, "accent")] : []),
-				check(`${prefix}.done`, "已完成", block.done, !unlocked || finished, done => { showError(core.setDone(ref, block.id, done), `${prefix}.state`); }),
-				...(item.lock.kind === "coordinator" ? [text(`${prefix}.lock`, "协调者正在编辑这个块", "warning"), button(`${prefix}.interrupt`, "收回编辑权", () => showError(core.interrupt(ref, block.id), `${prefix}.state`), finished, "danger")] : []),
-				box(`${prefix}.toolbar.spacer`, "pb-spacer", []),
-				...(view.run && block.content.kind === "task" ? [launchPending(view, block.id) && !rootLaunches(view, item).length
-					// A request the coordinator has not answered yet is not sent twice.
-					? button(`${prefix}.launch`, "已请求启动", () => undefined, true, "primary")
-					: button(`${prefix}.launch`, isOrchestration(block.content) ? "启动编排" : "启动", () => { if (view.run) showError(core.requestLaunch(view.run.id, [block.id]), `${prefix}.actions`); }, finished, "primary")] : []),
-				...(block.content.kind === "task" ? [button(`${prefix}.preview`, "预览", () => { void core.preview(ref, [block.id]).then(result => { previews.set(prefix, result); redraw(); }); })] : []),
-				button(`${prefix}.check`, "检查", () => showError(core.requestCheck(ref, [block.id]), `${prefix}.actions`)),
-				button(`${prefix}.pin`, pinned === block.id ? "取消参考" : "设为参考", () => { pinned = pinned === block.id ? null : block.id; redraw(); }),
-				...(editingTitle ? [] : [button(`${prefix}.title.pencil`, "改标题", () => startDraft(block.id, "title"), !canEdit)]),
-				// An empty requirement is not drawn as a panel; writing one starts from here.
-				...(block.content.kind === "design" && !block.content.requirement.trim() && !(item.lock.kind === "human" && item.lock.field === "requirement")
-					? [button(`${prefix}.requirement.pencil`, "写需求", () => startDraft(block.id, "requirement"), !canEdit)]
-					: []),
-			]),
-			editingTitle
-				? col(`${prefix}.title.edit`, [titleNode, row(`${prefix}.title.controls`, [button(`${prefix}.title.commit`, "保存标题", () => commit(block.id), false, "primary"), button(`${prefix}.title.discard`, "放弃", () => discardDraft(block.id, `${prefix}.title`), false, "ghost"), text(`${prefix}.title.hint`, "Enter 保存；Esc 不保存也不丢弃", "muted")])])
-				: { id: `${prefix}.title.heading`, k: "el", p: { tag: "h2", class: "pb-block-title", text: block.title.trim() || "未命名块（点击填写标题）", ...(canEdit ? { actions: { click: "invoke" } } : {}) } },
-			...(notices.get(`${prefix}.title`) ? [text(`${prefix}.title.notice`, notices.get(`${prefix}.title`)!.text, notices.get(`${prefix}.title`)!.tone)] : []),
-			...inlineError(`${prefix}.title`),
-			...inlineError(`${prefix}.state`),
+		const id = `${block.id}.head`;
+		const titleId = `${block.id}.title`;
+		const toggle = (): void => { open = isOpen ? null : block.id; openChosen = true; menu = null; node = null; picked = null; };
+		const title = editing?.id === titleId
+			? editor(editing)
+			: el(titleId, "span", "pb-title", [], { text: block.title.trim() || "未命名块", actions: { click: "invoke", dblclick: "edit" } });
+		on(titleId, {
+			click: mods => {
+				// ⌘-click picks tasks to launch together; a plain click folds the card once no second click follows.
+				if (mods.includes("meta")) {
+					if (block.content.kind !== "task" || block.progress.kind === "untracked") { notify("只有任务块能一起启动"); return; }
+					if (selected.has(block.id)) selected.delete(block.id); else selected.add(block.id);
+					return;
+				}
+				clearTimeout(titleTimer);
+				titleTimer = setTimeout(() => { toggle(); redraw(); }, CLICK_DELAY_MS);
+			},
+			dblclick: () => { clearTimeout(titleTimer); startEdit(titleId, block.title, false, text => core.edit(REF, block.id, "title", block.title, text)); },
+		});
+		const chevron = `${block.id}.fold`;
+		on(chevron, { click: toggle });
+		const status = statusIcon(item);
+		const more = `${block.id}.more`;
+		if (isOpen) on(more, { click: () => { menu = menu === block.id ? null : block.id; } });
+		return el(id, "div", isOpen ? "pb-head pb-open" : "pb-head", [
+			el(`${id}.nn`, "span", "pb-nn", [], { text: number }),
+			title,
+			...(status ? [status] : []),
+			el(`${id}.spacer`, "span", "pb-spacer"),
+			...(isOpen ? [el(more, "span", "pb-icon-btn", [{ id: `${more}.icon`, k: "icon", p: { name: "more" } }], { aria: "更多", actions: { click: "invoke" } })] : []),
+			el(chevron, "span", "pb-icon-btn pb-chev", [{ id: `${chevron}.icon`, k: "icon", p: { name: "chev-r" } }], { aria: isOpen ? "收起" : "展开", actions: { click: "invoke" } }),
 		]);
-		if (canEdit && !editingTitle) actions.set(`${prefix}.title.heading`, () => startDraft(block.id, "title"));
+	}
 
-		const sections: TspNode[] = [head, ...inlineError(`${prefix}.actions`)];
-		const reference = pinned !== null && pinned !== block.id ? view.blocks.find(other => other.block.id === pinned) : undefined;
-		if (reference) sections.push(pinnedPanel(reference));
-		const citing = view.blocks.flatMap(other => other.block.id === block.id ? [] : other.references.filter(found => found.reference.targetText === block.id).map(found => ({ other, text: found.reference.text })));
-		if (citing.length) {
-			const ids = [...new Set(citing.map(found => found.other.block.id))];
-			// Folded by default: the head names the citing blocks, the rows open them.
-			sections.push(section(`${prefix}.cited`, `被 ${ids.length} 个块引用：${ids.join("、")}`, citing.map((found, index) => {
-				const id = `${prefix}.cited.${index}`;
-				actions.set(id, () => { current = { kind: "block", block: found.other.block.id }; redraw(); });
-				return { id, k: "el", p: { tag: "div", class: "pb-cite", text: `${found.other.block.id} · ${found.other.block.title.trim() || "未命名块"}　${found.text}`, actions: { click: "invoke" } } } satisfies TspNode;
-			}), `${prefix}.cited`, true));
-		}
-		const pending = view.run ? launchPending(view, block.id) : null;
-		if (pending) sections.push(text(`${prefix}.pending`, `已在 ${clock(pending.at)} UTC 发出启动请求；之后还没有为此块创建的 Launch`, "accent"));
-		const latestPost = item.latestRecord?.data;
-		const awaitingDone = view.run && !finished && !block.done && latestPost?.type === "post" && latestPost.kind === "result";
-		const ownLaunches = view.run ? rootLaunches(view, item) : [];
-		if (view.run && ownLaunches.length) sections.push(panel(`${prefix}.launches`, `从此块启动、未关闭的 Launch ${ownLaunches.length}`, [], ownLaunches.map(launch => row(`${prefix}.launch.${launch.id}`, [
-			badge(`${prefix}.launch.${launch.id}.badge`, launch.id, "accent"),
-			text(`${prefix}.launch.${launch.id}.detail`, `${launch.active ? "活跃" : `不活跃 · 会话 ${launch.session}`} · agents: ${launch.agents.join(", ") || "等待绑定"}`),
-			button(`${prefix}.launch.${launch.id}.close`, "关闭 Launch", () => showError(core.closeLaunch(launch.id), `${prefix}.actions`), false, "danger"),
-		]))));
-		const impact = view.run ? item.launches.filter(launch => !ownLaunches.includes(launch)) : [];
-		if (impact.length) sections.push(text(`${prefix}.impact`, `被未关闭的 Launch 引用：${impact.map(launch => `${launch.id}（从 ${view.timeline.flatMap(entry => entry.data.type === "launch_created" && entry.data.launch === launch.id ? entry.data.blocks : []).join("、")} 启动）`).join("，")}`, "neutral"));
-		// The latest record sits right under the head; a result waiting for the person carries the button that closes it.
-		if (view.run && item.latestRecord) sections.push(panel(`${prefix}.latest`, awaitingDone ? `协调者已记录结果（#${item.latestRecord.seq}），核对后标记完成` : "最近记录", awaitingDone ? [box(`${prefix}.latest.spacer`, "pb-spacer", []), button(`${prefix}.confirm.done`, "标记已完成", () => showError(core.setDone(ref, block.id, true), `${prefix}.state`), !unlocked, "primary")] : [], [record(`${prefix}.latest.view`, item.latestRecord)]));
-		const preview = previews.get(prefix);
-		const compiled: TspNode[] = preview ? [panel(`${prefix}.compiled`, "发给 agent 的内容", [text(`${prefix}.compiled.length`, preview.kind === "Ok" ? `${preview.text.length} 字符` : "编译失败", preview.kind === "Ok" ? "muted" : "error"), box(`${prefix}.compiled.spacer`, "pb-spacer", []), button(`${prefix}.compiled.close`, "收起", () => { previews.delete(prefix); redraw(); }, false, "ghost")], [
-			{ id: `${prefix}.compiled.text`, k: "code", p: { text: compileText(preview), lang: "text", wrap: true, max: { h: "24lines" } } },
-			...(preview.kind === "Ok" ? [text(`${prefix}.compiled.sources`, sourcesText(preview.sources), "muted")] : []),
-		])] : [];
-
-		const textField = (name: "body" | "requirement", title: string, view: TspNode[]): TspNode => {
-			const editing = item.lock.kind === "human" && item.lock.field === name;
-			const notice = notices.get(`${prefix}.${name}`);
-			return panel(`${prefix}.${name}.panel`, title, editing
-				? [button(`${prefix}.${name}.commit`, "保存", () => commit(block.id), false, "primary"), button(`${prefix}.${name}.discard`, "放弃", () => discardDraft(block.id, `${prefix}.${name}`), false, "ghost"), text(`${prefix}.${name}.hint`, "Ctrl+Enter 保存；Esc 不保存也不丢弃", "muted")]
-				: [button(`${prefix}.${name}.pencil`, `编辑${LABELS[name]}`, () => startDraft(block.id, name), !canEdit, "ghost")], [
-				...(editing ? [draftField(block.id, name)] : view),
-				...(notice ? [text(`${prefix}.${name}.notice`, notice.text, notice.tone)] : []),
-				...inlineError(`${prefix}.${name}`),
+	function foot(item: BlockView): TspNode | null {
+		const block = item.block;
+		if (block.content.kind !== "task" || block.progress.kind === "untracked") return null;
+		const id = `${block.id}.foot`;
+		const rule = el(`${id}.rule`, "div", "pb-rule");
+		const progress = block.progress;
+		if (progress.status === "done") {
+			// The completion report the subagent wrote replaces the SUBAGENT row; it starts folded.
+			const toggleId = `${id}.report.toggle`;
+			const unfolded = reports.has(block.id);
+			on(toggleId, { click: () => { if (unfolded) reports.delete(block.id); else reports.add(block.id); } });
+			if (progress.report === null) return el(id, "div", "pb-foot", [rule, el(`${id}.report.none`, "div", "pb-comment", [el(`${id}.report.none.text`, "span", "", [], { text: "// 没有完成报告" })])]);
+			return el(id, "div", "pb-foot", [
+				rule,
+				el(toggleId, "div", "pb-report-toggle", [{ id: `${toggleId}.icon`, k: "icon", p: { name: unfolded ? "chev" : "chev-r" } }, el(`${toggleId}.text`, "span", "", [], { text: "完成报告" })], { actions: { click: "invoke" } }),
+				...(unfolded ? [el(`${id}.report`, "div", "pb-report", [{ id: `${id}.report.text`, k: "md", p: { text: progress.report } }])] : []),
 			]);
-		};
-
-		let draftErrors = 0;
-		/** Checks read the design in the changes view, whatever view the person picked (issue #3 decision 8). */
-		let checkedDesign: readonly TspNode[] = [];
-		if (block.content.kind === "task") {
-			const bodyView = block.content.body.trim() ? rendered(`${prefix}.body.view`, block.content.body) : rendered(`${prefix}.body.view`, block.content.body).concat(text(`${prefix}.body.empty`, "（还没有写正文）", "muted"));
-			content.push(...bodyView);
-			sections.push(textField("body", isOrchestration(block.content) ? "编排代码" : "正文（发给 agent 的 prompt）", bodyView), ...compiled);
-		} else {
-			const requirementView = block.content.requirement.trim() ? [{ id: `${prefix}.requirement.view`, k: "md", p: { text: block.content.requirement } } satisfies TspNode] : [];
-			content.push(...requirementView);
-			if (requirementView.length || (item.lock.kind === "human" && item.lock.field === "requirement")) sections.push(textField("requirement", "需求（你写）", requirementView));
-			const host = draftHost(block.id);
-			const answering = item.lock.kind === "human" && item.lock.field === "prompt" && !finished;
-			const drawn = renderDraft(block.content.design, { ...host, askControl: askControl(block.id, canEdit || answering) });
-			draftErrors = drawn.diagnostics.filter(found => found.severity === "error").length;
-			// The hidden pass draws asks statically: no controls, no events, no selection state.
-			checkedDesign = renderDraft(block.content.design, { ...host, context: { ...host.context, svg: (id, _svg, _size, alt) => ({ id, k: "image", p: { alt } }), image: (id, _bytes, _mime, alt) => ({ id, k: "image", p: { alt } }) }, view: () => "changes" }).nodes;
-			const history = core.revisions(ref, block.id);
-			const state = requestState(view, item, history);
-			const writing = item.lock.kind === "human" && item.lock.field === "prompt";
-			const promptNotice = notices.get(`${prefix}.prompt`);
-			sections.push(box(`${prefix}.design`, "pb-doc", block.content.design.trim() ? drawn.nodes : [text(`${prefix}.design.empty`, "协调者还没有写设计", "muted")]));
-			if (drawn.diagnostics.length) sections.push(panel(`${prefix}.diagnostics`, `稿件问题 ${drawn.diagnostics.length}`, [], drawn.diagnostics.map((found, index) => text(`${prefix}.diagnostic.${index}`, `第 ${found.line} 行 · ${found.component} · ${found.message}`, found.severity === "error" ? "error" : "warning"))));
-			sections.push(panel(`${prefix}.requests`, "修改要求", [...(state ? [badge(`${prefix}.request.state`, state.text, state.tone)] : []), box(`${prefix}.requests.spacer`, "pb-spacer", []), ...(writing ? [] : [button(`${prefix}.prompt.pencil`, "写修改要求", () => startDraft(block.id, "prompt"), !canEdit, "primary")])], [
-				...(writing ? [draftField(block.id, "prompt"), row(`${prefix}.prompt.controls`, [button(`${prefix}.prompt.submit`, "提交给协调者", () => submitPrompt(block.id), false, "primary"), button(`${prefix}.prompt.discard`, "放弃", () => discardDraft(block.id, `${prefix}.prompt`), false, "ghost"), text(`${prefix}.prompt.hint`, "Ctrl+Enter 提交；Esc 不提交也不丢弃", "muted")])] : []),
-				...(promptNotice ? [text(`${prefix}.prompt.notice`, promptNotice.text, promptNotice.tone)] : []),
-				...inlineError(`${prefix}.prompt`),
-				...(history.length
-					? [...history].reverse().map(revision => box(`${prefix}.revision.${revision.seq}`, "pb-request", [text(`${prefix}.revision.${revision.seq}.meta`, `#${revision.seq} · ${time(revision.at)}`, "muted"), { id: `${prefix}.revision.${revision.seq}.text`, k: "el", p: { tag: "div", class: "pb-request-text", text: revision.prompt } }]))
-					: [text(`${prefix}.revisions.empty`, writing ? "" : "还没有提交过修改要求。看完设计后，把要改的地方写给协调者。", "muted")]),
-			]));
 		}
-		item.references.forEach((reference, index) => {
-			const id = `${prefix}.reference.${index}`;
-			const state = reference.status === "fetching" ? "取回中" : reference.fetchFailed ? "取回失败" : reference.expansion?.kind === "Err" ? "展开失败" : reference.external ? `已取回 ${time(reference.fetchedAt)}` : "已展开";
-			const failed = reference.fetchFailed || reference.expansion?.kind === "Err";
-			const local = view.blocks.find(other => other.block.id === reference.reference.targetText)?.block.id;
-			// Buttons sit in the panel head, outside the collapsible section: a click on a section head toggles it.
-			const buttons = [
-				...(local ? [button(`${id}.pin`, "设为参考，对照阅读", () => { pinned = local; redraw(); }, false, "ghost")] : []),
-				...(reference.external ? [button(`${id}.refetch`, "重新取回", () => { void core.refetch(ref, reference.reference.targetText).then(error => showError(error, id)); }, false, "ghost")] : []),
-			];
-			const expansion: TspNode = reference.expansion ? { id: `${id}.expansion`, k: "md", p: { text: compileText(reference.expansion) } } : text(`${id}.pending`, "取回中");
-			content.push(expansion);
-			// A ready expansion repeats content shown elsewhere; failures stay open so they are seen.
-			sections.push(panel(id, `引用 ${reference.reference.text} · ${state}`, buttons, [...(failed ? [text(`${id}.failed`, state, "error")] : []), section(`${id}.body`, "展开后的内容", [expansion], `${index}:${reference.reference.text}`, reference.status === "ready" && !failed), ...inlineError(id)]));
-		});
-		if (view.run) {
-			const history = blockHistory(view, block.id);
-			sections.push(panel(`${prefix}.history`, `这个块在本次 Run 中的经过 ${history.length}`, [], history.length ? history.map(entry => box(`${prefix}.history.${entry.seq}`, "pb-timeline-entry", [record(`${prefix}.history.${entry.seq}.record`, entry)])) : [text(`${prefix}.history.empty`, "还没有记录", "muted")]));
-		}
-		if (item.latestRecord) content.push(record(`${prefix}.latest.entry`, item.latestRecord));
-		const findings = item.findings ? (Object.entries(item.findings) as [FindingName, boolean][]) : [];
-		const report = item.report?.result;
-		const failed = findings.filter(([, fails]) => fails).length + (report?.kind === "answers" ? Object.values(report.answers).filter(probability => probability >= 0.5).length : 0);
-		const checksHead = !item.findings ? "检查 · 计算中" : failed ? `检查 · ${failed} 项不通过` : report?.kind === "answers" ? "检查 · 全部通过" : "检查 · 自动检查通过，模型未判定";
-		const checks = section(`${prefix}.checks`, checksHead, [
-			...(item.findings ? findings.map(([name, fails]) => text(`${prefix}.finding.${name}`, `${FINDING_LABELS[name]}：${fails ? "不通过" : "通过"}`, fails ? "error" : "success")) : [text(`${prefix}.finding.pending`, "未判定", "muted")]),
-			...(report?.kind === "answers" ? Object.entries(report.answers).map(([name, probability]) => text(`${prefix}.report.${name}`, `模型判定 ${name}：${probability >= 0.5 ? "不通过" : "通过"} · P(yes)=${probability}`, probability >= 0.5 ? "error" : "success")) : [text(`${prefix}.report`, report?.kind === "judge_unavailable" ? "模型判定：模型不可用" : "模型判定：未判定（点“检查”让协调者判定）", "muted")]),
-		], `${prefix}.checks`, failed === 0);
-		sections.push(...item.notices.map((notice, index) => text(`${prefix}.notice.${index}`, notice, "warning")));
-		const deletion = confirmDelete === block.id
-			? row(`${prefix}.delete.confirm`, [text(`${prefix}.delete.question`, `删除 ${block.id}？删除后不能在面板里恢复。`, "warning"), button(`${prefix}.delete.yes`, "确认删除", () => { confirmDelete = null; const error = core.deleteBlock(ref, block.id); if (error) return showError(error, `${prefix}.delete`); redraw(); }, false, "danger"), button(`${prefix}.delete.no`, "取消", () => { confirmDelete = null; redraw(); }, false, "ghost")])
-			: row(`${prefix}.more`, [button(`${prefix}.delete`, "删除此块…", () => { confirmDelete = block.id; redraw(); }, !unlocked || finished, "ghost")]);
-		sections.push(box(`${prefix}.foot`, "pb-foot", [checks, deletion, ...inlineError(`${prefix}.delete`)]));
-
-		const md: string[] = [], images: string[] = [];
-		let chartNodes = 0;
-		function collect(node: TspNode): void { if (node.k === "md" && typeof node.p?.text === "string") md.push(node.p.text); if (node.k === "image") { chartNodes++; if (typeof node.p?.alt === "string") images.push(node.p.alt); } node.c?.forEach(collect); }
-		content.forEach(collect);
-		checkedDesign.forEach(collect);
-		// Only task bodies hold chartable tables; a design's images are its own drawings.
-		if (block.content.kind === "design") chartNodes = 0;
-		if (item.lock.kind === "human" && item.lock.field === "body") chartNodes = summaries.get(block.id)?.chartNodes ?? 0;
-		summaries.set(block.id, { chartNodes, view: { md, images }, draftErrors });
-		return box(`${prefix}.card`, "pb-detail-block", sections);
-	}
-
-	// ------------------------------------------------------------ navigation column
-
-	function navItem(view: DocView, item: BlockView, active: boolean): TspNode {
-		const block = item.block;
-		const id = `nav.${block.id}`;
-		actions.set(id, () => { current = { kind: "block", block: block.id }; confirmDelete = null; redraw(); });
-		return box(`${id}.row`, "pb-nav-row", [
-			check(`${block.id}.selected`, "", selected.has(block.id), false, checked => { if (checked) selected.add(block.id); else selected.delete(block.id); redraw(); }),
-			box(id, `pb-nav-item${active ? " pb-nav-active" : ""}`, [
-				{ id: `${id}.label`, k: "el", p: { tag: "span", class: "pb-nav-label", text: `${block.id} · ${blockKindLabel(block.content)}` } },
-				// The navigator shows the committed title: an unsaved title draft lives only in its editor.
-				{ id: `${id}.title`, k: "el", p: { tag: "span", class: "pb-nav-title", text: block.title.trim() || "未命名块" } },
-				chipRow(`${id}.chips`, blockChips(view, item)),
-			], { actions: { click: "invoke" } }),
+		const content = block.content;
+		const agentId = `${id}.agent`;
+		const agent = editable(agentId, el(`${agentId}.view`, "div", "pb-val", [], { text: content.agent ?? "默认" }), () => content.agent ?? "", false, text => core.setAgent(REF, block.id, text.trim() || null), "subagent 名称，留空用默认");
+		const isolatedId = `${id}.isolated`;
+		on(isolatedId, { dblclick: () => outcome(core.setIsolated(REF, block.id, !(content.isolated ?? false))) });
+		const launchId = `${id}.launch`;
+		const running = progress.status === "running";
+		if (running) on(launchId, { click: () => outcome(core.requestStop(REF, block.id)) });
+		else if (!item.launchPending) on(launchId, { click: () => outcome(core.requestLaunch(REF, [block.id])) });
+		return el(id, "div", "pb-foot", [
+			rule,
+			el(`${id}.grid`, "div", "pb-grid2", [
+				el(`${id}.agent.col`, "div", "", [el(`${id}.agent.label`, "div", "pb-label", [], { text: "SUBAGENT" }), agent]),
+				el(`${id}.isolated.col`, "div", "", [el(`${id}.isolated.label`, "div", "pb-label", [], { text: "独立 WORKTREE" }), el(isolatedId, "div", "pb-val", [], { text: content.isolated ? "是" : "否", actions: { dblclick: "edit" } })]),
+			]),
+			el(launchId, "div", `pb-launch${running ? " pb-launch-stop" : item.launchPending ? " pb-launch-off" : ""}`, [], { text: running ? "打断执行" : item.launchPending ? "已请求启动" : "启动", ...(item.launchPending && !running ? {} : { actions: { click: "invoke" } }) }),
 		]);
 	}
-	function selectionBar(view: DocView): TspNode[] {
-		const picked = view.blocks.filter(item => selected.has(item.block.id));
-		if (!picked.length) return [];
-		const ids = picked.map(item => item.block.id);
-		const finished = view.run?.status === "finished";
-		const design = picked.some(item => item.block.content.kind === "design");
-		const mixed = picked.length > 1 && picked.some(item => isOrchestration(item.block.content));
-		const reason = design ? "设计块不能启动：在执行块中引用它" : mixed ? "编排块只能单独启动" : null;
-		return [box("selection", "pb-select-bar", [
-			text("selection.label", `已选 ${ids.join("、")}`, "accent"),
-			box("selection.actions", "pb-select-actions", [
-				...(view.run ? [button("selection.launch", "一起启动", () => { if (view.run) showError(core.requestLaunch(view.run.id, ids), "selection"); }, finished || reason !== null, "primary")] : []),
-				button("selection.preview", "合并预览", () => { void core.preview(ref, ids).then(result => { previews.set("selection", result); current = { kind: "selection" }; redraw(); }); }),
-				button("selection.check", "一起检查", () => showError(core.requestCheck(ref, ids), "selection")),
-				button("selection.clear", "取消", () => { selected.clear(); redraw(); }, false, "ghost"),
-			]),
-			...(view.run && reason ? [text("selection.reason", reason, "warning")] : []),
-			...inlineError("selection"),
-		])];
-	}
-	function nav(view: DocView, hasDraft: boolean): TspNode {
-		const finished = view.run?.status === "finished";
-		const after = current?.kind === "block" ? current.block : view.blocks.at(-1)?.block.id ?? null;
-		const items: TspNode[] = [];
-		if (view.run) {
-			const run = view.run;
-			const due = run.updateDue !== null && run.updateDue <= Date.now();
-			actions.set("nav.activity", () => { current = { kind: "activity" }; redraw(); });
-			items.push(box("nav.activity", `pb-nav-item${current?.kind === "activity" ? " pb-nav-active" : ""}`, [
-				{ id: "nav.activity.title", k: "el", p: { tag: "span", class: "pb-nav-title", text: "Run 记录与时间线" } },
-				chipRow("nav.activity.chips", [{ text: `${view.timeline.length} 条`, tone: "neutral" }, ...(due ? [{ text: "状态更新到期", tone: "warning" }] : []), ...(run.status === "finished" && !view.retrospective ? [{ text: "待写复盘", tone: "warning" }] : [])]),
-			], { actions: { click: "invoke" } }));
-			items.push(box("nav.sep", "pb-nav-sep", []));
-		}
-		items.push(...view.blocks.map(item => navItem(view, item, current?.kind === "block" && current.block === item.block.id)));
-		items.push(box("nav.sep2", "pb-nav-sep", []));
-		items.push(row("nav.insert", [
-			button("block.insert.task", "+ 执行块", () => insertAndEdit(after, "task", "nav.insert"), finished || hasDraft, "ghost"),
-			button("block.insert.design", "+ 设计块", () => insertAndEdit(after, "design", "nav.insert"), finished || hasDraft, "ghost"),
-		]));
-		items.push(...inlineError("nav.insert"));
-		// Below the list, so picking a block never moves the rows above it.
-		items.push(...selectionBar(view));
-		return box("nav", "pb-nav", items);
+
+	/** A design card: the person's requirement, the coordinator's design, and the line that sends a change request. */
+	function designBody(block: Block, content: Extract<Block["content"], { kind: "design" }>): { nodes: TspNode[]; errors: number } {
+		const requirementId = `${block.id}.requirement`;
+		const requirementView: TspNode = content.requirement.trim()
+			? el(`${requirementId}.view`, "div", "pb-lead", [{ id: `${requirementId}.md`, k: "md", p: { text: content.requirement } }])
+			: el(`${requirementId}.view`, "div", "pb-placeholder", [], { text: "// 双击写需求" });
+		const requirement = editable(requirementId, requirementView, () => content.requirement, true, text => core.edit(REF, block.id, "requirement" satisfies HumanField, content.requirement, text), "需求");
+		const drawn = content.design.trim() ? draft(block, "design", content.design) : { nodes: [el(`${block.id}.design.empty`, "div", "pb-placeholder", [], { text: "// 协调者还没有写设计" })], errors: 0 };
+		const requestId = `${block.id}.request`;
+		const request = editable(requestId, el(`${requestId}.view`, "div", "pb-comment", [el(`${requestId}.slash`, "span", "pb-comment-slash", [], { text: "//" }), el(`${requestId}.text`, "span", "", [], { text: "双击写修改要求，回车发给协调者" })]), () => "", true, text => {
+			if (!text.trim()) return null;
+			const error = core.requestRevision(REF, block.id, text);
+			if (!error) notify("修改要求已发给协调者", "success");
+			return error;
+		}, "写给协调者：哪里要改、改成什么");
+		return { nodes: [requirement, ...drawn.nodes, request], errors: drawn.errors };
 	}
 
-	// ------------------------------------------------------------ Run activity and top bar
+	/** Every block is drawn for its render status; only the open card's body is mounted. */
+	function card(item: BlockView, number: string): TspNode {
+		const block = item.block;
+		const isOpen = open === block.id;
+		const drawn = block.content.kind === "task"
+			? (block.content.body.trim() ? draft(block, "body", block.content.body) : { nodes: [editable(`${block.id}.body.empty`, el(`${block.id}.body.empty.view`, "div", "pb-placeholder", [], { text: "// 双击写正文" }), () => "", true, text => core.edit(REF, block.id, "body", block.content.kind === "task" ? block.content.body : "", text), "正文")], errors: 0 })
+			: designBody(block, block.content);
+		const md: string[] = [], images: string[] = [];
+		const collect = (child: TspNode): void => {
+			if (child.k === "md" && typeof child.p?.text === "string") md.push(child.p.text);
+			if (child.k === "image" && typeof child.p?.alt === "string") images.push(child.p.alt);
+			child.c?.forEach(collect);
+		};
+		drawn.nodes.forEach(collect);
+		summaries.set(block.id, { view: { md, images }, draftErrors: drawn.errors });
+		const bottom = isOpen ? foot(item) : null;
+		return {
+			id: `${block.id}.card`, k: "card",
+			p: { head: `${block.id}.head`, selected: isOpen, ...(selected.has(block.id) ? { mark: "pick" } : {}) },
+			c: [head(item, number, isOpen), ...(isOpen ? [el(`${block.id}.body`, "div", "pb-body", [...drawn.nodes, ...(bottom ? [bottom] : [])])] : [])],
+		};
+	}
 
-	function activity(view: DocView): TspNode[] {
-		const run = view.run!;
-		if (!postKindChosen) postKind = run.status === "finished" && !view.retrospective ? "retrospective" : "update";
-		if (!postBlockChosen && postKind !== "retrospective") postBlock = lastBlock !== null && view.blocks.some(item => item.block.id === lastBlock) ? lastBlock : null;
-		const kinds: readonly RecordKind[] = run.status === "finished" ? ["update", "result", "failure", "retrospective"] : ["update", "result", "failure"];
-		const titles = new Map<string, string>(view.blocks.map(item => [item.block.id, item.block.title.trim()]));
-		const retrospective = postKind === "retrospective";
-		const counts = new Map<EntryData["type"], number>();
-		for (const entry of view.timeline) counts.set(entry.data.type, (counts.get(entry.data.type) ?? 0) + 1);
-		const shown = view.timeline.filter(entry => filter === "all" || entry.data.type === filter);
-		return [
-			{ id: "activity.title", k: "el", p: { tag: "h2", class: "pb-block-title", text: "Run 记录与时间线" } },
-			panel("post", retrospective ? "写复盘" : "写记录", [], [
-				labeled("post.kind", "类别", choices("post.kind", kinds, postKind, kind => { postKind = kind; postKindChosen = true; }, false, kind => RECORD_LABELS[kind]), true),
-				labeled("post.block", "关联块", (() => {
-					// The last opened block is the usual subject; blocks with something going on come next; the rest on request.
-					const busy = view.blocks.filter(item => rootLaunches(view, item).length || launchPending(view, item.block.id) || item.latestRecord).map(item => item.block.id);
-					const short = [...new Set([...(lastBlock ? [lastBlock] : []), ...(postBlock ? [postBlock] : []), ...busy])].filter(id => view.blocks.some(item => item.block.id === id));
-					const values = ["none", ...(allPostBlocks ? view.blocks.map(item => item.block.id) : short)];
-					return col("post.block.pick", [
-						choices("post.block", values, postBlock ?? "none", value => { postBlock = view.blocks.find(item => item.block.id === value)?.block.id ?? null; postBlockChosen = true; }, false, value => value === "none" ? "不关联块" : `${value}${titles.get(value) ? ` · ${titles.get(value)}` : ""}`),
-						...(view.blocks.length > short.length ? [button("post.block.more", allPostBlocks ? "只看常用块" : `更多块（共 ${view.blocks.length} 个）`, () => { allPostBlocks = !allPostBlocks; redraw(); }, false, "ghost")] : []),
-					]);
-				})(), true),
-				labeled("post.text", retrospective ? "复盘内容" : "正文", formField("post.text", () => postText, value => { postText = value; }, retrospective ? "结果、问题与改进" : "记录正文", true), true),
-				...(postKind === "update" ? [labeled("post.next", "下次更新间隔（秒，可选）", formField("post.next", () => postNext, value => { postNext = value; }, "留空沿用 Run 的间隔"))] : []),
-				button("post.submit", retrospective ? "写复盘" : "写记录", () => {
-					const next = postKind === "update" ? seconds(postNext) : null;
-					if (next === undefined) return showError("下次更新时间必须是正整数秒", "post.submit");
-					const error = core.post(run.id, postKind, postText, postBlock, next);
-					if (error) return showError(error, "post.submit");
-					postText = ""; postNext = "";
-					for (const id of ["post.text", "post.next"]) { undo.delete(id); carets.delete(id); }
-					redraw();
-				}, false, "primary"),
-				...inlineError("post.submit"),
-			]),
-			panel("timeline", `时间线 ${shown.length}/${view.timeline.length}`, [], [
-				choices("timeline.filter", ["all", ...TYPES.filter(type => counts.has(type) || type === filter)], filter, value => { filter = value; }, false, value => `${TYPE_LABELS[value]} ${value === "all" ? view.timeline.length : counts.get(value) ?? 0}`),
-				...Array.from(info, ([id, launch]) => section(`launch-info.${id}`, `${id} 完整记录`, [
-					row(`launch-info.${id}.bar`, [
-						badge(`launch-info.${id}.state`, launch.closed ? `已关闭 · ${launch.closed.by}` : "未关闭", launch.closed ? "neutral" : "accent"),
-						text(`launch-info.${id}.meta`, `块 ${launch.blocks.join("、")} · ${launch.kind === "orchestration" ? "编排" : "执行"} · agents ${launch.agents.join(", ") || "无"} · 基线 ${launch.baselines.length} 个`, "muted"),
-						button(`launch-info.${id}.hide`, "收起", () => { info.delete(id); redraw(); }, false, "ghost"),
-					]),
-					{ id: `launch-info.${id}.text`, k: "code", p: { text: JSON.stringify(launch, null, 2), lang: "json", wrap: true } },
-				])),
-				...(shown.length ? [...shown].reverse().map(entry => {
-					const data = entry.data;
-					return box(`timeline.${entry.seq}`, "pb-timeline-entry", [record(`timeline.${entry.seq}.record`, entry), ...(data.type === "launch_created" ? [button(`timeline.${entry.seq}.launch`, info.has(data.launch) ? `收起 ${data.launch} 完整记录` : `打开 ${data.launch} 完整记录`, () => {
-						if (info.has(data.launch)) info.delete(data.launch);
-						else { const launch = core.launchInfo(data.launch); if (launch) info.set(data.launch, launch); }
-						redraw();
-					}, false, "ghost")] : [])]);
-				}) : [text("timeline.empty", view.timeline.length ? `没有「${TYPE_LABELS[filter]}」类记录` : "时间线还是空的", "muted")]),
-			]),
-		];
+	// ------------------------------------------------------------ regions
+
+	function main(view: DocView): TspNode {
+		const titleId = "doc.title";
+		const title = editing?.id === titleId
+			? editor(editing)
+			: el(titleId, "span", "", [], { text: view.title.trim() || "未命名 Playbook", actions: { dblclick: "edit" } });
+		on(titleId, { dblclick: () => startEdit(titleId, view.title, false, text => core.setTitle(REF, view.title, text)) });
+		const errors = [...core.errors(), ...view.errors, ...(renderError ? [renderError] : [])];
+		let number = 0;
+		const cards = view.blocks.map(item => card(item, item.block.progress.kind === "untracked" ? "--" : String(++number).padStart(2, "0")));
+		return { id: "main.view", k: "col", c: [el("app", "div", "pb-app", [
+			el("doc", "div", "pb-doc-title", [el("doc.hash", "span", "pb-hash", [], { text: "##" }), title]),
+			...(errors.length ? [el("errors", "div", "pb-errors", errors.map((error, index) => ({ id: `errors.${index}`, k: "text", p: { text: error, tone: "error" } })))] : []),
+			cards.length ? el("cards", "div", "pb-cards", cards) : el("empty", "div", "pb-empty", [], { text: "这份 Playbook 还没有块：让协调者用 playbook_edit 加一个。" }),
+		])] };
 	}
-	function topBar(view: DocView, runs: readonly RunSummary[]): TspNode {
-		const coordinator = core.coordinator();
-		const errors = [...core.errors(), ...view.errors, ...(renderError ? [renderError] : []), ...(actionError ? [actionError.message] : [])];
-		const rows: TspNode[] = [
-			{ id: "tabs", k: "tabs", p: { min: { h: "2lines" }, shrink: 0, items: [{ id: "template", label: "模板" }, ...runs.map(run => ({ id: run.id, label: `${run.name}${run.status === "finished" ? " · 已结束" : ""}` }))], active: ref.kind === "template" ? "template" : ref.run } },
-			box("top.main", "pb-top-row", [
-				{ id: "heading", k: "el", p: { tag: "h1", class: "pb-title", text: view.run?.name ?? view.title } },
-				badge("coordinator.badge", coordinator.connected ? "协调者在线" : "协调者离线", coordinator.connected ? "success" : "warning"),
-				...(coordinator.connected && coordinator.pane ? [button("coordinator.focus", "转到协调者", () => { void core.focusCoordinator().then(error => showError(error)); }, false, "ghost")] : []),
-				...(!coordinator.connected ? [text("coordinator.status", "没有协调者连接：修改要求、启动和检查请求会被拒绝", "muted")] : []),
-			]),
-		];
-		if (!view.run) {
-			rows.push(box("start-run.form", "pb-top-row", [
-				formField("run.name", () => runName, value => { runName = value; }, "新 Run 名称"),
-				formField("run.every", () => runEvery, value => { runEvery = value; }, "状态更新间隔（秒，可选）"),
-				button("run.start", "开始 Run", startRun, false, "primary"),
-				...inlineError("run.start"),
-			]));
-		} else {
-			const run = view.run;
-			const done = view.blocks.filter(item => item.block.done).length;
-			const running = view.blocks.filter(item => rootLaunches(view, item).length).length;
-			const overdue = run.updateDue !== null && run.updateDue <= Date.now();
-			rows.push(box("run.bar", "pb-top-row", [
-				badge("run.badge", run.status === "running" ? "进行中" : "已结束", run.status === "running" ? "accent" : "neutral"),
-				badge("run.progress", `完成 ${done}/${view.blocks.length}`, view.blocks.length > 0 && done === view.blocks.length ? "success" : "neutral"),
-				...(running ? [badge("run.running", `未关闭 Launch 的块 ${running}`, "accent")] : []),
-				text("run.status", `开始 ${time(run.startedAt)}${run.finishedAt === null ? "" : ` · 结束 ${time(run.finishedAt)}`}`, "muted"),
-				box("run.spacer", "pb-spacer", []),
-				...(confirmFinish === run.id && run.status === "running" ? [] : [button("run.finish", "结束 Run", () => { confirmFinish = run.id; redraw(); }, run.status === "finished", "danger")]),
-				...inlineError("run.finish"),
-			]));
-			if (confirmFinish === run.id && run.status === "running") {
-				const drafts = view.blocks.filter(item => item.lock.kind === "human").length;
-				const open = view.blocks.reduce((count, item) => count + rootLaunches(view, item).length, 0);
-				rows.push(box("run.finish.confirm", "pb-confirm", [
-					text("run.finish.question", `结束「${run.name}」？完成 ${done}/${view.blocks.length}。会关闭 ${open} 个未关闭的 Launch 记录${drafts ? `、丢弃 ${drafts} 份未提交的草稿` : ""}，结束后块不能再编辑；已在运行的 agent 不会被停止。`, "warning"),
-					row("run.finish.choices", [
-						button("run.finish.yes", "确认结束", () => {
-							confirmFinish = null;
-							const error = core.finishRun(run.id);
-							if (error) return showError(error, "run.finish");
-							if (!view.retrospective) resetRecordForm();
-							current = { kind: "activity" };
-						}, false, "danger"),
-						button("run.finish.no", "取消", () => { confirmFinish = null; redraw(); }, false, "ghost"),
-					]),
-				]));
-			}
-			if (run.updateDue !== null) rows.push(box("run.due", "pb-top-row", [
-				text("run.due.time", `${overdue ? "状态更新已到期" : "下次状态更新"}：${time(run.updateDue)}`, overdue ? "warning" : "muted"),
-				...(overdue ? [button("run.due.write", "写状态更新", () => { current = { kind: "activity" }; postKind = "update"; postKindChosen = true; redraw(); }, false, "primary")] : []),
-				choices("run.snooze.duration", ["300", "900", "3600", "86400"], String(snoozeAfter), value => { snoozeAfter = Number(value); }, run.status === "finished", value => SNOOZE_LABELS[value] ?? value),
-				button("run.snooze", "推迟提醒", () => showError(core.snooze(run.id, snoozeAfter), "run.snooze"), run.status === "finished"),
-				...inlineError("run.snooze"),
+
+	function dock(view: DocView): TspNode {
+		const tracked = view.blocks.filter(item => item.block.progress.kind === "tracked");
+		const done = tracked.filter(item => item.block.progress.kind === "tracked" && item.block.progress.status === "done").length;
+		const online = core.coordinator().connected;
+		on("status.coordinator", { click: () => { void core.focusCoordinator().then(error => { outcome(error); redraw(); }); } });
+		const rows: TspNode[] = [];
+		const chosen = view.blocks.filter(item => selected.has(item.block.id)).map(item => item.block.id);
+		if (chosen.length) {
+			on("bar.launch", { click: () => { const error = core.requestLaunch(REF, chosen); outcome(error); if (!error) selected.clear(); } });
+			on("bar.clear", { click: () => selected.clear() });
+			rows.push(el("bar", "div", "pb-bar", [
+				el("bar.launch", "div", "pb-launch", [], { text: `一起启动 ${chosen.length} 块`, actions: { click: "invoke" } }),
+				el("bar.clear", "div", "pb-ghost", [], { text: "取消", actions: { click: "invoke" } }),
 			]));
 		}
-		if (errors.length) rows.push(row("errors", [...errors.map((error, index) => text(`error.${index}`, error, "error")), ...(renderError || actionError ? [button("error.dismiss", "关闭提示", () => { renderError = null; actionError = null; redraw(); }, false, "ghost")] : [])]));
-		return box("top", "pb-top", rows);
+		rows.push({ id: "status", k: "status", c: [
+			{ id: "status.coordinator", k: "seg", p: { spans: [{ t: "● ", s: online ? "success" : "warning" }, { t: online ? "协调者在线" : "协调者离线" }], actions: { click: "invoke" } } },
+			{ id: "status.done", k: "seg", p: { side: "right", text: `${done} / ${tracked.length} 已完成` } },
+		] });
+		return { id: "dock.view", k: "col", c: rows };
 	}
-	function commit(block: BlockId): void {
-		const lock = core.view(ref).blocks.find(item => item.block.id === block)?.lock;
-		const fieldId = lock?.kind === "human" ? `${block}.${lock.field}` : null;
-		const before = lock?.kind === "human" ? core.view(ref).blocks.find(item => item.block.id === block)?.block : undefined;
-		const error = core.commit(ref, block);
-		if (error) return showError(error, fieldId);
-		const after = core.view(ref).blocks.find(item => item.block.id === block)?.block;
-		if (fieldId) notices.set(fieldId, JSON.stringify(before) === JSON.stringify(after) ? { text: "未修改", tone: "success" } : { text: "已保存", tone: "success" });
-		committed = fieldId;
-		focus = null;
-		redraw();
-	}
-	/**
-	 * Enter/Ctrl+Enter on the focused input: a field draft is saved (a change request submitted), the
-	 * Run form starts the Run. Inputs with no such action ignore it.
-	 */
-	function saveFocused(): void {
-		if (focus === "run.name" || focus === "run.every") return startRun();
-		const editing = core.view(ref).blocks.find(item => item.lock.kind === "human" && focus === `${item.block.id}.${item.lock.field}`);
-		if (!editing || editing.lock.kind !== "human") return;
-		if (editing.lock.field === "prompt") submitPrompt(editing.block.id);
-		else commit(editing.block.id);
-	}
-	function switchView(next: DocRef): void {
-		ref = next; selected.clear(); previews.clear(); info.clear(); summaries.clear(); focus = null; actionError = null; current = null; confirmDelete = null; confirmFinish = null; pinned = null;
-		postText = ""; postNext = ""; postBlock = null; postBlockChosen = false; allPostBlocks = false; lastBlock = null; postKindChosen = false; filter = "all";
-		redraw();
-	}
-	function startRun(): void {
-		const every = seconds(runEvery);
-		if (every === undefined) return showError("更新间隔必须是正整数秒", "run.start");
-		const before = new Set(core.runs().map(run => run.id));
-		const error = core.startRun(runName, every);
-		if (error) return showError(error, "run.start");
-		runName = ""; runEvery = "";
-		for (const id of ["run.name", "run.every"]) { carets.delete(id); undo.delete(id); }
-		const created = core.runs().find(run => !before.has(run.id));
-		if (created) switchView({ kind: "run", run: created.id });
-		else redraw();
-	}
-	function root(view: DocView): TspNode {
-		actions.clear(); changes.clear(); fields.clear();
-		const runs = core.runs();
-		if (core.coordinator().connected && actionError?.needsCoordinator) actionError = null;
-		const present = new Set(view.blocks.map(item => item.block.id));
-		for (const id of selected) if (!present.has(id)) selected.delete(id);
-		if (pinned !== null && !present.has(pinned)) pinned = null;
-		// Keep the shown block, or the first one; a draft does not hold the view, its editor stays with its block.
-		if (current?.kind === "block" && !present.has(current.block)) current = null;
-		if (current?.kind === "activity" && !view.run) current = null;
-		if (current?.kind === "selection" && !previews.has("selection")) current = null;
-		current ??= view.blocks[0] ? { kind: "block", block: view.blocks[0].block.id } : view.run ? { kind: "activity" } : null;
-		if (current?.kind === "block") lastBlock = current.block;
-		const hasDraft = anyDraft();
-		// The record form follows a Run that finishes while shown: once, and before the form is drawn.
-		if (view.run) {
-			if (runStatus.get(view.run.id) === "running" && view.run.status === "finished" && !view.retrospective) resetRecordForm();
-			runStatus.set(view.run.id, view.run.status);
+
+	function layer(view: DocView): TspNode {
+		const children: TspNode[] = [];
+		if (menu !== null && view.blocks.some(item => item.block.id === menu)) {
+			const block = menu;
+			on("menu.delete", { click: () => { menu = null; if (open === block) open = null; outcome(core.deleteBlock(REF, block)); } });
+			children.push({ id: "menu", k: "overlay", p: { anchor: { node: `${block}.more` }, size: "sm" }, c: [el("menu.delete", "div", "pb-menu-item pb-danger", [], { text: "删除此块", actions: { click: "invoke" } })] });
 		}
-		// Every block is drawn for its render status; only the shown one is mounted.
-		const details = new Map(view.blocks.map(item => [item.block.id, blockDetail(view, item, hasDraft)] as const));
-		for (const id of fields.keys()) if (!(current?.kind === "block" && id.startsWith(`${current.block}.`)) && !id.startsWith("run.") && !id.startsWith("post.")) fields.delete(id);
-		let detail: TspNode[];
-		if (current?.kind === "block") detail = [details.get(current.block)!];
-		else if (current?.kind === "activity") detail = activity(view);
-		else if (current?.kind === "selection") {
-			const preview = previews.get("selection")!;
-			detail = [{ id: "selection.title", k: "el", p: { tag: "h2", class: "pb-block-title", text: "已选块合并后发给 agent 的内容" } }, row("selection.preview.bar", [text("selection.preview.length", preview.kind === "Ok" ? `${preview.text.length} 字符` : "编译失败", preview.kind === "Ok" ? "muted" : "error"), button("selection.preview.close", "收起", () => { previews.delete("selection"); current = null; redraw(); }, false, "ghost")]), { id: "selection.preview.text", k: "code", p: { text: compileText(preview), lang: "text", wrap: true } }];
-		} else detail = [box("empty", "pb-empty", [text("empty.text", "这份 Playbook 还没有块。在左侧新建执行块或设计块。", "muted")])];
-		return col("main", [box("app", "pb-app", [topBar(view, runs), box("body", "pb-body", [nav(view, hasDraft), box("detail", "pb-detail", detail)])])]);
+		if (picker) {
+			const current = picker;
+			const options = current.slot.options.map((option, index): TspNode => {
+				const id = `picker.o${index}`;
+				on(id, { click: () => { editing = null; picker = null; outcome(current.apply(option.label)); } });
+				return el(id, "div", `pb-opt${option.label === current.slot.value ? " pb-opt-on" : ""}`, [
+					el(`${id}.row`, "div", "pb-opt-row", [
+						el(`${id}.label`, "span", "pb-opt-label", [], { text: option.label }),
+						...(option.kind === "recommended" ? [{ id: `${id}.suggest`, k: "badge", p: { text: "建议", tone: "accent" } }] : []),
+						...(option.kind === "past" ? [el(`${id}.past`, "span", "pb-opt-past", [], { text: "曾提出" })] : []),
+					]),
+					...(option.note ? [el(`${id}.note`, "span", "pb-opt-note", [], { text: option.note })] : []),
+				], { actions: { click: "invoke" } });
+			});
+			children.push({ id: "picker", k: "overlay", p: { anchor: { node: current.anchor }, size: "sm" }, c: [...options, ...(editing?.id === "picker.custom" ? [editor(editing)] : [])] });
+		}
+		return { id: "layer.view", k: "col", c: children };
 	}
+
+	// ------------------------------------------------------------ frames
+
 	/**
-	 * Summaries are drawn for every block on every redraw, so they are exact for all of them. Frame facts
-	 * (`blockError`, `pendingOverdue`) come from `tsp.status`, which only frames that mounted a block update:
-	 * a block that is not shown keeps the facts of the last frame that mounted it.
+	 * Frame facts (`blockError`, `pendingOverdue`) come from `tsp.status`; only the open card is mounted,
+	 * so a closed card keeps the facts of the last frame that mounted it.
 	 */
 	function reportStatus(blocks: readonly string[]): void {
-		const view = core.view(ref);
-		for (const item of view.blocks) if (blocks.includes(item.block.id)) {
+		for (const item of core.view(REF).blocks) {
 			const summary = summaries.get(item.block.id);
-			if (summary) core.setRenderStatus(ref, item.block.id, { ...tsp.status(item.block.id), ...summary });
+			if (summary && blocks.includes(item.block.id)) core.setRenderStatus(REF, item.block.id, { ...tsp.status(item.block.id), ...summary });
 		}
 	}
+	/**
+	 * Region roots are added once; each redraw replaces their one child. A toast is its own child of
+	 * the layer, added once and removed by the next one, so redraws never show it again.
+	 */
 	function redraw(): void {
 		if (!opened) return;
-		const view = core.view(ref);
-		const node = root(view);
-		if (focus && !fields.has(focus)) focus = null;
-		const ops: FrameOp[] = [...(mounted ? [["del", "main"] as const] : []), ["add", "main", SURFACE, null, node], ["focus", focus]];
-		const s = tsp.frame(ops, current?.kind === "block" ? [current.block] : []);
+		const view = core.view(REF);
+		handlers.clear();
+		const present = new Set(view.blocks.map(item => item.block.id));
+		for (const id of selected) if (!present.has(id)) selected.delete(id);
+		if (open !== null && !present.has(open)) open = null;
+		if (!openChosen && open === null) open = view.blocks[0]?.block.id ?? null;
+		const regions = [main(view), dock(view), layer(view)];
+		const field = editing ? `${editing.id}.edit` : null;
+		const ops: FrameOp[] = [];
+		if (!mounted) for (const region of ["main", "dock", "layer"]) ops.push(["add", region, SURFACE, null, { id: region, k: "col" }]);
+		regions.forEach((node, index) => {
+			if (mounted) ops.push(["del", node.id]);
+			ops.push(["add", node.id, ["main", "dock", "layer"][index]!, null, node]);
+		});
+		if (toast && toast.n !== shownToast) {
+			if (shownToast !== null) ops.push(["del", `toast.${shownToast}`]);
+			ops.push(["add", `toast.${toast.n}`, "layer", null, { id: `toast.${toast.n}`, k: "toast", p: { text: toast.text, tone: toast.tone } }]);
+			shownToast = toast.n;
+		}
+		ops.push(["focus", field]);
+		const s = tsp.frame(ops, open !== null ? [open] : []);
 		mounted = true;
 		tsp.fullRedraw(s);
 		reportStatus(view.blocks.map(item => item.block.id));
 	}
-	function updateField(id: string): void {
-		const value = fields.get(id);
-		if (!value) return;
-		const caret = carets.get(id)!;
-		const block = core.view(ref).blocks.find(item => id === `${item.block.id}.title` || id === `${item.block.id}.body`)?.block.id;
-		tsp.frame([["set", id, { text: value.text(), cursor: caret.cursor, anchor: caret.anchor }]], block ? [block] : []);
-		if (block) reportStatus([block]);
+	function updateField(): void {
+		if (!editing) return;
+		tsp.frame([["set", `${editing.id}.edit`, { text: editing.text, cursor: editing.caret.cursor, anchor: editing.caret.anchor }]], []);
 	}
-	function applyText(id: string, next: string, cursor: number, anchor: number | null = null, remember = true): void {
-		const value = fields.get(id);
-		if (!value) return;
-		const before = value.text();
-		if (next !== before) {
-			const error = value.write(next);
-			if (error) return showError(error, id);
-			if (remember) { const history = undo.get(id) ?? []; history.push({ text: before, ...(carets.get(id) ?? { cursor: before.length, anchor: null }) }); undo.set(id, history); }
-		}
-		carets.set(id, { cursor: Math.max(0, Math.min(next.length, cursor)), anchor });
-		// Changing the text answers the refusal shown for this field.
-		if (next !== before && actionError?.anchor === id) { actionError = null; redraw(); return; }
-		updateField(id);
+	function applyText(next: string, cursor: number, anchor: number | null = null, remember = true): void {
+		if (!editing) return;
+		if (next !== editing.text && remember) editing.undo.push({ text: editing.text, caret: editing.caret });
+		editing.text = next;
+		editing.caret = { cursor: Math.max(0, Math.min(next.length, cursor)), anchor };
+		updateField();
 	}
-	/** contracts.md K4 错误: input for a field that was committed before the input arrived is shown, never silently dropped. */
-	function late(id: string): void {
-		notices.set(id, { text: "一次输入因文本已变化未应用", tone: "warning" });
-		redraw();
+	function undoEdit(): void {
+		const step = editing?.undo.pop();
+		if (step) applyText(step.text, step.caret.cursor, step.caret.anchor, false);
 	}
-	function edit(event: Extract<TspEvent, { ev: "edit" }>): void {
-		const value = fields.get(event.id);
-		if (!value) {
-			if (event.id === committed) late(event.id);
-			return;
-		}
-		const currentText = value.text();
-		if (event.len !== currentText.length) { notices.set(event.id, { text: "一次输入因文本已变化未应用", tone: "warning" }); redraw(); return; }
-		applyText(event.id, currentText.slice(0, event.from) + event.text + currentText.slice(event.to), event.cursor);
+	function nativeEdit(event: Extract<TspEvent, { ev: "edit" }>): void {
+		if (!editing || event.id !== `${editing.id}.edit` || event.len !== editing.text.length) return;
+		applyText(editing.text.slice(0, event.from) + event.text + editing.text.slice(event.to), event.cursor);
 	}
+
+	// ------------------------------------------------------------ keys
+
 	let keyBuffer = "";
 	// A pty read can contain several keys (including text followed immediately by Esc).
 	// Only incomplete CSI/paste sequences survive into the next read.
@@ -1105,74 +652,75 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 			key(plain); keyBuffer = keyBuffer.slice(plain.length);
 		}
 	}
+	/** Enter, Ctrl+Enter and Esc end the edit and apply it; Shift+Enter is a new line in a multi-line field. */
 	function key(bytes: string): void {
 		const kitty = /^\x1b\[(\d+)(?:;(\d+)(?::(\d+))?)?u$/.exec(bytes);
 		if (kitty) {
 			if (kitty[3] === "3") return; // Key release is not a second edit.
 			const code = Number(kitty[1]), modifiers = Number(kitty[2] ?? 1) - 1;
-			// Ctrl+Enter saves (or, for a change request, submits) the field being edited.
-			if (code === 13 && modifiers === 4) { saveFocused(); return; }
+			if (code === 13 && modifiers === 1 && editing?.multiline) { insert("\n"); return; }
+			if (code === 13 || code === 27) { end(); return; }
 			if (modifiers > 1 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return;
-			bytes = code === 13 ? "\r" : String.fromCodePoint(code);
+			bytes = String.fromCodePoint(code);
 		}
-		// Esc neither saves nor discards: the draft stays in Core and its editor keeps the focus.
-		if (bytes === ESC || bytes === "\x1b[27u") return;
-		// Enter in a single-line input acts: the title saves, the Run form starts the Run.
-		if ((bytes === "\r" || bytes === "\n") && focus !== null && fields.get(focus)?.multiline === false && (focus.endsWith(".title") || focus === "run.name" || focus === "run.every")) { saveFocused(); return; }
-		const value = focus === null ? undefined : fields.get(focus);
-		if (focus === null || !value) {
-			const changesText = bytes === "\x7f" || bytes === "\b" || bytes === `${ESC}[3~` || bytes.startsWith(`${ESC}[200~`) || !/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(bytes);
-			if (committed !== null && changesText) late(committed);
-			return;
-		}
-		const currentText = value.text();
-		const caret = carets.get(focus) ?? { cursor: currentText.length, anchor: null };
+		if (bytes === ESC || bytes === "\r" || bytes === "\n") { end(); return; }
+		if (!editing) return;
+		const text = editing.text;
+		const caret = editing.caret;
 		let cursor = caret.cursor;
 		let from = caret.anchor === null ? cursor : Math.min(cursor, caret.anchor);
 		let to = caret.anchor === null ? cursor : Math.max(cursor, caret.anchor);
-		let insertion: string | null = null;
-		if (bytes === "\x7f" || bytes === "\b") { if (from === to) from = previous(currentText, from); insertion = ""; }
-		else if (bytes === `${ESC}[3~`) { if (from === to) to = following(currentText, to); insertion = ""; }
-		else if (bytes === `${ESC}[D`) cursor = caret.anchor === null ? previous(currentText, cursor) : from;
-		else if (bytes === `${ESC}[C`) cursor = caret.anchor === null ? following(currentText, cursor) : to;
-		else if (bytes === `${ESC}[H` || bytes === "\x01") cursor = currentText.lastIndexOf("\n", Math.max(0, cursor - 1)) + 1;
-		else if (bytes === `${ESC}[F` || bytes === "\x05") { const end = currentText.indexOf("\n", cursor); cursor = end < 0 ? currentText.length : end; }
-		else if (bytes === "\x1a") { undoField(focus); return; }
-		else if (bytes.startsWith(`${ESC}[200~`) && bytes.endsWith(`${ESC}[201~`)) insertion = bytes.slice(6, -6).replace(/\r\n?/g, "\n");
-		else if (!/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(bytes)) insertion = bytes.replace(/\r\n?/g, "\n");
+		if (bytes === "\x7f" || bytes === "\b") { if (from === to) from = previous(text, from); applyText(text.slice(0, from) + text.slice(to), from); return; }
+		if (bytes === `${ESC}[3~`) { if (from === to) to = following(text, to); applyText(text.slice(0, from) + text.slice(to), from); return; }
+		if (bytes === `${ESC}[D`) cursor = caret.anchor === null ? previous(text, cursor) : from;
+		else if (bytes === `${ESC}[C`) cursor = caret.anchor === null ? following(text, cursor) : to;
+		else if (bytes === `${ESC}[H` || bytes === "\x01") cursor = text.lastIndexOf("\n", Math.max(0, cursor - 1)) + 1;
+		else if (bytes === `${ESC}[F` || bytes === "\x05") { const stop = text.indexOf("\n", cursor); cursor = stop < 0 ? text.length : stop; }
+		else if (bytes === "\x1a") { undoEdit(); return; }
+		else if (bytes.startsWith(`${ESC}[200~`) && bytes.endsWith(`${ESC}[201~`)) { insert(bytes.slice(6, -6).replace(/\r\n?/g, "\n")); return; }
+		else if (!/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(bytes)) { insert(bytes); return; }
 		else return;
-		if (insertion !== null) {
-			if (!value.multiline && insertion.includes("\n")) return;
-			applyText(focus, currentText.slice(0, from) + insertion + currentText.slice(to), from + insertion.length);
-		} else applyText(focus, currentText, cursor);
+		applyText(text, cursor);
 	}
-	function undoField(id: string): void { const step = undo.get(id)?.pop(); if (step) applyText(id, step.text, step.cursor, step.anchor, false); }
+	function insert(value: string): void {
+		if (!editing) return;
+		const inserted = editing.multiline ? value : value.replace(/\n/g, " ");
+		const caret = editing.caret;
+		const from = caret.anchor === null ? caret.cursor : Math.min(caret.cursor, caret.anchor);
+		const to = caret.anchor === null ? caret.cursor : Math.max(caret.cursor, caret.anchor);
+		applyText(editing.text.slice(0, from) + inserted + editing.text.slice(to), from + inserted.length);
+	}
+	/** Enter or Esc: apply the edit; with nothing being edited, Esc closes the menu, the picker and a picked item. */
+	function end(): void {
+		if (editing) finishEdit();
+		else { menu = null; picker = null; picked = null; node = null; }
+		redraw();
+	}
+
+	// ------------------------------------------------------------ events
+
 	function event(input: TspEvent): void {
 		switch (input.ev) {
 			case "action": {
-				const handler = input.act === "invoke" ? actions.get(input.id) : undefined;
-				// A new action replaces the previous action's refusal.
-				if (handler) { actionError = null; handler(); redraw(); }
+				const handler = handlers.get(input.id);
+				const click = input.act === "invoke" ? handler?.click : undefined;
+				const dblclick = input.act === "edit" ? handler?.dblclick : undefined;
+				if (!click && !dblclick) break;
+				pickerBefore = picker?.anchor ?? null;
+				// Acting anywhere else ends the edit in progress and applies it; the picker's own options take over its field.
+				if (editing && !(editing.id === "picker.custom" && input.id.startsWith("picker."))) finishEdit();
+				if (click) click(input.mods);
+				else dblclick?.();
+				if (!input.id.startsWith("picker.") && !input.id.endsWith(".more") && !input.id.startsWith("menu.")) menu = null;
+				redraw();
 				break;
 			}
-			case "change": {
-				const handler = changes.get(input.id);
-				if (handler) { actionError = null; handler(input); redraw(); }
-				break;
-			}
-			case "edit": edit(input); break;
-			case "undo": undoField(input.id); break;
-			case "focus": if (fields.has(input.id)) { focus = input.id; committed = null; tsp.frame([["focus", focus]], []); } break;
+			case "edit": nativeEdit(input); break;
+			case "undo": undoEdit(); break;
+			case "focus": break;
 			case "theme": void setTheme(input.dark ? "dark" : "light").then(result => { if (!result.success) renderError = result.error ?? "主题切换失败"; redraw(); }); break;
 			case "error": if (input.s === undefined) { renderError = input.msg ?? "Tern 渲染错误"; redraw(); } break;
-			case "ack": case "toggle": break;
-			case "other": {
-				const body = input.body;
-				if (typeof body !== "object" || body === null || !("ev" in body) || body.ev !== "select" || !("id" in body) || body.id !== "tabs" || !("item" in body) || typeof body.item !== "string") break;
-				if (body.item === "template") switchView({ kind: "template" });
-				else { const run = parseRunId(body.item); if (run && core.runs().some(candidate => candidate.id === run)) switchView({ kind: "run", run }); }
-				break;
-			}
+			case "ack": case "toggle": case "change": case "other": break;
 		}
 	}
 	function input(value: TspInput): void {
@@ -1186,23 +734,10 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 			case "keys": keys(value.bytes); break;
 		}
 	}
-	core.onChange(() => {
-		// Core is the source of Launch records; an opened record is re-read on every change.
-		for (const id of [...info.keys()]) {
-			const fresh = core.launchInfo(id);
-			if (fresh) info.set(id, fresh); else info.delete(id);
-		}
-		queueMicrotask(redraw);
-	});
+	core.onChange(() => queueMicrotask(redraw));
 	tsp.onStatusChange(reportStatus);
 	tsp.start("omp-playbooks", input);
 }
 
-function seconds(value: string): number | null | undefined {
-	if (value.trim() === "") return null;
-	if (!/^[1-9][0-9]*$/.test(value.trim())) return undefined;
-	const number = Number(value);
-	return Number.isSafeInteger(number) ? number : undefined;
-}
 function previous(text: string, offset: number): number { if (offset <= 0) return 0; const last = text.charCodeAt(offset - 1); return offset > 1 && last >= 0xdc00 && last <= 0xdfff ? offset - 2 : offset - 1; }
 function following(text: string, offset: number): number { if (offset >= text.length) return text.length; const first = text.charCodeAt(offset); return first >= 0xd800 && first <= 0xdbff ? offset + 2 : offset + 1; }

@@ -2,10 +2,8 @@
 // every other module is either a pure function set it calls, an IO adapter it calls, or a
 // front end (TSP UI, K1 socket) that calls the core.
 import type {
-	Block,
 	BlockContent,
 	BlockId,
-	BlockLock,
 	BlockResult,
 	HumanField,
 	Revision,
@@ -21,15 +19,16 @@ import type {
 	Launch,
 	LaunchId,
 	PlaybookDoc,
-	RecordKind,
 	Reference,
 	RunId,
 	RunMeta,
+	Status,
 	Target,
 	TargetKey,
 	TimelineEntry,
+	Block,
 } from "./model";
-import type { EventPayload, Outcome, Request, RunSummary } from "./protocol";
+import type { EventPayload, Outcome, Request } from "./protocol";
 
 // ---------------------------------------------------------------- references (pure) — src/service/references.ts
 
@@ -74,6 +73,8 @@ export interface Store {
 	readonly templatePath: string;
 	/** Directory the template lives in (base for `file:` targets and `tern split --cwd`). */
 	readonly baseDir: string;
+	/** Absolute path of a document's file: the template, or `<name>.runs/<run>.yaml`. */
+	path(ref: DocRef): string;
 	/** Read and parse the template; null run. */
 	readTemplate(): ParsedFile;
 	/** Read and parse every Run file under `<name>.runs/`. */
@@ -89,10 +90,10 @@ export interface Store {
 	/** Service record file (append-only). */
 	readServiceRecords(): ServiceRecord[];
 	appendServiceRecord(record: ServiceRecord): void;
-	/** Run record file `<run>.jsonl`: entries and launch lines (runs.md §3). */
-	readRunLog(run: RunId): { readonly entries: TimelineEntry[]; readonly launches: Map<LaunchId, Launch> };
-	appendEntry(run: RunId, entry: TimelineEntry): void;
-	appendLaunch(run: RunId, launch: Launch): void;
+	/** Execution log of a document (`<file>.log.jsonl` for the template, `<runs>/<run>.jsonl` for a Run): entries and launch lines (runs.md §3). */
+	readLog(ref: DocRef): { readonly entries: TimelineEntry[]; readonly launches: Map<LaunchId, Launch> };
+	appendEntry(ref: DocRef, entry: TimelineEntry): void;
+	appendLaunch(ref: DocRef, launch: Launch): void;
 	/** Revision journal of a document (`<file>.revisions.jsonl`, `<runs>/<run>.revisions.jsonl`): every submitted design change request, append-only. */
 	readRevisions(ref: DocRef): Revision[];
 	appendRevision(ref: DocRef, revision: Revision): void;
@@ -108,11 +109,9 @@ export interface RenderStatus {
 	readonly documentError: boolean;
 	/** The newest frame containing this block was sent ≥ 2 s ago and is not acked. */
 	readonly pendingOverdue: boolean;
-	/** Count of `image` chart nodes the view holds for this block. */
-	readonly chartNodes: number;
 	/** Text of `md` nodes and alt of `image` nodes the view holds for this block (checks.md §1 `view`). */
 	readonly view: { readonly md: readonly string[]; readonly images: readonly string[] };
-	/** Error findings a design draft's renderers reported while drawing (a missing file, an oversized image). */
+	/** Error findings the component renderers reported while drawing the block (a missing file, an oversized image). */
 	readonly draftErrors: number;
 }
 
@@ -124,8 +123,6 @@ export interface ChecksModule {
 		readonly content: BlockContent;
 		readonly render: RenderStatus;
 	}): Findings;
-	/** Chartable tables in a body, per `splitTableCharts` (`always`). */
-	chartableTables(body: string): number;
 	/** SHA-256 version (checks.md §1). */
 	version(input: { readonly closure: ReadonlyMap<BlockId, string | null>; readonly results: readonly BlockResult[]; readonly compiled: CompileResult }): string;
 	/** Validate a report against the question table (checks.md §3, §5). */
@@ -138,35 +135,10 @@ export type { FindingName };
 
 // ---------------------------------------------------------------- core API — implemented by src/service/core.ts
 
-/** A Launch as shown on a card (contracts.md K4). */
-export interface LaunchView {
-	readonly id: LaunchId;
-	readonly active: boolean;
-	readonly session: string;
-	readonly agents: readonly string[];
-}
-
-export interface ReferenceView {
-	readonly key: string;
-	readonly reference: Reference;
-	readonly external: boolean;
-	/** "fetching" while a first fetch is in flight. */
-	readonly status: "ready" | "fetching";
-	readonly fetchedAt: number | null;
-	readonly fetchFailed: boolean;
-	readonly expansion: CompileResult | null;
-}
-
 export interface BlockView {
 	readonly block: Block;
-	readonly lock: BlockLock;
-	readonly references: readonly ReferenceView[];
-	readonly launches: readonly LaunchView[];
-	readonly latestRecord: TimelineEntry | null;
-	readonly findings: Findings | null;
-	readonly report: { readonly version: string; readonly result: JudgeReport } | null;
-	/** Messages shown beside the block (disk changed field, deleted, dropped input, etc.). */
-	readonly notices: readonly string[];
+	/** A launch request was sent for this block and no Launch has been created from it since. */
+	readonly launchPending: boolean;
 }
 
 export interface DocView {
@@ -174,10 +146,6 @@ export interface DocView {
 	readonly title: string;
 	readonly run: RunMeta | null;
 	readonly blocks: readonly BlockView[];
-	/** Run views only. */
-	readonly timeline: readonly TimelineEntry[];
-	readonly lastUpdateAt: number | null;
-	readonly retrospective: boolean;
 	readonly errors: readonly string[];
 }
 
@@ -187,35 +155,30 @@ export interface CoordinatorStatus {
 	readonly pane: string | null;
 }
 
-/** Human operations from the TSP UI (contracts.md K4). Each returns an error message or null. */
+/**
+ * Human operations from the TSP UI (contracts.md K4). Each applies at once or is refused with a message;
+ * there are no drafts. A person's change to a block the coordinator holds takes the block back first.
+ */
 export interface HumanCommands {
-	/** Start a draft of `field`; `prompt` (design blocks) starts empty and is submitted with `commit`. */
-	pencil(ref: DocRef, block: BlockId, field: HumanField): string | null;
-	/** Replace the draft text (after an `edit` event, key or paste was applied by the UI). */
-	setDraft(ref: DocRef, block: BlockId, text: string): string | null;
-	/** Apply the draft; for `prompt`, submit it as a revision and notify the coordinator (refused without one, keeping the draft). */
-	commit(ref: DocRef, block: BlockId): string | null;
-	/** Drop the draft without applying it. */
-	discard(ref: DocRef, block: BlockId): string | null;
-	interrupt(ref: DocRef, block: BlockId): string | null;
-	setDone(ref: DocRef, block: BlockId, done: boolean): string | null;
-	insertBlock(ref: DocRef, after: BlockId | null, kind: BlockContent["kind"]): string | null;
+	/** Replace `field` whole with `text`, refused when it no longer equals `expected` (the text the person edited). */
+	edit(ref: DocRef, block: BlockId, field: HumanField, expected: string, text: string): string | null;
+	/** Replace the document title, refused when it no longer equals `expected`. */
+	setTitle(ref: DocRef, expected: string, text: string): string | null;
+	/** Submit a change request for a design block and notify the coordinator (refused without one). */
+	requestRevision(ref: DocRef, block: BlockId, text: string): string | null;
+	setStatus(ref: DocRef, block: BlockId, status: Status): string | null;
+	/** A task block's default agent; null clears it. */
+	setAgent(ref: DocRef, block: BlockId, agent: string | null): string | null;
+	setIsolated(ref: DocRef, block: BlockId, isolated: boolean): string | null;
 	deleteBlock(ref: DocRef, block: BlockId): string | null;
-	requestLaunch(run: RunId, blocks: readonly BlockId[]): string | null;
-	requestCheck(ref: DocRef, blocks: readonly BlockId[]): string | null;
-	preview(ref: DocRef, blocks: readonly BlockId[]): Promise<CompileResult>;
-	refetch(ref: DocRef, target: TargetKey): Promise<string | null>;
-	startRun(name: string, updateEvery: number | null): string | null;
-	finishRun(run: RunId): string | null;
-	post(run: RunId, kind: RecordKind, text: string, block: BlockId | null, next: number | null): string | null;
-	snooze(run: RunId, after: number): string | null;
-	closeLaunch(launch: LaunchId): string | null;
-	launchInfo(launch: LaunchId): Launch | null;
+	/** Ask the coordinator to run `blocks` together (refused without one). */
+	requestLaunch(ref: DocRef, blocks: readonly BlockId[]): string | null;
+	/** Ask the coordinator to stop the block's open Launches; with none open the block goes back to todo at once. */
+	requestStop(ref: DocRef, block: BlockId): string | null;
 }
 
 export interface CoreApi extends HumanCommands {
 	view(ref: DocRef): DocView;
-	runs(): RunSummary[];
 	coordinator(): CoordinatorStatus;
 	focusCoordinator(): Promise<string | null>;
 	/** Document-level messages (disk parse errors, unmapped TSP errors, K5 errors). */
@@ -224,8 +187,6 @@ export interface CoreApi extends HumanCommands {
 	onChange(listener: (ref: DocRef | null) => void): () => void;
 	/** UI reports render status per block so the core can compute findings. */
 	setRenderStatus(ref: DocRef, block: BlockId, status: RenderStatus): void;
-	/** Revisions of one block in a document, oldest first. */
-	revisions(ref: DocRef, block: BlockId): readonly Revision[];
 }
 
 // ---------------------------------------------------------------- K1 transport — src/service/socket.ts

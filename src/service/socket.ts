@@ -95,11 +95,15 @@ export function parseRequest(op: string, args: unknown): Request | ProtocolError
 				const target = { run: optional(a.run, run), block: block(a.block) };
 				switch (a.field) {
 					case "title": return { op, args: { ...target, field: "title", value: string(a.value, "value") } };
-					case "done":
-						return { op, args: { ...target, field: "done", value: flag(a.value, "done value") } };
+					case "status": {
+						const value = a.value;
+						if (value !== "todo" && value !== "running" && value !== "done") throw new BadInput("status value must be todo, running or done");
+						return { op, args: { ...target, field: "status", value } };
+					}
+					case "task": return { op, args: { ...target, field: "task", value: flag(a.value, "task value") } };
 					case "agent": return { op, args: { ...target, field: "agent", value: a.value === null ? null : agentName(a.value) } };
 					case "isolated": return { op, args: { ...target, field: "isolated", value: a.value === null ? null : flag(a.value, "isolated value") } };
-					default: throw new BadInput("field must be title, done, agent or isolated");
+					default: throw new BadInput("field must be title, status, task, agent or isolated");
 				}
 			}
 			case "edit": return { op, args: { run: optional(a.run, run), block: block(a.block), find: string(a.find, "find"), replace: string(a.replace, "replace") } };
@@ -139,9 +143,7 @@ export function parseRequest(op: string, args: unknown): Request | ProtocolError
 			case "compile":
 			case "inspect": return { op, args: { run: optional(a.run, run), blocks: array(a.blocks, "blocks", block) } };
 			case "report": return { op, args: { run: optional(a.run, run), blocks: array(a.blocks, "blocks", block), version: string(a.version, "version"), result: report(a.result) } };
-			case "launch":
-				if (a.run === undefined) return { code: "BadLaunch", message: "launch requires run" };
-				return { op, args: { run: run(a.run), blocks: array(a.blocks, "blocks", block) } };
+			case "launch": return { op, args: { run: optional(a.run, run), blocks: array(a.blocks, "blocks", block) } };
 			case "bind": return { op, args: { launch: launch(a.launch), agent: string(a.agent, "agent") } };
 			case "rebase":
 			case "close":
@@ -149,14 +151,14 @@ export function parseRequest(op: string, args: unknown): Request | ProtocolError
 			case "start_run": return { op, args: { name: string(a.name, "name"), update_every: optional(a.update_every, v => integer(v, "update_every")) } };
 			case "finish_run": return { op, args: { run: run(a.run) } };
 			case "runs": return { op, args: {} };
-			case "timeline": return { op, args: { run: run(a.run), after: optional(a.after, v => integer(v, "after", 0)) } };
+			case "timeline": return { op, args: { run: optional(a.run, run), after: optional(a.after, v => integer(v, "after", 0)) } };
 			case "post": {
 				const kind = a.kind;
 				if (kind !== "update" && kind !== "result" && kind !== "failure" && kind !== "retrospective") throw new BadInput("unknown post kind");
 				if (a.origin !== undefined && a.origin !== "human") throw new BadInput("origin must be human");
 				const next = optional(a.next, v => integer(v, "next"));
 				if (next !== undefined && kind !== "update") throw new BadInput("next is only valid for update records");
-				return { op, args: { run: run(a.run), kind, text: string(a.text, "text"), block: optional(a.block, block), launch: optional(a.launch, launch), next, quote: optional(a.quote, v => string(v, "quote")), origin: a.origin } };
+				return { op, args: { run: optional(a.run, run), kind, text: string(a.text, "text"), block: optional(a.block, block), launch: optional(a.launch, launch), next, quote: optional(a.quote, v => string(v, "quote")), origin: a.origin } };
 			}
 			case "snooze": return { op, args: { run: run(a.run), after: integer(a.after, "after") } };
 			case "ack": return { op, args: { event: string(a.event, "event") } };

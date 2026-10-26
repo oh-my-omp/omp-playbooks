@@ -1,5 +1,5 @@
 import type { TspNode } from "../tsp-types";
-import { diagnostic, takeMarker, type Change, type ChangeView, type DraftDiagnostic, type FenceInput, type Parsed, type RenderContext, type Rendered } from "./contract";
+import { diagnostic, takeMarker, type Change, type ChangeView, type ChainNode, type DraftDiagnostic, type FenceInput, type FlowChain, type Parsed, type RenderContext, type Rendered, type Span } from "./contract";
 import { escapeXml, textWidth, wrapText } from "./text";
 
 type Direction = "TB" | "LR" | "BT" | "RL";
@@ -31,6 +31,9 @@ export interface FlowSpec {
 	readonly edges: readonly FlowEdge[];
 	readonly groups: readonly FlowGroup[];
 	readonly marked: boolean;
+	/** The fence body, and its `//` comment lines kept when a chain is rewritten. */
+	readonly body: Span;
+	readonly comments: readonly string[];
 }
 interface NodeToken { readonly id: string; readonly shape: Shape; readonly explicit: boolean; readonly highlighted: boolean }
 interface Step { readonly nodes: readonly NodeToken[]; readonly dashed: boolean }
@@ -140,7 +143,7 @@ export function parseFlow(input: FenceInput): Parsed<FlowSpec> {
 	const nodes: FlowNode[] = [...seen].map(([id, n]) => ({ id, shape: n.token.shape, highlighted: n.token.highlighted, change: !n.after ? "removed" : !n.before ? "added" : n.changed ? "changed" : "same", line: n.line }));
 	for (const group of groups) if (group.change !== "removed" && group.members.length && group.members.every(m => nodes.find(n => n.id === m)?.change === "removed")) diagnostics.push(diagnostic("flow", group.line, `分组 ${group.name} 只含删除节点；请写成 - group ${group.name}: ${group.members.join(", ")}`, "warning"));
 	if (diagnostics.some(d => d.severity === "error")) return { ok: false, diagnostics };
-	return { ok: true, value: { direction, nodes, edges, groups, marked }, diagnostics };
+	return { ok: true, value: { direction, nodes, edges, groups, marked, body: input.body, comments: input.lines.filter(line => line.trim().startsWith("//")) }, diagnostics };
 }
 
 interface Box { x: number; y: number; w: number; h: number }
@@ -229,7 +232,91 @@ function ranksFor(nodes: readonly FlowNode[], edges: readonly FlowEdge[]): Map<s
 	return rank;
 }
 function overlap(a: Box, b: Box): boolean { return a.x < b.x + b.w + 4 && a.x + a.w + 4 > b.x && a.y < b.y + b.h + 4 && a.y + a.h + 4 > b.y; }
+
+const OPEN: Readonly<Record<Shape, string>> = { rect: "[", round: "(", diamond: "{", cylinder: "[(" };
+const CLOSE: Readonly<Record<Shape, string>> = { rect: "]", round: ")", diamond: "}", cylinder: ")]" };
+
+/** A node as written: a bare name when that parses back to the same node, else its shape's brackets. */
+function nodeToken(node: { readonly id: string; readonly shape: Shape; readonly highlighted: boolean }): string {
+	const bare = node.shape === "rect" && !/->|&|[:：[\](){}*]/.test(node.id);
+	return `${node.highlighted ? "*" : ""}${bare ? node.id : `${OPEN[node.shape]}${node.id}${CLOSE[node.shape]}`}`;
+}
+
+/**
+ * A flow that is one path (each node at most one edge in and out, no groups or change markers), with
+ * the operations that rewrite its fence body. Null for any other flow.
+ */
+function chainOf(spec: FlowSpec, slots: RenderContext["slots"]): FlowChain | null {
+	if (spec.marked || spec.groups.length || !spec.nodes.length || spec.edges.length !== spec.nodes.length - 1) return null;
+	const incoming = new Map<string, FlowEdge>();
+	const outgoing = new Map<string, FlowEdge>();
+	for (const edge of spec.edges) {
+		if (incoming.has(edge.to) || outgoing.has(edge.from) || edge.from === edge.to) return null;
+		incoming.set(edge.to, edge);
+		outgoing.set(edge.from, edge);
+	}
+	const starts = spec.nodes.filter(node => !incoming.has(node.id));
+	if (starts.length !== 1) return null;
+	const path: FlowNode[] = [starts[0]!];
+	const steps: FlowEdge[] = [];
+	for (let edge = outgoing.get(starts[0]!.id); edge; edge = outgoing.get(edge.to)) {
+		steps.push(edge);
+		path.push(spec.nodes.find(node => node.id === edge!.to)!);
+	}
+	if (path.length !== spec.nodes.length) return null;
+	type Link = { readonly dashed: boolean; readonly label: string };
+	const write = (nodes: readonly { id: string; shape: Shape; highlighted: boolean }[], links: readonly Link[]): string => {
+		const lines: string[] = [...spec.comments];
+		let line = nodeToken(nodes[0]!);
+		links.forEach((link, index) => {
+			line += ` ${link.dashed ? "-->" : "->"} ${nodeToken(nodes[index + 1]!)}`;
+			// An edge label is written after the line's last step, so a labeled edge ends its line.
+			if (link.label) { lines.push(`${line}: ${link.label}`); line = index + 1 < links.length ? nodeToken(nodes[index + 1]!) : ""; }
+		});
+		if (line) lines.push(line);
+		return lines.join("\n");
+	};
+	const nodes = path.map(node => ({ id: node.id, shape: node.shape, highlighted: node.highlighted }));
+	const links: Link[] = steps.map(edge => ({ dashed: edge.dashed, label: edge.label }));
+	return {
+		nodes: path.map((node): ChainNode => {
+			const slot = /^\{\{(.+)\}\}$/.exec(node.id)?.[1]?.trim() ?? null;
+			const declared = slot === null ? undefined : slots.get(slot);
+			return { name: node.id, label: declared?.value ?? node.id, shape: node.shape, slot: declared ? slot : null };
+		}),
+		edges: links,
+		rename(index, name) {
+			const value = name.trim();
+			if (!value || value.includes("\n") || nodes.some((node, other) => other !== index && node.id === value)) return null;
+			return write(nodes.map((node, other) => other === index ? { ...node, id: value } : node), links);
+		},
+		insertAfter(index) {
+			let name = "新节点";
+			for (let n = 2; nodes.some(node => node.id === name); n++) name = `新节点 ${n}`;
+			const next = [...nodes];
+			next.splice(index + 1, 0, { id: name, shape: "rect", highlighted: false });
+			const nextLinks = [...links];
+			// The new node takes the plain edge from its predecessor; the old edge now leaves the new node.
+			nextLinks.splice(index, 0, { dashed: false, label: "" });
+			return write(next, nextLinks);
+		},
+		remove(index) {
+			if (nodes.length <= 2) return null;
+			const nextLinks = [...links];
+			// The edge into the removed node is kept and now reaches its successor.
+			nextLinks.splice(index === 0 ? 0 : index === nodes.length - 1 ? index - 1 : index, 1);
+			return write(nodes.filter((_, other) => other !== index), nextLinks);
+		},
+	};
+}
+
 export function renderFlow(spec: FlowSpec, ctx: RenderContext): Rendered {
+	const chain = chainOf(spec, ctx.slots);
+	if (chain) return { nodes: [ctx.edit.chain(`${ctx.id}.chain`, spec.body, chain)], diagnostics: [] };
+	return { nodes: [ctx.edit.text(`${ctx.id}.source`, spec.body, true, { id: `${ctx.id}.drawing`, k: "col", c: renderFlowSvg(spec, ctx) })], diagnostics: [] };
+}
+
+function renderFlowSvg(spec: FlowSpec, ctx: RenderContext): TspNode[] {
 	const nodes = spec.nodes.filter(n => visible(n.change, ctx.view));
 	const ids = new Set(nodes.map(n => n.id));
 	const edges = spec.edges.filter(e => visible(e.change, ctx.view) && ids.has(e.from) && ids.has(e.to));
@@ -363,5 +450,5 @@ export function renderFlow(spec: FlowSpec, ctx: RenderContext): Rendered {
 			{ t: `  ~ ${changes.filter(c => c === "changed").length} 修改`, s: "warning" },
 		] } });
 	}
-	return { nodes: output, diagnostics: [] };
+	return output;
 }

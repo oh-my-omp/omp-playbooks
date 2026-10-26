@@ -2,7 +2,7 @@
 // component modules (src/service/draft/<component>.ts) and the TSP renderer.
 // Draft syntax follows answer-me-with-html's draft format (`am help <component>`).
 import type { TspNode } from "../tsp-types";
-import type { AskSpec } from "./ask";
+import type { SlotDecl } from "./slot";
 
 /** One finding about a design draft; `line` is 1-based in the design text. */
 export interface DraftDiagnostic {
@@ -13,6 +13,19 @@ export interface DraftDiagnostic {
 	readonly message: string;
 }
 
+/** A UTF-16 range of the drawn text (a task body, a design draft). */
+export interface Span {
+	readonly start: number;
+	readonly end: number;
+}
+
+/** One line of the drawn text and where it starts. */
+export interface SourceLine {
+	readonly text: string;
+	/** UTF-16 offset of the line start. */
+	readonly offset: number;
+}
+
 /** A fenced component's source: the fence arguments and the lines between the fences. */
 export interface FenceInput {
 	/** Text after the fence language, trimmed (`LR`, `cols=2`, `warn Caution`, `ts src=a.ts lines=1-4`). */
@@ -20,6 +33,10 @@ export interface FenceInput {
 	readonly lines: readonly string[];
 	/** 1-based line of `lines[0]` in the design text (the line after the opening fence). */
 	readonly line: number;
+	/** UTF-16 offset of each of `lines` in the drawn text. */
+	readonly starts: readonly number[];
+	/** The range of `lines` (empty at the body's place when there are none). */
+	readonly body: Span;
 }
 
 /** Result of parsing one component. `ok: false` means nothing can be drawn; its diagnostics say why. */
@@ -43,6 +60,51 @@ export interface Rendered {
 	readonly diagnostics: readonly DraftDiagnostic[];
 }
 
+/** One item of a Markdown list: the item's whole source and its drawn content. */
+export interface ListItem {
+	readonly span: Span;
+	readonly node: TspNode;
+}
+
+/** One node of a flow drawn as a chain of cards. */
+export interface ChainNode {
+	/** The node's name as written, `{{slot}}` included. */
+	readonly name: string;
+	/** What the card shows: the name, or a slot's current value. */
+	readonly label: string;
+	readonly shape: "rect" | "round" | "diamond" | "cylinder";
+	/** The slot a `{{name}}` node shows; renaming it picks that slot's value. */
+	readonly slot: string | null;
+}
+
+/**
+ * A flow that is one path of nodes (no branches, groups or change markers), drawn as cards a person
+ * edits. Each operation returns the fence's new body text, or null when it cannot apply.
+ */
+export interface FlowChain {
+	readonly nodes: readonly ChainNode[];
+	/** `edges[i]` joins `nodes[i]` and `nodes[i + 1]`. */
+	readonly edges: readonly { readonly dashed: boolean; readonly label: string }[];
+	rename(index: number, name: string): string | null;
+	insertAfter(index: number): string;
+	remove(index: number): string | null;
+}
+
+/**
+ * What a drawing may do with the text it came from; the UI implements it for one block field.
+ * Renderers draw what is written and leave every interaction to the host.
+ */
+export interface EditHost {
+	/** `view` drawn for the text in `span`, edited in place on double-click. */
+	text(id: string, span: Span, multiline: boolean, view: TspNode): TspNode;
+	/** The current value of slot `name`, as the control that switches it. */
+	slot(id: string, name: string): TspNode;
+	/** A Markdown list; the items of an ordered one can be picked up and placed elsewhere. */
+	list(id: string, span: Span, ordered: boolean, start: number, items: readonly ListItem[]): TspNode;
+	/** A flow drawn as a chain of cards; `body` is the fence body its operations replace. */
+	chain(id: string, body: Span, chain: FlowChain): TspNode;
+}
+
 /**
  * What a renderer may use. Renderers are pure apart from these calls: no Core, socket or UI state.
  * Every node id a renderer creates must be unique and start with `${ctx.id}.`.
@@ -60,11 +122,9 @@ export interface RenderContext {
 	image(id: string, bytes: Uint8Array, mime: string, alt: string): TspNode;
 	/** Read a file by a path relative to the Playbook's directory (or absolute); refuses paths outside that directory. */
 	readFile(path: string): FileRead;
-	/**
-	 * Selection controls for an `ask`: its options as inputs and a submit button, owned by the UI.
-	 * Absent when the draft is drawn without interaction (the checks' hidden pass); the ask is then shown statically.
-	 */
-	askControl?(id: string, spec: AskSpec): readonly TspNode[];
+	/** The slots the drawn text declares, by name. */
+	readonly slots: ReadonlyMap<string, SlotDecl>;
+	readonly edit: EditHost;
 }
 
 /** Split a leading change marker (`+ `, `- `, `~ `) off `text`. */

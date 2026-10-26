@@ -35,9 +35,12 @@ function parseEvent(body: unknown): TspEvent {
 			case "undo":
 				if (typeof id === "string") return { ev: event.ev, id };
 				break;
-			case "action":
-				if (typeof id === "string" && typeof event.act === "string") return { ev: "action", id, act: event.act };
+			case "action": {
+				// `mods` lists held modifiers (`shift`, `ctrl`, `alt`, `meta`) and is absent when none is.
+				const mods = event.mods === undefined ? [] : Array.isArray(event.mods) ? event.mods.filter((mod): mod is string => typeof mod === "string") : null;
+				if (typeof id === "string" && typeof event.act === "string" && mods !== null) return { ev: "action", id, act: event.act, mods };
 				break;
+			}
 			case "change":
 				if (typeof id === "string" && (event.checked === undefined || typeof event.checked === "boolean") && (event.value === undefined || typeof event.value === "string") && (event.text === undefined || typeof event.text === "string")) {
 					return { ev: "change", id, checked: event.checked, value: event.value, text: event.text };
