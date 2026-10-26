@@ -17,6 +17,40 @@ The Playbook file also carries its own execution state: every tracked block has 
 
 **Buttons are requests, not automatic executors.** "Launch" notifies the main session to execute; "Stop" asks it to cancel the worker; a change request or a pick on a design hands the change to the main session. The extension never revises a design, starts or cancels a worker, or accepts a result on its own because a notice arrived.
 
+## Demo videos
+
+Five silent videos follow one Playbook, moving a web tier's sessions from an in-process Map to Redis, from opening the file to handing it to another coordinator. The left pane is the omp coordinator, the right pane the Playbook; each caption names who acts (person, coordinator, subagent or document service) and explains the step. They were recorded in a headless Tern window with a real coordinator on `opencode-go/deepseek-v4.1-flash` and real `task:low`/`task:mid` subagents, so what the coordinator and the subagents write, including their slips, is their own output.
+
+| Video | What it shows |
+|---|---|
+| [1. Open and read a Playbook](#1-open-and-read-a-playbook) | `playbook_open` starting the pane; card numbers and status rings; design, execution, untracked and orchestration blocks; flow, svg, kv, slot, limits, callout, er, tree, status table, `---` header, sequence, timeline, annot, code `src=`, `//` comment and html; change markers with Changes / Before / After; outline breaks under a card |
+| [2. Design together](#2-design-together) | editing a requirement in place; a change request on a design and the coordinator's revision; a slot pick in a design sent as a change request; `playbook_check` findings and fixes |
+| [3. Shape the work](#3-shape-the-work) | list pick-and-place; a slot with a custom value; inserting and renaming a flow node; ISOLATED WORKTREE; renaming a block; the SUBAGENT list from the coordinator's session; dropping an image into `.assets/`; the coordinator inserting a block and the person deleting it; `playbook_compile` |
+| [4. Launch and supervise](#4-launch-and-supervise) | Launch as `launch_requested`; `playbook.agent`; status and report written by the subagent; a design change during the run, the `block_changed` notice and the coordinator telling the workers; a ⌘-click joint launch held until the coordinator's turn ends; Stop and `playbook.stop`; ticking a status by hand |
+| [5. Orchestrate, rehearse, hand over](#5-orchestrate-rehearse-hand-over) | a `((b5.result))` reference; an orchestration block run with `playbook.exec`; a Run with a timeline update, finish and retrospective; `/playbook-add`; requests refused while no coordinator is connected; choosing a coordinator from the pane; `OMOMP_LANG=zh`: Chinese notices, Chinese text written by the coordinator, a Chinese pane |
+
+Not shown: GitHub issue/PR references and `refetch`, editing the document title, moving blocks, an edit refused because the text changed meanwhile, `update_every`/`snooze`, `jev` judge reports, Python orchestration and `/playbook-show`.
+
+### 1. Open and read a Playbook
+
+https://github.com/user-attachments/assets/054b8468-7fb2-4610-aff4-680ada27dbd2
+
+### 2. Design together
+
+https://github.com/user-attachments/assets/b39cff85-c3ed-46fe-a5e7-f40848dcc243
+
+### 3. Shape the work
+
+https://github.com/user-attachments/assets/05a176ea-e777-4d50-8d21-c645cda434ad
+
+### 4. Launch and supervise
+
+https://github.com/user-attachments/assets/df1449f2-2893-49aa-bdd2-0c2a1bd20cf1
+
+### 5. Orchestrate, rehearse, hand over
+
+https://github.com/user-attachments/assets/cbe541a9-7bba-4ec2-aea8-fc61feed6559
+
 ## Install and open
 
 You need [Bun](https://bun.sh), omp and Tern. The process that loads the extension must find `tern` on `PATH`; the environment that starts the document service must be able to run `bun`. GitHub issue/PR references also need an authenticated `gh`.

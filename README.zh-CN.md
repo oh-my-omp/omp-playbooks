@@ -17,6 +17,40 @@ Playbook 文件自己携带执行状态：每个跟踪的块有 `status`（`todo
 
 **按钮是请求，不是自动执行器。** “启动”通知主会话去执行；“打断执行”请求它取消 worker；修改要求或在设计上选的选项把修改交给主会话。扩展不会因收到通知就自行修订设计、启动或取消 worker、认可结果。
 
+## 演示视频
+
+下面五段无声视频跟着同一份 Playbook——把 Web 层的会话从进程内的 Map 迁到 Redis——从打开文件一直走到把它交给另一个协调者。左侧是 omp 协调者，右侧是 Playbook 面板；每条字幕都标明是谁在操作（人、协调者、subagent 或文档服务），并解释这一步。视频在 headless Tern 窗口里录制，协调者是真实运行的 `opencode-go/deepseek-v4.1-flash`，subagent 是真实的 `task:low`/`task:mid`，所以协调者和 subagent 写出的内容（包括它们的失误）都是它们自己的输出。画面中的界面和 Playbook 内容是英文，字幕是中文。
+
+| 视频 | 展示内容 |
+|---|---|
+| [1. 打开并阅读 Playbook](#1-打开并阅读-playbook) | `playbook_open` 打开面板；卡片编号与状态圆环；设计块、执行块、不跟踪块和编排块；flow、svg、kv、槽位、limits、callout、er、tree、状态表格、`---` 页眉、sequence、timeline、annot、代码 `src=`、`//` 注释和 html；变更标记与 Changes / Before / After；卡片下方的大纲问题 |
+| [2. 一起做设计](#2-一起做设计) | 就地编辑需求；对设计提修改要求及协调者的修订；在设计里选槽位会作为修改要求发出；`playbook_check` 的发现与修复 |
+| [3. 整理执行块](#3-整理执行块) | 列表拾起放下；槽位自填值；插入并重命名流程节点；ISOLATED WORKTREE；重命名块；来自协调者会话的 SUBAGENT 列表；把图片拖进 `.assets/`；协调者新增块、人再删除它；`playbook_compile` |
+| [4. 启动与监督](#4-启动与监督) | Launch 即 `launch_requested`；`playbook.agent`；由 subagent 写回状态和报告；运行中修改设计、`block_changed` 通知及协调者通知 worker；⌘ 多选联合启动在协调者回合结束后才送达；Stop 与 `playbook.stop`；手动勾选状态 |
+| [5. 编排、演练与交接](#5-编排演练与交接) | `((b5.result))` 引用；用 `playbook.exec` 运行编排块；Run 的时间线更新、结束与复盘；`/playbook-add`；没有协调者连接时请求被拒绝；从面板选择协调者；`OMOMP_LANG=zh`：中文通知、协调者写入中文、中文面板 |
+
+视频未展示：GitHub issue/PR 引用与 `refetch`、编辑文档标题、移动块、因文字已被改动而被拒绝的编辑、`update_every`/`snooze`、`jev` 模型判断、Python 编排以及 `/playbook-show`。
+
+### 1. 打开并阅读 Playbook
+
+https://github.com/user-attachments/assets/cacf1589-c1d6-4585-824e-e74a61a480c7
+
+### 2. 一起做设计
+
+https://github.com/user-attachments/assets/7f341ae0-2c42-4385-a953-60f4061b77a1
+
+### 3. 整理执行块
+
+https://github.com/user-attachments/assets/f570d0ef-186e-43ee-9ccf-74e878f5c5a8
+
+### 4. 启动与监督
+
+https://github.com/user-attachments/assets/606bd624-2b27-4b83-afaf-2889529f80d1
+
+### 5. 编排、演练与交接
+
+https://github.com/user-attachments/assets/ce277db5-505a-42c0-9ea1-23aa870b757f
+
 ## 安装与打开
 
 需要 [Bun](https://bun.sh)、omp 和 Tern。加载扩展的进程必须能从 `PATH` 找到 `tern`；启动文档服务的环境必须能执行 `bun`。使用 GitHub issue/PR 引用时还需要已认证的 `gh`。
