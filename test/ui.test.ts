@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { startUi } from "../src/service/ui";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { startUi, type ClipboardImageReader } from "../src/service/ui";
 import type { FrameOp, FrameStatus, TspEvent, TspInput, TspNode, TspSession } from "../src/service/tsp-types";
 import type { CoordinatorPicker, OmpPane } from "../src/service/coordinators";
 import { registerCoreCleanup, coreFixture, design, task, template } from "./core-fixture";
@@ -41,14 +43,22 @@ function fakeCoordinators(panes: readonly OmpPane[] = []) {
 	};
 	return { coordinators, calls };
 }
-async function fixture(blocks = [task("b1"), task("b2")], coordinators = fakeCoordinators()) {
+async function fixture(blocks = [task("b1"), task("b2")], coordinators = fakeCoordinators(), clipboard: ClipboardImageReader = async () => null) {
 	const f = coreFixture(blocks);
 	const tsp = new TestTsp();
-	startUi(f.core, tsp, f.directory, coordinators.coordinators);
+	startUi(f.core, tsp, f.directory, coordinators.coordinators, clipboard);
 	tsp.input({ kind: "hello", dark: true });
 	await tsp.ready.promise;
 	return { ...f, tsp, calls: coordinators.calls };
 }
+/** The fakes answer at once; draining queued promise callbacks lets the UI apply each answer. */
+const settle = async (): Promise<void> => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+/** The editable node drawn for the field's text that starts with `text`. */
+function editableOf(tsp: TestTsp, prefix: string, text: string): TspNode {
+	return tsp.nodes().find(node => node.id.startsWith(prefix) && node.p?.actions && JSON.stringify(node.c ?? []).includes(text))!;
+}
+const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+const PNG_PATH = `book.yaml.assets/${new Bun.CryptoHasher("sha256").update(PNG).digest("hex")}.png`;
 
 describe("current Playbook user interactions", () => {
 	test("opens first card and folding another mounts exactly that body", async () => {
@@ -169,11 +179,45 @@ describe("current Playbook user interactions", () => {
 	});
 	test("Shift+Enter inserts a requirement newline and Ctrl+Enter commits without editing design", async () => {
 		const f = await fixture([design("b1")]);
-		f.tsp.action("b1.requirement", "edit");
+		f.tsp.action(editableOf(f.tsp, "b1.requirement", "Requirement").id, "edit");
 		f.tsp.keys("\x1b[13;2u");
 		f.tsp.keys("Extra requirement");
 		f.tsp.keys("\x1b[13;5u");
 		expect(f.core.view(template).blocks[0]?.block.content).toEqual({ kind: "design", requirement: "Requirement\nExtra requirement", design: "## A Plan\nDesign" });
+	});
+	test("Ctrl+V keeps the clipboard image beside the Playbook and appends its line to the open card", async () => {
+		const f = await fixture([task("b1", "Before"), design("b2")], undefined, async () => ({ data: PNG, mimeType: "image/png" }));
+		f.tsp.keys("\x1b[118;5u");
+		await settle();
+		expect(f.core.view(template).blocks[0]?.block.content).toMatchObject({ body: `Before\n\n![图片](${PNG_PATH})\n` });
+		expect(new Uint8Array(readFileSync(join(f.directory, PNG_PATH)))).toEqual(PNG);
+		expect(f.tsp.nodes().some(node => node.k === "image")).toBe(true);
+		// A design card takes it in the person's requirement; the same image is the same file.
+		f.tsp.action("b2.fold");
+		f.tsp.action("b2.more"); f.tsp.action("menu.image");
+		await settle();
+		expect(f.core.view(template).blocks[1]?.block.content).toMatchObject({ requirement: `Requirement\n\n![图片](${PNG_PATH})\n`, design: "## A Plan\nDesign" });
+	});
+	test("an image pasted while editing goes in at the caret on a line of its own", async () => {
+		const f = await fixture([task("b1", "Left right")], undefined, async () => ({ data: PNG, mimeType: "image/png" }));
+		f.tsp.action(editableOf(f.tsp, "b1.body", "Left right").id, "edit");
+		f.tsp.keys("\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D");
+		f.tsp.keys("\x1b[200~\x1b[201~");
+		await settle();
+		f.tsp.keys("\r");
+		expect(f.core.view(template).blocks[0]?.block.content).toMatchObject({ body: `Left\n![图片](${PNG_PATH})\n right` });
+	});
+	test("without an image, or with one the card cannot draw, nothing is written and the person is told", async () => {
+		const empty = await fixture();
+		empty.tsp.keys("\x16");
+		await settle();
+		expect(empty.core.view(template).blocks[0]?.block.content).toMatchObject({ body: "Task body" });
+		expect(empty.tsp.nodes().some(node => node.k === "toast" && node.p?.text === "剪贴板里没有图片")).toBe(true);
+		const tiff = await fixture(undefined, undefined, async () => ({ data: PNG, mimeType: "image/tiff" }));
+		tiff.tsp.keys("\x16");
+		await settle();
+		expect(tiff.core.view(template).blocks[0]?.block.content).toMatchObject({ body: "Task body" });
+		expect(tiff.tsp.nodes().some(node => node.k === "toast" && node.p?.tone === "error")).toBe(true);
 	});
 	test("the 退出编辑 button commits the edit like Enter", async () => {
 		const f = await fixture();
@@ -189,8 +233,6 @@ describe("current Playbook user interactions", () => {
 			{ pane: "12", title: "old omp", cwd: "/old", place: { session: "Default", tab: 3 }, ompSession: "/s/b.jsonl", loaded: false },
 		];
 		const f = await fixture(undefined, fakeCoordinators(panes));
-		// The fake answers at once; draining queued promise callbacks lets the UI apply each answer.
-		const settle = async (): Promise<void> => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
 		f.tsp.action("status.coordinator");
 		await settle();
 		expect(f.calls).toEqual(["list"]);

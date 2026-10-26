@@ -14,6 +14,7 @@
 		"test": "bun test"
 	},
 	"dependencies": {
+		"@oh-my-pi/pi-natives": "latest",
 		"@oh-my-pi/pi-tui": "latest"
 	},
 	"devDependencies": {

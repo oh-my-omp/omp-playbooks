@@ -5,6 +5,7 @@
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
+import { readImageFromClipboard } from "@oh-my-pi/pi-natives/clipboard";
 import { socketPath } from "../domain/protocol";
 import { checks } from "./checks";
 import { coordinatorPicker } from "./coordinators";
@@ -57,7 +58,7 @@ try {
 	process.stderr.write(`这个 Playbook 的文档服务已在运行：${templatePath}\n${outcome.kind === "failed" ? `${outcome.message}\n` : ""}`);
 	process.exit(3);
 }
-startUi(core, createTspSession(), dirname(templatePath), coordinatorPicker(templatePath, dirname(templatePath), ownPane()));
+startUi(core, createTspSession(), dirname(templatePath), coordinatorPicker(templatePath, dirname(templatePath), ownPane()), async () => (await readImageFromClipboard()) ?? null);
 
 const shutdown = (): void => {
 	core.stop();

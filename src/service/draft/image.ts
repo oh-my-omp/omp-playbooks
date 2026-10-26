@@ -7,7 +7,12 @@ export interface ImageSpec {
 	readonly path: string;
 }
 
-const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+/** Largest image a card draws; a pasted image above it is refused rather than saved undrawable. */
+export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+/** File extension a pasted image is saved under, by MIME type; each is one `imageMime` draws. */
+export const IMAGE_EXTENSIONS: Readonly<Partial<Record<string, string>>> = {
+	"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp", "image/avif": "avif",
+};
 const EXAMPLE = "![图片内容](screenshots/example.png)";
 
 export function parseImage(input: FenceInput): Parsed<ImageSpec> {

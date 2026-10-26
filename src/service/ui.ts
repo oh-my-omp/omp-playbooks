@@ -12,6 +12,12 @@ import { parseSlots, setSlotValue, type SlotDecl } from "./draft/slot";
 import type { FrameOp, TspEvent, TspInput, TspNode, TspSession } from "./tsp-types";
 import type { CoordinatorPicker, OmpPane } from "./coordinators";
 
+/** The block fields drawn as text: a person writes `body` and `requirement`; `design` is the coordinator's. */
+type DraftField = "body" | "requirement" | "design";
+
+/** The image on the system clipboard now, as the encoded bytes and their MIME type; null when it holds none. */
+export type ClipboardImageReader = () => Promise<{ readonly data: Uint8Array; readonly mimeType: string } | null>;
+
 /** The offline coordinator picker: closed, asking Tern, showing an answer, or carrying out a choice. */
 type CoordPickerState =
 	| { readonly kind: "closed" }
@@ -203,7 +209,7 @@ function reorderedList(source: string, span: Span, items: readonly ListItem[], o
 }
 
 /** K4 front end. Core owns every document; this keeps only what the pane shows and what is being edited. */
-export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordinators: CoordinatorPicker): void {
+export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordinators: CoordinatorPicker, clipboardImage: ClipboardImageReader): void {
 	initThemeSync();
 	let opened = false;
 	let mounted = false;
@@ -277,6 +283,38 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 		return el(id, tag, "pb-editable", [view], { actions: { dblclick: "edit" } });
 	}
 
+	/**
+	 * Ctrl+V, an empty paste, or the menu: the clipboard's image is kept beside the Playbook and its
+	 * line goes in at the caret of the multi-line text being edited, or else at the end of the open
+	 * card's body (design card: requirement).
+	 */
+	function pasteImage(): void {
+		void clipboardImage().then(image => {
+			if (!image) { notify("剪贴板里没有图片"); return; }
+			const saved = core.saveImage(image.data, image.mimeType);
+			if (!saved.ok) { notify(saved.error); return; }
+			const line = `![图片](${saved.path})`;
+			if (editing) {
+				if (!editing.multiline) { notify("这一栏只有一行，放不下图片：退出编辑再粘贴，图片会加到卡片末尾"); return; }
+				const caret = editing.caret;
+				const before = editing.text.slice(0, caret.anchor === null ? caret.cursor : Math.min(caret.cursor, caret.anchor));
+				const after = editing.text.slice(caret.anchor === null ? caret.cursor : Math.max(caret.cursor, caret.anchor));
+				// An image is drawn only on a line of its own.
+				insert(`${before === "" || before.endsWith("\n") ? "" : "\n"}${line}${after === "" || after.startsWith("\n") ? "" : "\n"}`);
+				return;
+			}
+			const block = open === null ? undefined : core.view(REF).blocks.find(item => item.block.id === open)?.block;
+			if (!block) { notify("先展开要放图片的卡片"); return; }
+			const field = block.content.kind === "task" ? "body" : "requirement";
+			const source = block.content.kind === "task" ? block.content.body : block.content.requirement;
+			const error = core.edit(REF, block.id, field, source, source.trim() ? `${source.trimEnd()}\n\n${line}\n` : `${line}\n`);
+			if (error) notify(error);
+			else notify(block.content.kind === "task" ? "图片已加到正文末尾" : "图片已加到需求末尾", "success");
+		}, (error: unknown) => {
+			notify(`读不到剪贴板：${error instanceof Error ? error.message : String(error)}`);
+		}).then(redraw);
+	}
+
 	// ------------------------------------------------------------ drawing one block field
 
 	function imageNode(id: string, bytes: Uint8Array, mime: string, alt: string, size?: { readonly w: number; readonly h: number }): TspNode {
@@ -286,13 +324,15 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 	}
 
 	/**
-	 * How a person changes one field of a block: a task body is written directly; a design is the
-	 * coordinator's, so a person's change to it (a slot value) goes as a change request.
+	 * How a person changes one field of a block: a task body and a design's requirement are written
+	 * directly; a design is the coordinator's, so a person's change to it (a slot value) goes as a
+	 * change request.
 	 */
-	function fieldHost(block: Block, field: "body" | "design", source: string): EditHost {
+	function fieldHost(block: Block, field: DraftField, source: string): EditHost {
 		const slots = parseSlots(source).slots;
-		const writable = field === "body";
-		const write = (next: string): string | null => next === source ? null : core.edit(REF, block.id, "body", source, next);
+		const target: HumanField | null = field === "design" ? null : field;
+		const writable = target !== null;
+		const write = (next: string): string | null => next === source || target === null ? null : core.edit(REF, block.id, target, source, next);
 		const replace = (span: Span, text: string): string | null => write(source.slice(0, span.start) + text + source.slice(span.end));
 		return {
 			text(id, span, multiline, view) {
@@ -380,7 +420,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 		};
 	}
 
-	function draft(block: Block, field: "body" | "design", source: string): { readonly nodes: readonly TspNode[]; readonly errors: number } {
+	function draft(block: Block, field: DraftField, source: string): { readonly nodes: readonly TspNode[]; readonly errors: number } {
 		const host: DraftHost = {
 			id: `${block.id}.${field}`,
 			context: {
@@ -501,13 +541,16 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 		]);
 	}
 
+	/** A field a person writes (task body, design requirement): drawn like any text, edited part by part, double-click to start when empty. */
+	function personText(block: Block, field: HumanField & DraftField, source: string, placeholder: string, label: string): { readonly nodes: readonly TspNode[]; readonly errors: number } {
+		if (source.trim()) return draft(block, field, source);
+		const id = `${block.id}.${field}.empty`;
+		return { nodes: [editable(id, el(`${id}.view`, "div", "pb-placeholder", [], { text: placeholder }), () => "", true, text => core.edit(REF, block.id, field, source, text), label)], errors: 0 };
+	}
+
 	/** A design card: the person's requirement, the coordinator's design, and the line that sends a change request. */
 	function designBody(block: Block, content: Extract<Block["content"], { kind: "design" }>): { nodes: TspNode[]; errors: number } {
-		const requirementId = `${block.id}.requirement`;
-		const requirementView: TspNode = content.requirement.trim()
-			? el(`${requirementId}.view`, "div", "pb-lead", [{ id: `${requirementId}.md`, k: "md", p: { text: content.requirement } }])
-			: el(`${requirementId}.view`, "div", "pb-placeholder", [], { text: "// 双击写需求" });
-		const requirement = editable(requirementId, requirementView, () => content.requirement, true, text => core.edit(REF, block.id, "requirement" satisfies HumanField, content.requirement, text), "需求");
+		const requirement = personText(block, "requirement", content.requirement, "// 双击写需求", "需求");
 		const drawn = content.design.trim() ? draft(block, "design", content.design) : { nodes: [el(`${block.id}.design.empty`, "div", "pb-placeholder", [], { text: "// 协调者还没有写设计" })], errors: 0 };
 		const requestId = `${block.id}.request`;
 		const request = editable(requestId, el(`${requestId}.view`, "div", "pb-comment", [el(`${requestId}.slash`, "span", "pb-comment-slash", [], { text: "//" }), el(`${requestId}.text`, "span", "", [], { text: "双击写修改要求，回车发给协调者" })]), () => "", true, text => {
@@ -516,7 +559,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 			if (!error) notify("修改要求已发给协调者", "success");
 			return error;
 		}, "写给协调者：哪里要改、改成什么");
-		return { nodes: [requirement, ...drawn.nodes, request], errors: drawn.errors };
+		return { nodes: [el(`${block.id}.requirement.lead`, "div", "pb-lead", [...requirement.nodes]), ...drawn.nodes, request], errors: requirement.errors + drawn.errors };
 	}
 
 	/** Every block is drawn for its render status; only the open card's body is mounted. */
@@ -524,7 +567,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 		const block = item.block;
 		const isOpen = open === block.id;
 		const drawn = block.content.kind === "task"
-			? (block.content.body.trim() ? draft(block, "body", block.content.body) : { nodes: [editable(`${block.id}.body.empty`, el(`${block.id}.body.empty.view`, "div", "pb-placeholder", [], { text: "// 双击写正文" }), () => "", true, text => core.edit(REF, block.id, "body", block.content.kind === "task" ? block.content.body : "", text), "正文")], errors: 0 })
+			? personText(block, "body", block.content.body, "// 双击写正文", "正文")
 			: designBody(block, block.content);
 		const md: string[] = [], images: string[] = [];
 		const collect = (child: TspNode): void => {
@@ -678,8 +721,12 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 		const children: TspNode[] = [];
 		if (menu !== null && view.blocks.some(item => item.block.id === menu)) {
 			const block = menu;
+			on("menu.image", { click: () => { menu = null; pasteImage(); } });
 			on("menu.delete", { click: () => { menu = null; if (open === block) open = null; outcome(core.deleteBlock(REF, block)); } });
-			children.push({ id: "menu", k: "overlay", p: { anchor: { node: `${block}.more` }, size: "sm" }, c: [el("menu.delete", "div", "pb-menu-item pb-danger", [], { text: "删除此块", actions: { click: "invoke" } })] });
+			children.push({ id: "menu", k: "overlay", p: { anchor: { node: `${block}.more` }, size: "sm" }, c: [
+				el("menu.image", "div", "pb-menu-item", [], { text: "粘贴剪贴板图片（Ctrl+V）", actions: { click: "invoke" } }),
+				el("menu.delete", "div", "pb-menu-item pb-danger", [], { text: "删除此块", actions: { click: "invoke" } }),
+			] });
 		}
 		const agentItem = agentMenu === null ? undefined : view.blocks.find(item => item.block.id === agentMenu);
 		if (agentItem && open === agentItem.block.id && agentItem.block.content.kind === "task" && agentItem.block.progress.kind === "tracked" && agentItem.block.progress.status !== "done") {
@@ -804,10 +851,13 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 			const code = Number(kitty[1]), modifiers = Number(kitty[2] ?? 1) - 1;
 			if (code === 13 && modifiers === 1 && editing?.multiline) { insert("\n"); return; }
 			if (code === 13 || code === 27) { end(); return; }
+			if (code === 118 && modifiers === 4) { pasteImage(); return; } // Ctrl+V, as omp pastes an image.
 			if (modifiers > 1 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return;
 			bytes = String.fromCodePoint(code);
 		}
 		if (bytes === ESC || bytes === "\r" || bytes === "\n") { end(); return; }
+		// Ctrl+V without the kitty protocol, and a paste carrying no text (the clipboard holds only an image).
+		if (bytes === "\x16" || bytes === `${ESC}[200~${ESC}[201~`) { pasteImage(); return; }
 		if (!editing) return;
 		const text = editing.text;
 		const caret = editing.caret;

@@ -52,6 +52,7 @@ import type {
 import type { EventPayload, Outcome, Request, RunSummary } from "../domain/protocol";
 import { fail, ok } from "../domain/protocol";
 import { launchFooter } from "./footer";
+import { IMAGE_EXTENSIONS, MAX_IMAGE_BYTES } from "./draft/image";
 
 export interface PaneControl {
 	ownPane(): string | null;
@@ -1650,6 +1651,14 @@ export class Core implements CoreApi, K1Handler {
 		// Nothing is executing for this block: the running status is all there is to stop.
 		if (launches.length === 0) return this.setStatus(ref, id, "todo");
 		return this.#send({ event: "stop_requested", data: { ...runField(target.doc), block: id, launches } }) ? null : "协调者离线，请求没有发出";
+	}
+
+	saveImage(bytes: Uint8Array, mimeType: string): { readonly ok: true; readonly path: string } | { readonly ok: false; readonly error: string } {
+		const extension = IMAGE_EXTENSIONS[mimeType];
+		if (!extension) return { ok: false, error: `剪贴板里的图片格式 ${mimeType} 不能显示` };
+		if (bytes.byteLength > MAX_IMAGE_BYTES) return { ok: false, error: `图片超过 ${MAX_IMAGE_BYTES / 1024 / 1024} MiB，卡片显示不了` };
+		try { return { ok: true, path: this.#store.saveAsset(bytes, extension) }; }
+		catch (error) { return { ok: false, error: `图片没有存下：${error instanceof Error ? error.message : String(error)}` }; }
 	}
 }
 

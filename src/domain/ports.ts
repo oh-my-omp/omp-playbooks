@@ -98,6 +98,11 @@ export interface Store {
 	/** Revision journal of a document (`<file>.revisions.jsonl`, `<runs>/<run>.revisions.jsonl`): every submitted design change request, append-only. */
 	readRevisions(ref: DocRef): Revision[];
 	appendRevision(ref: DocRef, revision: Revision): void;
+	/**
+	 * Keep image bytes next to the Playbook as `<file>.assets/<sha256>.<extension>`, unchanged and
+	 * never rewritten (the name is the content); returns the path relative to `baseDir`.
+	 */
+	saveAsset(bytes: Uint8Array, extension: string): string;
 }
 
 // ---------------------------------------------------------------- checks (pure) — src/service/checks.ts
@@ -176,6 +181,8 @@ export interface HumanCommands {
 	requestLaunch(ref: DocRef, blocks: readonly BlockId[]): string | null;
 	/** Ask the coordinator to stop the block's open Launches; with none open the block goes back to todo at once. */
 	requestStop(ref: DocRef, block: BlockId): string | null;
+	/** Keep a pasted image beside the Playbook; the path is relative to the Playbook's directory, for `![…](path)`. */
+	saveImage(bytes: Uint8Array, mimeType: string): { readonly ok: true; readonly path: string } | { readonly ok: false; readonly error: string };
 }
 
 export interface CoreApi extends HumanCommands {

@@ -453,5 +453,18 @@ export function createStore(templatePath: string): Store {
 			return revisions;
 		},
 		appendRevision: (ref, revision) => append(revisionsPath(ref), revision),
+		saveAsset(bytes, extension) {
+			const name = `${new Bun.CryptoHasher("sha256").update(bytes).digest("hex")}.${extension}`;
+			const folder = `${basename(path)}.assets`;
+			const target = join(baseDir, folder, name);
+			// Same name, same bytes: an existing file is already this image.
+			if (!statSync(target, { throwIfNoEntry: false })) {
+				mkdirSync(join(baseDir, folder), { recursive: true });
+				const temporary = `${target}.${process.pid}.tmp`;
+				writeFileSync(temporary, bytes);
+				renameSync(temporary, target);
+			}
+			return `${folder}/${name}`;
+		},
 	};
 }
