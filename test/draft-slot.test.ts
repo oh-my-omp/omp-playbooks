@@ -10,13 +10,20 @@ describe("slots", () => {
 		expect(parsed.slots.get("mode")).toEqual({ name: "mode", value: "Fast", line: 3, options: [{ label: "Fast", note: "recommended", kind: "recommended" }, { label: "Safe", note: "slower", kind: "option" }, { label: "Old", note: "previous", kind: "past" }] });
 		expect(parsed.diagnostics).toContainEqual(expect.objectContaining({ line: 8, severity: "warning", component: "slot" }));
 	});
-	for (const lines of [["- No current"], ["= A", "= B"], ["= A", "- A", "* A"], ["= A", "invalid"], ["= A", "- | no label"]]) {
+	for (const lines of [["- No current"], ["= A", "= B"], ["= A", "invalid"], ["= A", "- | no label"]]) {
 		test(`rejects invalid declaration ${JSON.stringify(lines)}`, () => {
 			const parsed = parseSlot(fence({ args: "mode", line: 4, lines }));
 			expect(parsed.ok).toBe(false);
 			expect(parsed.diagnostics.some(item => item.severity === "error")).toBe(true);
 		});
 	}
+	test("a repeated option keeps its first occurrence with a warning and the slot still parses", () => {
+		const parsed = parseSlot(fence({ args: "mode", line: 4, lines: ["= B", "~ A | earlier", "* A | recommended", "- B"] }));
+		expect(parsed.ok).toBe(true);
+		if (!parsed.ok) return;
+		expect(parsed.value.options).toEqual([{ label: "A", note: "earlier", kind: "past" }, { label: "B", note: "", kind: "option" }]);
+		expect(parsed.diagnostics).toEqual([expect.objectContaining({ line: 6, severity: "warning", component: "slot" })]);
+	});
 	test("duplicate names retain the first declaration and diagnose the second", () => {
 		const parsed = parseSlots(source + "```slot mode\n= Other\n```\n");
 		expect(parsed.slots.get("mode")?.value).toBe("Fast");

@@ -366,7 +366,11 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 			})),
 		};
 		const drawn = renderDraft(source, host);
-		return { nodes: drawn.nodes, errors: drawn.diagnostics.filter(found => found.severity === "error").length };
+		// A component that cannot be drawn points here: every problem is listed with its line.
+		const problems: TspNode[] = drawn.diagnostics.length === 0 ? [] : [el(`${block.id}.${field}.problems`, "div", "pb-errors", drawn.diagnostics.map((found, index) => ({
+			id: `${block.id}.${field}.problem${index}`, k: "text", p: { text: `第 ${found.line} 行 · ${found.component}：${found.message}`, tone: found.severity === "error" ? "error" : "warning" },
+		})))];
+		return { nodes: [...drawn.nodes, ...problems], errors: drawn.diagnostics.filter(found => found.severity === "error").length };
 	}
 
 	// ------------------------------------------------------------ cards

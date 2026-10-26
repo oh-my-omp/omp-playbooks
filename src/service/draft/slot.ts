@@ -54,11 +54,12 @@ export function parseSlot(input: FenceInput): Parsed<SlotDecl> {
 		}
 		const [label = "", note = ""] = rest.split("|").map(part => part.trim());
 		if (!label) { diagnostics.push(diagnostic("slot", line, "选项需要名称：写成 - 名称 | 说明")); return; }
-		if (options.some(option => option.label === label)) { diagnostics.push(diagnostic("slot", line, `选项 ${label} 重复`)); return; }
+		// A repeated option adds nothing: the first one stays, and the slot still works.
+		if (options.some(option => option.label === label)) { diagnostics.push(diagnostic("slot", line, `选项 ${label} 重复，只保留第一次出现`, "warning")); return; }
 		options.push({ label, note, kind: marker === "*" ? "recommended" : marker === "-" ? "option" : "past" });
 	});
 	if (value === null) diagnostics.push(diagnostic("slot", input.line, "槽位需要当前值：写一行 = 值"));
-	if (value === null || diagnostics.length) return { ok: false, diagnostics };
+	if (value === null || diagnostics.some(found => found.severity === "error")) return { ok: false, diagnostics };
 	return { ok: true, value: { name, value, options, line: input.line }, diagnostics };
 }
 
