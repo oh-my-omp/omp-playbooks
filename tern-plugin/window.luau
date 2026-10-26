@@ -10,11 +10,11 @@ local MAIN = tern.plugin.dir .. "/../src/service/main.ts"
 -- `main.ts --reveal` exits 4 when no service listens for the document (contracts.md K6).
 local ABSENT = 4
 
--- The language rule of src/i18n.ts, read from the Tern app's environment: OMP_PLAYBOOKS_LANG
+-- The language rule of src/i18n.ts, read from the Tern app's environment: OMOMP_LANG
 -- when it is en or zh, else the first non-empty of LC_ALL, LC_MESSAGES and LANG (Chinese when
 -- it starts with zh), else English.
 local function chinese(): boolean
-	local explicit = tern.getenv("OMP_PLAYBOOKS_LANG")
+	local explicit = tern.getenv("OMOMP_LANG")
 	if explicit ~= nil then
 		local named = string.lower((string.gsub(explicit, "^%s*(.-)%s*$", "%1")))
 		if named == "zh" or named == "en" then

@@ -2,13 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { resolveLanguage } from "../src/i18n";
 
 describe("process language", () => {
-	test("OMP_PLAYBOOKS_LANG en or zh wins over the locale", () => {
-		expect(resolveLanguage({ OMP_PLAYBOOKS_LANG: "zh", LANG: "en_US.UTF-8" })).toBe("zh");
-		expect(resolveLanguage({ OMP_PLAYBOOKS_LANG: " EN ", LC_ALL: "zh_CN.UTF-8" })).toBe("en");
+	test("OMOMP_LANG en or zh wins over the locale", () => {
+		expect(resolveLanguage({ OMOMP_LANG: "zh", LANG: "en_US.UTF-8" })).toBe("zh");
+		expect(resolveLanguage({ OMOMP_LANG: " EN ", LC_ALL: "zh_CN.UTF-8" })).toBe("en");
 	});
-	test("any other OMP_PLAYBOOKS_LANG value is ignored, locale style included", () => {
-		expect(resolveLanguage({ OMP_PLAYBOOKS_LANG: "zh_CN", LANG: "en_US.UTF-8" })).toBe("en");
-		expect(resolveLanguage({ OMP_PLAYBOOKS_LANG: "fr", LANG: "zh_TW.UTF-8" })).toBe("zh");
+	test("any other OMOMP_LANG value is ignored, locale style included", () => {
+		expect(resolveLanguage({ OMOMP_LANG: "zh_CN", LANG: "en_US.UTF-8" })).toBe("en");
+		expect(resolveLanguage({ OMOMP_LANG: "fr", LANG: "zh_TW.UTF-8" })).toBe("zh");
 	});
 	test("the first non-empty of LC_ALL, LC_MESSAGES, LANG decides; only zh locales are Chinese", () => {
 		expect(resolveLanguage({ LC_ALL: "", LC_MESSAGES: "zh_CN.UTF-8", LANG: "en_US.UTF-8" })).toBe("zh");

@@ -7,10 +7,10 @@
 export type Language = "en" | "zh";
 
 /** The environment variable that names the language explicitly: `en` or `zh`. */
-export const LANGUAGE_ENV = "OMP_PLAYBOOKS_LANG";
+export const LANGUAGE_ENV = "OMOMP_LANG";
 
 /**
- * `OMP_PLAYBOOKS_LANG` when it is `en` or `zh` (any case); any other value is ignored. Otherwise
+ * `OMOMP_LANG` when it is `en` or `zh` (any case); any other value is ignored. Otherwise
  * the first non-empty of LC_ALL, LC_MESSAGES and LANG: Chinese when it starts with `zh`, else
  * English. Otherwise English.
  */

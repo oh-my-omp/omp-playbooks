@@ -68,7 +68,7 @@ These commands and the `playbook_*` tools are registered only in the main sessio
 
 The pane, its notices and component diagnostics, the coordinator's notices and tool errors, the launch-prompt footer a subagent reads and the Tern command are English or Chinese. Each process picks its language when it starts:
 
-1. `OMP_PLAYBOOKS_LANG=en` or `OMP_PLAYBOOKS_LANG=zh` (any other value is ignored);
+1. `OMOMP_LANG=en` or `OMOMP_LANG=zh` (any other value is ignored);
 2. otherwise the first non-empty of `LC_ALL`, `LC_MESSAGES` and `LANG`: Chinese when it starts with `zh`, English for anything else;
 3. otherwise English.
 

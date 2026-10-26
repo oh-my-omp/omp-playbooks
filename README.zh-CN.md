@@ -68,7 +68,7 @@ bun src/service/main.ts /绝对路径/playbook.yaml
 
 面板及其提示和组件诊断、协调者收到的通知和工具错误、subagent 读到的启动 prompt 尾注、Tern 命令，都可以是英文或中文。每个进程在启动时选定语言：
 
-1. `OMP_PLAYBOOKS_LANG=en` 或 `OMP_PLAYBOOKS_LANG=zh`（其他值忽略）；
+1. `OMOMP_LANG=en` 或 `OMOMP_LANG=zh`（其他值忽略）；
 2. 否则看 `LC_ALL`、`LC_MESSAGES`、`LANG` 中第一个非空的：以 `zh` 开头为中文，其他都是英文；
 3. 都没有时为英文。
 

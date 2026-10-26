@@ -59,7 +59,7 @@ describe.skipIf(LANGUAGE !== "en")("English texts", () => {
 });
 
 test.skipIf(LANGUAGE === "en")("the English texts hold in an English process", () => {
-	const run = Bun.spawnSync(["bun", "test", "test/english.test.ts"], { cwd: `${import.meta.dir}/..`, env: { ...process.env, OMP_PLAYBOOKS_LANG: "en" }, stdout: "pipe", stderr: "pipe" });
+	const run = Bun.spawnSync(["bun", "test", "test/english.test.ts"], { cwd: `${import.meta.dir}/..`, env: { ...process.env, OMOMP_LANG: "en" }, stdout: "pipe", stderr: "pipe" });
 	expect(run.stderr.toString()).toContain(" 0 fail");
 	expect(run.exitCode).toBe(0);
 });

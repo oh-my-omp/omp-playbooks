@@ -388,7 +388,7 @@ test("open starts the document service beside the coordinator pane and returns h
 	expect(result.isError).toBe(false);
 	expect(JSON.parse(result.content[0]!.text!)).toMatchObject({ blocks: ["b1"], pane: "document-pane" });
 	const real = await realpath(doc);
-	expect(await tern.args()).toEqual(["split", "coordinator-pane", "right", "--cwd", dirname(real), "--json", "--", "env", `OMP_PLAYBOOKS_LANG=${LANGUAGE}`, "bun", resolve(import.meta.dir, "../src/service/main.ts"), real]);
+	expect(await tern.args()).toEqual(["split", "coordinator-pane", "right", "--cwd", dirname(real), "--json", "--", "env", `OMOMP_LANG=${LANGUAGE}`, "bun", resolve(import.meta.dir, "../src/service/main.ts"), real]);
 	expect(s.frames.map(frame => frame.op)).toEqual(["hello"]);
 });
 
