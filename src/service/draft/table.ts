@@ -1,3 +1,4 @@
+import { tr } from "../../i18n";
 import { diagnostic, type DraftDiagnostic, type FenceInput, type Parsed, type RenderContext, type Rendered } from "./contract";
 import { inlineSpans, type Span } from "./text";
 
@@ -45,7 +46,7 @@ export function parseTable(input: FenceInput): Parsed<TableSpec> {
 	if (delimiter === undefined || delimiters.length !== headers.length || delimiters.some(cell => !/^:?-+:?$/.test(cell))) {
 		return {
 			ok: false,
-			diagnostics: [diagnostic("table", input.line + 1, "表格缺少有效分隔行；在表头后写与列数相同的 | --- | ---: |。")],
+			diagnostics: [diagnostic("table", input.line + 1, tr("The table is missing a valid delimiter row; after the header, write the same number of columns as | --- | ---: |.", "表格缺少有效分隔行；在表头后写与列数相同的 | --- | ---: |。"))],
 		};
 	}
 	const columns: TableColumn[] = headers.map((header, index) => {
@@ -58,7 +59,7 @@ export function parseTable(input: FenceInput): Parsed<TableSpec> {
 	for (let index = 2; index < input.lines.length; index++) {
 		const cells = splitRow(input.lines[index]!);
 		if (cells.length !== columns.length) {
-			diagnostics.push(diagnostic("table", input.line + index, `此行有 ${cells.length} 格；请改为与表头相同的 ${columns.length} 格。`, "warning"));
+			diagnostics.push(diagnostic("table", input.line + index, tr(`This row has ${cells.length} cells; change it to the same ${columns.length} cells as the header.`, `此行有 ${cells.length} 格；请改为与表头相同的 ${columns.length} 格。`), "warning"));
 			cells.length = columns.length;
 			for (let column = 0; column < columns.length; column++) cells[column] ??= "";
 		}

@@ -1,3 +1,4 @@
+import { tr } from "../../i18n";
 // Component dispatch and whole-text rendering. Every fence name maps to exactly one module; any
 // other fence language is a code block (am: "Any other fence language is a code block"). Task
 // bodies and design drafts are drawn the same way; the host decides what a person may change.
@@ -39,7 +40,7 @@ function built<T>(component: string, line: number, parsed: Parsed<T>, render: (s
 		return {
 			diagnostics: parsed.diagnostics,
 			marked: false,
-			render: ctx => ({ nodes: [{ id: `${ctx.id}.failed`, k: "text", p: { text: `${component} 无法绘制（第 ${line} 行起）：见下方稿件问题`, tone: "error" } }], diagnostics: [] }),
+			render: ctx => ({ nodes: [{ id: `${ctx.id}.failed`, k: "text", p: { text: tr(`${component} cannot be drawn (starting at line ${line}); see draft problems below`, `${component} 无法绘制（第 ${line} 行起）：见下方稿件问题`), tone: "error" } }], diagnostics: [] }),
 		};
 	}
 	const spec = parsed.value;
@@ -71,7 +72,7 @@ function build(segment: Segment): Built {
 		case "markdown": return { diagnostics: [], marked: false, render: ctx => ({ nodes: renderMarkdown(ctx, segment.lines), diagnostics: [] }) };
 		case "fence":
 			// A drawing beyond this size is unreadable and its layout would stall the pane.
-			if (segment.input.lines.length > MAX_FENCE_LINES) return { diagnostics: [diagnostic(segment.name || "code", segment.line, `组件超过 ${MAX_FENCE_LINES} 行：拆成几个较小的组件`)], marked: false, render: ctx => ({ nodes: [{ id: `${ctx.id}.failed`, k: "text", p: { text: `第 ${segment.line} 行的组件过大，未绘制`, tone: "error" } }], diagnostics: [] }) };
+			if (segment.input.lines.length > MAX_FENCE_LINES) return { diagnostics: [diagnostic(segment.name || "code", segment.line, tr(`Component exceeds ${MAX_FENCE_LINES} lines; split it into several smaller components`, `组件超过 ${MAX_FENCE_LINES} 行：拆成几个较小的组件`))], marked: false, render: ctx => ({ nodes: [{ id: `${ctx.id}.failed`, k: "text", p: { text: tr(`The component at line ${segment.line} is too large and was not drawn`, `第 ${segment.line} 行的组件过大，未绘制`), tone: "error" } }], diagnostics: [] }) };
 			return fence(segment.name, segment.input, segment.line);
 		case "table": return built("table", segment.input.line, parseTable(segment.input), renderTable);
 		case "image": return built("image", segment.input.line, parseImage(segment.input), renderImage);
@@ -125,7 +126,7 @@ export function renderDraft(text: string, host: DraftHost): DraftRender {
 		} catch (error) {
 			// A renderer bug stays inside its component: the rest of the text still draws.
 			const message = error instanceof Error ? error.message : String(error);
-			rendered = { nodes: [{ id: `${id}.failed`, k: "text", p: { text: `第 ${lineOf(segment)} 行的组件绘制失败：${message}`, tone: "error" } }], diagnostics: [diagnostic("draft", lineOf(segment), `组件绘制失败：${message}`)] };
+			rendered = { nodes: [{ id: `${id}.failed`, k: "text", p: { text: tr(`Component drawing failed at line ${lineOf(segment)}: ${message}`, `第 ${lineOf(segment)} 行的组件绘制失败：${message}`), tone: "error" } }], diagnostics: [diagnostic("draft", lineOf(segment), tr(`Component drawing failed: ${message}`, `组件绘制失败：${message}`))] };
 		}
 		diagnostics.push(...rendered.diagnostics);
 		const nodes = segment.kind === "markdown" || (segment.kind === "fence" && SELF_EDITING[segment.name] === true) || rendered.nodes.length === 0

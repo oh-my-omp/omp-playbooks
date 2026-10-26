@@ -8,6 +8,7 @@ import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { z as zod } from "@oh-my-pi/omptype/zod";
+import { LANGUAGE } from "../src/i18n";
 import { parseRunId } from "../src/domain/model";
 import { socketPath, type EventPayload, type Request, type ServerFrame } from "../src/domain/protocol";
 import extension from "../src/extension/index";
@@ -255,7 +256,7 @@ test("interruption revokes an in-flight edit without aborting the coordinator; L
 	};
 	const changed = await h.execute("playbook_edit", { op: "title", run: "r1", block: "b1", value: "New" });
 	expect(changed.isError).toBe(true);
-	expect(structuredClone(JSON.parse(changed.content[0]!.text!).error)).toMatchObject({ code: "NotLocked", message: expect.stringContaining("person took this block back") });
+	expect(structuredClone(JSON.parse(changed.content[0]!.text!).error)).toMatchObject({ code: "NotLocked", message: expect.stringContaining("人在变更生效前通过打断收回了此块") });
 	expect(s.frames.map(frame => frame.op)).toEqual(["hello", "lock", "set", "unlock"]);
 	expect(h.aborted).toBe(0); expect(h.messages).toEqual([]);
 	s.handler = (frame, socket) => socket.write(JSON.stringify({ id: frame.id, ok: false, error: { code: "Locked", message: "human editing", detail: { block: "b1" } } }) + "\n");
@@ -387,7 +388,7 @@ test("open starts the document service beside the coordinator pane and returns h
 	expect(result.isError).toBe(false);
 	expect(JSON.parse(result.content[0]!.text!)).toMatchObject({ blocks: ["b1"], pane: "document-pane" });
 	const real = await realpath(doc);
-	expect(await tern.args()).toEqual(["split", "coordinator-pane", "right", "--cwd", dirname(real), "--json", "--", "bun", resolve(import.meta.dir, "../src/service/main.ts"), real]);
+	expect(await tern.args()).toEqual(["split", "coordinator-pane", "right", "--cwd", dirname(real), "--json", "--", "env", `OMP_PLAYBOOKS_LANG=${LANGUAGE}`, "bun", resolve(import.meta.dir, "../src/service/main.ts"), real]);
 	expect(s.frames.map(frame => frame.op)).toEqual(["hello"]);
 });
 
@@ -416,9 +417,9 @@ for (const command of ["playbook-add", "playbook-show"]) {
 	test(`${command}: unique live connection is used; multiple connections prompt and allow cancellation`, async () => {
 		const a = await service("pane-a"); const b = await service("pane-b"); const tern = await fakeTern(); process.env.TERN_PANE = "coordinator-pane"; const h = await harness();
 		await h.execute("playbook_run", { doc: a.doc, op: "list" });
-		await h.command(command); expect(h.menus.some(menu => menu.title === "Choose Playbook")).toBe(false);
+		await h.command(command); expect(h.menus.some(menu => menu.title === "选择 Playbook")).toBe(false);
 		await h.execute("playbook_run", { doc: b.doc, op: "list" }); h.choices.push(await realpath(b.doc)); await h.command(command);
-		expect(h.menus.find(menu => menu.title === "Choose Playbook")!.options).toEqual([await realpath(a.doc), await realpath(b.doc)]);
+		expect(h.menus.find(menu => menu.title === "选择 Playbook")!.options).toEqual([await realpath(a.doc), await realpath(b.doc)]);
 		if (command === "playbook-show") expect(await tern.args()).toEqual(["focus", "pane-a", "--json", "focus", "pane-b", "--json"]);
 		else expect(b.frames.at(-1)!.op).toBe("post");
 		const counts = [a.frames.length, b.frames.length]; h.choices.push(null); await h.command(command);
@@ -434,9 +435,9 @@ test("show missing remote pane never invokes tern and gives exact daemon-pane no
 
 test("show without local pane never invokes tern; child failures retain exit code and stderr", async () => {
 	const s = await service(); const tern = await fakeTern(9); const h = await harness(); await h.command("playbook-show", s.doc);
-	expect(await Bun.file(tern.capture).exists()).toBe(false); expect(h.notices.at(-1)!.message).toContain("coordinator Tern pane");
+	expect(await Bun.file(tern.capture).exists()).toBe(false); expect(h.notices.at(-1)!.message).toContain("协调者 Tern 面板");
 	process.env.TERN_PANE = "coordinator-pane"; await h.command("playbook-show", s.doc);
-	expect(h.notices.at(-1)!.message).toContain("tern focus exited 9: focus failed"); expect(await tern.args()).toEqual(["focus", "document-pane", "--json"]);
+	expect(h.notices.at(-1)!.message).toContain("tern focus 退出 9：focus failed"); expect(await tern.args()).toEqual(["focus", "document-pane", "--json"]);
 });
 
 for (const op of ["runs", "post"] as const) {
@@ -449,7 +450,7 @@ for (const op of ["runs", "post"] as const) {
 				else socket.write(JSON.stringify({ id: frame.id, ok: false, error: { code: "BadValue", message: "rejected " + op } }) + "\n");
 			};
 			if (failure === "NoService") h.selectHook = async title => {
-				if (title === (op === "runs" ? "Choose session message" : "Choose block")) { await s.disconnect(); await s.stop(); }
+				if (title === (op === "runs" ? "选择会话消息" : "选择块")) { await s.disconnect(); await s.stop(); }
 			};
 			await h.command("playbook-add", s.doc);
 			expect(h.notices.at(-1)!.type).toBe("error"); expect(h.notices.at(-1)!.message).toContain(failure === "protocol" ? "BadValue: rejected " + op : failure);
@@ -462,11 +463,11 @@ for (const op of ["runs", "post"] as const) {
 test("add reconnects before runs and post when transport disappears during menu selection", async () => {
 	const s = await service(); const h = await harness();
 	h.selectHook = async title => {
-		if (title === "Choose session message" || title === "Choose block") await s.disconnect();
+		if (title === "选择会话消息" || title === "选择块") await s.disconnect();
 	};
 	await h.command("playbook-add", s.doc);
 	expect(s.frames.map(frame => frame.op)).toEqual(["hello", "hello", "runs", "read", "hello", "post"]);
-	expect(h.notices.at(-1)).toEqual({ message: "Playbook timeline entry 7 written", type: "info" });
+	expect(h.notices.at(-1)).toEqual({ message: "已写入 Playbook 时间线条目 7", type: "info" });
 });
 
 test("client missing socket returns NoService; failed hello sends no target request", async () => {
@@ -649,7 +650,7 @@ test("exec must be the whole cell and needs an unambiguous document", async () =
 	expect(structuredClone(await h.call({ language: "js", code: 'await playbook.exec("l1")' }))).toMatchObject({ block: true, reason: expect.stringContaining("NoService") });
 	const a = await service(); const b = await service();
 	await h.execute("playbook_open", { doc: a.doc }); await h.execute("playbook_open", { doc: b.doc });
-	expect(structuredClone(await h.call({ language: "js", code: 'await playbook.exec("l1")' }))).toMatchObject({ block: true, reason: expect.stringContaining("several") });
+	expect(structuredClone(await h.call({ language: "js", code: 'await playbook.exec("l1")' }))).toMatchObject({ block: true, reason: expect.stringContaining("打开了多个") });
 	expect(a.frames.map(frame => frame.op)).toEqual(["hello"]); expect(b.frames.map(frame => frame.op)).toEqual(["hello"]);
 });
 

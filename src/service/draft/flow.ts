@@ -1,3 +1,4 @@
+import { tr } from "../../i18n";
 import type { TspNode } from "../tsp-types";
 import { diagnostic, takeMarker, type Change, type ChangeView, type ChainNode, type DraftDiagnostic, type FenceInput, type FlowChain, type Parsed, type RenderContext, type Rendered, type Span } from "./contract";
 import { escapeXml, textWidth, wrapText } from "./text";
@@ -53,7 +54,7 @@ function scanNode(text: string, start: number): Scan<NodeToken> {
 	let end: number;
 	if (bracket) {
 		const close = text.indexOf(bracket.close, pos + bracket.open.length);
-		if (close === -1) return { ok: false, message: `形状括号未闭合，请补上 ${bracket.close}` };
+		if (close === -1) return { ok: false, message: tr(`Shape bracket is not closed; add ${bracket.close}`, `形状括号未闭合，请补上 ${bracket.close}`) };
 		id = text.slice(pos + bracket.open.length, close).trim();
 		end = close + bracket.close.length;
 	} else {
@@ -61,7 +62,7 @@ function scanNode(text: string, start: number): Scan<NodeToken> {
 		id = (match?.[1] ?? "").trim();
 		end = pos + (match?.[0].length ?? 0);
 	}
-	if (!id) return { ok: false, message: "节点名称为空，请写成 A -> B" };
+	if (!id) return { ok: false, message: tr("Node name is empty; write A -> B", "节点名称为空，请写成 A -> B") };
 	return { ok: true, value: { id, shape: bracket?.shape ?? "rect", explicit: !!bracket, highlighted }, end };
 }
 function scanChain(text: string): Scan<{ readonly steps: readonly Step[]; readonly label: string }> {
@@ -86,13 +87,13 @@ function scanChain(text: string): Scan<{ readonly steps: readonly Step[]; readon
 		pos += arrow[0].length;
 	}
 	const rest = text.slice(pos).trim();
-	if (rest && !/^[:：]/.test(rest)) return { ok: false, message: "无法解析节点后的内容，请写成 A -> B: 标签" };
+	if (rest && !/^[:：]/.test(rest)) return { ok: false, message: tr("Unable to parse content after the node; write A -> B: label", "无法解析节点后的内容，请写成 A -> B: 标签") };
 	return { ok: true, value: { steps, label: rest.replace(/^[:：]\s*/, "") }, end: text.length };
 }
 export function parseFlow(input: FenceInput): Parsed<FlowSpec> {
 	const diagnostics: DraftDiagnostic[] = [];
 	const arg = input.args.trim().toUpperCase();
-	if (arg !== "" && arg !== "TB" && arg !== "LR" && arg !== "BT" && arg !== "RL") return { ok: false, diagnostics: [diagnostic("flow", input.line - 1, "方向无效，请使用 flow TB、LR、BT 或 RL")] };
+	if (arg !== "" && arg !== "TB" && arg !== "LR" && arg !== "BT" && arg !== "RL") return { ok: false, diagnostics: [diagnostic("flow", input.line - 1, tr("Invalid direction; use flow TB, LR, BT, or RL", "方向无效，请使用 flow TB、LR、BT 或 RL"))] };
 	const direction: Direction = arg === "" ? "TB" : arg;
 	const seen = new Map<string, SeenNode>();
 	const edges: FlowEdge[] = [];
@@ -107,16 +108,16 @@ export function parseFlow(input: FenceInput): Parsed<FlowSpec> {
 		marked ||= change !== "same";
 		const group = /^group\s+(.+?)\s*[:：]\s*(.+)$/i.exec(text);
 		if (group) {
-			if (change === "changed") { diagnostics.push(diagnostic("flow", line, "~ 只能标记节点；分组请使用 + group 名称: A 或 - group 名称: A")); return; }
+			if (change === "changed") { diagnostics.push(diagnostic("flow", line, tr("~ can mark only nodes; for a group use + group name: A or - group name: A", "~ 只能标记节点；分组请使用 + group 名称: A 或 - group 名称: A"))); return; }
 			const members = group[2]!.split(/[,，]/).map(m => m.trim()).filter(Boolean);
-			if (!members.length) { diagnostics.push(diagnostic("flow", line, "分组不能为空，请写成 group 名称: A, B")); return; }
+			if (!members.length) { diagnostics.push(diagnostic("flow", line, tr("A group cannot be empty; write group name: A, B", "分组不能为空，请写成 group 名称: A, B"))); return; }
 			groups.push({ name: group[1]!.trim(), members, change, line });
 			return;
 		}
-		if (/^group\s/i.test(text)) { diagnostics.push(diagnostic("flow", line, "分组格式无效，请写成 group 名称: A, B")); return; }
+		if (/^group\s/i.test(text)) { diagnostics.push(diagnostic("flow", line, tr("Invalid group format; write group name: A, B", "分组格式无效，请写成 group 名称: A, B"))); return; }
 		const chain = scanChain(text);
 		if (!chain.ok) { diagnostics.push(diagnostic("flow", line, chain.message)); return; }
-		if (change === "changed" && chain.value.steps.length > 1) { diagnostics.push(diagnostic("flow", line, "~ 不能标记连线；请用 - A -> B 删除旧连线，再用 + A -> C 添加新连线")); return; }
+		if (change === "changed" && chain.value.steps.length > 1) { diagnostics.push(diagnostic("flow", line, tr("~ cannot mark a connection; use - A -> B to remove the old connection, then + A -> C to add the new connection", "~ 不能标记连线；请用 - A -> B 删除旧连线，再用 + A -> C 添加新连线"))); return; }
 		for (const step of chain.value.steps) for (const token of step.nodes) {
 			const prev = seen.get(token.id);
 			if (prev) {
@@ -131,17 +132,17 @@ export function parseFlow(input: FenceInput): Parsed<FlowSpec> {
 			edges.push({ from: from.id, to: to.id, dashed: chain.value.steps[k]!.dashed, label: k === chain.value.steps.length - 1 ? chain.value.label : "", change, line });
 		}
 	});
-	if (!seen.size && !diagnostics.length) diagnostics.push(diagnostic("flow", input.line, "流程图为空，请添加节点，例如 A -> B"));
+	if (!seen.size && !diagnostics.length) diagnostics.push(diagnostic("flow", input.line, tr("The flowchart is empty; add a node, e.g. A -> B", "流程图为空，请添加节点，例如 A -> B")));
 	for (const group of groups) {
 		const missing = group.members.filter(m => !seen.has(m));
-		if (missing.length) diagnostics.push(diagnostic("flow", group.line, `分组 ${group.name} 引用了不存在的节点 ${missing.join("、")}；请先声明这些节点`));
+		if (missing.length) diagnostics.push(diagnostic("flow", group.line, tr(`Group ${group.name} refers to missing nodes ${missing.join(", ")}; declare them first`, `分组 ${group.name} 引用了不存在的节点 ${missing.join("、")}；请先声明这些节点`)));
 	}
 	for (const edge of edges) if (edge.change !== "same") {
 		const plain = edges.find(e => e.change === "same" && e.from === edge.from && e.to === edge.to);
-		if (plain) diagnostics.push(diagnostic("flow", edge.line, `连线 ${edge.from} -> ${edge.to} 在第 ${plain.line} 行未标记；请统一所有同名连线的变更标记`));
+		if (plain) diagnostics.push(diagnostic("flow", edge.line, tr(`Connection ${edge.from} -> ${edge.to} is unmarked on line ${plain.line}; use the same change marker for every connection with this name`, `连线 ${edge.from} -> ${edge.to} 在第 ${plain.line} 行未标记；请统一所有同名连线的变更标记`)));
 	}
 	const nodes: FlowNode[] = [...seen].map(([id, n]) => ({ id, shape: n.token.shape, highlighted: n.token.highlighted, change: !n.after ? "removed" : !n.before ? "added" : n.changed ? "changed" : "same", line: n.line }));
-	for (const group of groups) if (group.change !== "removed" && group.members.length && group.members.every(m => nodes.find(n => n.id === m)?.change === "removed")) diagnostics.push(diagnostic("flow", group.line, `分组 ${group.name} 只含删除节点；请写成 - group ${group.name}: ${group.members.join(", ")}`, "warning"));
+	for (const group of groups) if (group.change !== "removed" && group.members.length && group.members.every(m => nodes.find(n => n.id === m)?.change === "removed")) diagnostics.push(diagnostic("flow", group.line, tr(`Group ${group.name} contains only removed nodes; write - group ${group.name}: ${group.members.join(", ")}`, `分组 ${group.name} 只含删除节点；请写成 - group ${group.name}: ${group.members.join(", ")}`), "warning"));
 	if (diagnostics.some(d => d.severity === "error")) return { ok: false, diagnostics };
 	return { ok: true, value: { direction, nodes, edges, groups, marked, body: input.body, comments: input.lines.filter(line => line.trim().startsWith("//")) }, diagnostics };
 }
@@ -291,8 +292,8 @@ function chainOf(spec: FlowSpec, slots: RenderContext["slots"]): FlowChain | nul
 			return write(nodes.map((node, other) => other === index ? { ...node, id: value } : node), links);
 		},
 		insertAfter(index) {
-			let name = "新节点";
-			for (let n = 2; nodes.some(node => node.id === name); n++) name = `新节点 ${n}`;
+			let name = tr("New node", "新节点");
+			for (let n = 2; nodes.some(node => node.id === name); n++) name = tr(`New node ${n}`, `新节点 ${n}`);
 			const next = [...nodes];
 			next.splice(index + 1, 0, { id: name, shape: "rect", highlighted: false });
 			const nextLinks = [...links];
@@ -440,14 +441,14 @@ function renderFlowSvg(spec: FlowSpec, ctx: RenderContext): TspNode[] {
 		const marker = `${ctx.id}.arrow.${i}`;
 		return `<g${change === "removed" ? ' opacity="0.45"' : ""}><defs><marker id="${escapeXml(marker)}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 Z" fill="${stroke}"/></marker></defs><path d="${route.points.map((p, k) => `${k ? "L" : "M"} ${p.x} ${p.y}`).join(" ")}" fill="none" stroke="${stroke}" stroke-width="1.7"${route.edge.dashed ? ' stroke-dasharray="6 4"' : ""} marker-end="url(#${escapeXml(marker)})"/>${route.label ? `<rect x="${route.label.x}" y="${route.label.y}" width="${route.label.w}" height="${route.label.h}" rx="4" fill="var(--surface)" stroke="${color(change)}"/>${labelSvg(route.label.lines, route.label.x + route.label.w / 2, route.label.y + 18, change, 12)}` : ""}</g>`;
 	});
-	const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${displayWidth}" height="${displayHeight}" viewBox="${minX} ${minY} ${width} ${height}" font-family="sans-serif"><title>${escapeXml(`流程图 ${spec.direction}`)}</title>${groupSvgs.join("")}${edgeSvgs.join("")}${[...positioned.values()].map(p => nodeSvg(p, ctx.view)).join("")}${!nodes.length ? labelSvg(["此视图没有节点"], 80, 50, "same") : ""}</svg>`;
-	const output: TspNode[] = [ctx.svg(`${ctx.id}.diagram`, svg, { w: displayWidth, h: displayHeight }, nodes.map(n => n.id).join("、"))];
+	const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${displayWidth}" height="${displayHeight}" viewBox="${minX} ${minY} ${width} ${height}" font-family="sans-serif"><title>${escapeXml(tr(`Flowchart ${spec.direction}`, `流程图 ${spec.direction}`))}</title>${groupSvgs.join("")}${edgeSvgs.join("")}${[...positioned.values()].map(p => nodeSvg(p, ctx.view)).join("")}${!nodes.length ? labelSvg([tr("No nodes in this view", "此视图没有节点")], 80, 50, "same") : ""}</svg>`;
+	const output: TspNode[] = [ctx.svg(`${ctx.id}.diagram`, svg, { w: displayWidth, h: displayHeight }, tr(nodes.map(n => n.id).join(", "), nodes.map(n => n.id).join("、")))];
 	if (spec.marked && ctx.view === "changes") {
 		const changes = [...spec.nodes, ...spec.edges, ...spec.groups].map(item => item.change);
 		output.push({ id: `${ctx.id}.counts`, k: "text", p: { spans: [
-			{ t: `+ ${changes.filter(c => c === "added").length} 新增`, s: "success" },
-			{ t: `  − ${changes.filter(c => c === "removed").length} 删除`, s: "muted del" },
-			{ t: `  ~ ${changes.filter(c => c === "changed").length} 修改`, s: "warning" },
+			{ t: tr(`+ ${changes.filter(c => c === "added").length} added`, `+ ${changes.filter(c => c === "added").length} 新增`), s: "success" },
+			{ t: tr(`  − ${changes.filter(c => c === "removed").length} removed`, `  − ${changes.filter(c => c === "removed").length} 删除`), s: "muted del" },
+			{ t: tr(`  ~ ${changes.filter(c => c === "changed").length} changed`, `  ~ ${changes.filter(c => c === "changed").length} 修改`), s: "warning" },
 		] } });
 	}
 	return output;

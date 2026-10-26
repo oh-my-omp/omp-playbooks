@@ -173,13 +173,13 @@ test("a spawned subagent shares the Launch: its result keeps the Launch open unl
 
 test("agent on an orchestration block closes the Launch it just created before rejecting; spawn rejects before any subagent", async () => {
 	const agent = harness(); agent.launchKind = "orchestration";
-	await expect(agent.playbook.agent({ blocks: ["b1"] })).rejects.toThrow("orchestration block (Launch l1 closed)");
+	await expect(agent.playbook.agent({ blocks: ["b1"] })).rejects.toThrow("是编排块（Launch l1 已关闭）");
 	expect(agent.calls).toEqual([
 		{ kind: "tool", name: "playbook_launch", args: { doc: "/book.yaml", run: "r1", op: "launch", blocks: ["b1"] } },
 		close(),
 	]);
 	const spawn = harness(); spawn.launchKind = "orchestration";
-	await expect(spawn.playbook.spawn("l1")).rejects.toThrow("orchestration");
+	await expect(spawn.playbook.spawn("l1")).rejects.toThrow("是编排 Launch");
 	expect(spawn.calls).toEqual([{ kind: "tool", name: "playbook_launch", args: { doc: "/book.yaml", op: "info", launch: "l1" } }]);
 });
 
@@ -216,7 +216,7 @@ test("spawn uses the Launch's latest baseline and Run rather than the coordinato
 
 test("spawn refuses a closed Launch before starting a subagent", async () => {
 	const h = harness(); h.info = { closed: { at: 1, by: "coordinator" } };
-	await expect(h.playbook.spawn("l1")).rejects.toThrow("l1 is closed");
+	await expect(h.playbook.spawn("l1")).rejects.toThrow("l1 已关闭");
 	expect(h.calls).toEqual([{ kind: "tool", name: "playbook_launch", args: { doc: "/book.yaml", op: "info", launch: "l1" } }]);
 });
 

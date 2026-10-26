@@ -1,3 +1,4 @@
+import { tr } from "../../i18n";
 import { diagnostic, type DraftDiagnostic, type FenceInput, type Parsed, type RenderContext, type Rendered } from "./contract";
 import { escapeXml, textWidth, wrapText } from "./text";
 
@@ -38,7 +39,7 @@ function parseSentence(source: string, line: number, diagnostics: DraftDiagnosti
 		text += source.slice(cursor, open);
 		const close = source.indexOf("]", open + 1);
 		if (close === -1) {
-			diagnostics.push(diagnostic("annot", line, "标注缺少右方括号；请写成 [片段]{说明}"));
+			diagnostics.push(diagnostic("annot", line, tr("Annotation is missing a closing square bracket; write [fragment]{note}", "标注缺少右方括号；请写成 [片段]{说明}")));
 			break;
 		}
 		// Brackets in ordinary prose are not an annotation until followed by a brace.
@@ -49,12 +50,12 @@ function parseSentence(source: string, line: number, diagnostics: DraftDiagnosti
 		}
 		const end = source.indexOf("}", close + 2);
 		if (end === -1) {
-			diagnostics.push(diagnostic("annot", line, "标注缺少右花括号；请写成 [片段]{说明}"));
+			diagnostics.push(diagnostic("annot", line, tr("Annotation is missing a closing brace; write [fragment]{note}", "标注缺少右花括号；请写成 [片段]{说明}")));
 			break;
 		}
 		const span = source.slice(open + 1, close);
 		if (!span) {
-			diagnostics.push(diagnostic("annot", line, "标注片段不能为空；请写成 [片段]{说明}"));
+			diagnostics.push(diagnostic("annot", line, tr("Annotation fragment cannot be empty; write [fragment]{note}", "标注片段不能为空；请写成 [片段]{说明}")));
 		}
 		const rawNote = source.slice(close + 2, end);
 		const red = rawNote.startsWith("!");
@@ -89,7 +90,7 @@ export function parseAnnot(input: FenceInput): Parsed<AnnotSpec> {
 			ensureGroup().sentences.push(parseSentence(source, input.line + index, diagnostics));
 		}
 	}
-	if (!groups.length) diagnostics.push(diagnostic("annot", input.line, "请至少写一个句子，例如 [片段]{说明}"));
+	if (!groups.length) diagnostics.push(diagnostic("annot", input.line, tr("Write at least one sentence, e.g. [fragment]{note}", "请至少写一个句子，例如 [片段]{说明}")));
 	if (diagnostics.length) return { ok: false, diagnostics };
 	return { ok: true, value: { groups }, diagnostics };
 }

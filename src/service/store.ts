@@ -7,6 +7,7 @@ import {
 	type JudgeReport, type Launch, type LaunchId, type PlaybookDoc, type Progress, type RunId,
 	type RunMeta, type Source, type Status, type TimelineEntry,
 } from "../domain/model";
+import { tr } from "../i18n";
 import type { ParsedFile, ServiceRecord, Store } from "../domain/ports";
 
 // Only boundary decoders inspect untrusted maps. Domain objects are constructed below.
@@ -169,6 +170,44 @@ function parse(text: string, expectRun: boolean): ParsedFile {
 	} catch (error) {
 		return { ok: false, error: error instanceof Error ? error.message : String(error) };
 	}
+}
+
+function parseFailure(error: string): string {
+	if (error === "Expected a mapping") return tr(error, "应为映射");
+	if (error.startsWith("Missing field: ")) return tr(error, `缺少字段：${error.slice("Missing field: ".length)}`);
+	if (error.startsWith("Unknown field: ")) return tr(error, `未知字段：${error.slice("Unknown field: ".length)}`);
+	if (error === "Expected a string") return tr(error, "应为字符串");
+	if (error === "Expected a finite number") return tr(error, "应为有限数字");
+	if (error === "Expected a positive integer") return tr(error, "应为正整数");
+	if (error === "Expected a boolean") return tr(error, "应为布尔值");
+	if (error === "Expected a sequence") return tr(error, "应为序列");
+	if (error.startsWith("Unexpected value: ")) return tr(error, `意外的值：${error.slice("Unexpected value: ".length)}`);
+	if (error === "Invalid block id") return tr(error, "无效的块 ID");
+	if (error === "Invalid Run id") return tr(error, "无效的 Run ID");
+	if (error === "Invalid Launch id") return tr(error, "无效的 Launch ID");
+	if (error === "Expected an ISO 8601 timestamp") return tr(error, "应为 ISO 8601 时间戳");
+	if (error === "Invalid timestamp") return tr(error, "无效的时间戳");
+	if (error === "Invalid calendar date") return tr(error, "无效的日历日期");
+	if (error === "A block needs body (task block) or requirement and design (design block)") return tr(error, "块需要 body（任务块）或 requirement 和 design（设计块）");
+	if (error === "agent must not be blank") return tr(error, "agent 不能为空");
+	if (error === "task: false is only valid on a task block") return tr(error, "task: false 只对任务块有效");
+	if (error === "task may only be false") return tr(error, "task 只能是 false");
+	if (error === "A block with task: false has no status or report") return tr(error, "task: false 的块没有 status 或 report");
+	if (error === "A design block cannot be running") return tr(error, "设计块不能是 running");
+	if (error === "A design block has no report") return tr(error, "设计块没有 report");
+	if (error === "Running Run cannot have a finish time") return tr(error, "运行中的 Run 不能有结束时间");
+	if (error === "Finished Run requires a finish time and no update due") return tr(error, "已结束的 Run 必须有结束时间且没有待更新");
+	if (error === "Update interval must be positive") return tr(error, "更新间隔必须为正数");
+	if (error.startsWith("Duplicate block id: ")) return tr(error, `块 ID 重复：${error.slice("Duplicate block id: ".length)}`);
+	if (error === "Expected a pair") return tr(error, "应为一对值");
+	if (error === "Launch snapshot must be a successful compile") return tr(error, "Launch 快照必须是成功的编译结果");
+	if (error === "Launch requires blocks") return tr(error, "Launch 必须包含 blocks");
+	if (error === "First baseline must equal snapshot text") return tr(error, "第一个基线必须等于快照文本");
+	if (error === "Timeline sequence must increase") return tr(error, "时间线序号必须递增");
+	if (error === "Launch belongs to another document") return tr(error, "Launch 属于另一个文档");
+	if (error === "YAML text must be well-formed Unicode") return tr(error, "YAML 文本必须是格式正确的 Unicode");
+	if (error === "Block body must be well-formed Unicode") return tr(error, "块正文必须是格式正确的 Unicode");
+	return tr(error, `Playbook 数据无效：${error}`);
 }
 
 function quoted(text: string): string {
@@ -383,7 +422,10 @@ export function createStore(templatePath: string): Store {
 	return {
 		templatePath: path, baseDir, serialize, parse, path: filePath,
 		readTemplate() {
-			try { return parse(readFileSync(path, "utf8"), false); }
+			try {
+				const parsed = parse(readFileSync(path, "utf8"), false);
+				return parsed.ok ? parsed : { ...parsed, error: parseFailure(parsed.error) };
+			}
 			catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
 		},
 		readRuns() {
@@ -394,9 +436,12 @@ export function createStore(templatePath: string): Store {
 				if (!name.endsWith(".yaml")) continue;
 				const id = runId(name.slice(0, -5));
 				let parsed: ParsedFile;
-				try { parsed = parse(readFileSync(join(runsDir, name), "utf8"), true); }
+				try {
+					const value = parse(readFileSync(join(runsDir, name), "utf8"), true);
+					parsed = value.ok ? value : { ...value, error: parseFailure(value.error) };
+				}
 				catch (error) { parsed = { ok: false, error: error instanceof Error ? error.message : String(error) }; }
-				if (parsed.ok && parsed.run?.id !== id) parsed = { ok: false, error: `Run id does not match filename: ${name}` };
+				if (parsed.ok && parsed.run?.id !== id) parsed = { ok: false, error: tr(`Run id does not match filename: ${name}`, `Run ID 与文件名不匹配：${name}`) };
 				runs.set(id, parsed);
 			}
 			return runs;

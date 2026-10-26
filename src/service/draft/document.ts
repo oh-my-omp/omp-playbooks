@@ -2,6 +2,7 @@
 // frontmatter, lead, `## ` panels and the segments inside them. Component fences are only
 // located here; src/service/draft/components.ts parses and draws them. Every segment keeps the
 // UTF-16 range it came from, so the pane can edit the text it draws in place.
+import { tr } from "../../i18n";
 import { diagnostic, type DraftDiagnostic, type FenceInput, type SourceLine, type Span } from "./contract";
 
 export interface DraftMeta {
@@ -114,7 +115,7 @@ function segmentsOf(lines: readonly Line[], diagnostics: DraftDiagnostic[]): Seg
 				if (closes(open[1]!, lines[next]!.text)) { closed = true; break; }
 				body.push(lines[next]!);
 			}
-			if (!closed) diagnostics.push(diagnostic("draft", line.number, `代码块没有结束：在块末尾加一行 ${open[1]}`));
+			if (!closed) diagnostics.push(diagnostic("draft", line.number, tr(`Code fence is not closed; add a line ${open[1]} at the end of the block.`, `代码块没有结束：在块末尾加一行 ${open[1]}`)));
 			const last = closed ? lines[next]! : body.at(-1) ?? line;
 			const bodyStart = body[0]?.offset ?? line.offset + line.text.length + 1;
 			segments.push({
@@ -153,7 +154,7 @@ function attributes(text: string, line: number, diagnostics: DraftDiagnostic[]):
 		switch (key) {
 			case "span": case "rows": {
 				const number = value === undefined ? NaN : Number(value);
-				if (!Number.isInteger(number) || number < 1) diagnostics.push(diagnostic("draft", line, `${key} 需要正整数，例如 {${key}=2}`));
+				if (!Number.isInteger(number) || number < 1) diagnostics.push(diagnostic("draft", line, tr(`${key} must be a positive integer, e.g. {${key}=2}.`, `${key} 需要正整数，例如 {${key}=2}`)));
 				else if (key === "span") span = number;
 				else rows = number;
 				break;
@@ -162,11 +163,11 @@ function attributes(text: string, line: number, diagnostics: DraftDiagnostic[]):
 				bare = true;
 				break;
 			case "meta":
-				if (value === undefined) diagnostics.push(diagnostic("draft", line, `meta 需要值，例如 {meta="说明"}`));
+				if (value === undefined) diagnostics.push(diagnostic("draft", line, tr(`meta needs a value, e.g. {meta="Description"}.`, `meta 需要值，例如 {meta="说明"}`)));
 				else meta = value;
 				break;
 			default:
-				diagnostics.push(diagnostic("draft", line, `未知的面板属性 ${key}：可用 span、rows、bare、meta`, "warning"));
+				diagnostics.push(diagnostic("draft", line, tr(`Unknown panel attribute ${key}; available attributes are span, rows, bare, and meta.`, `未知的面板属性 ${key}：可用 span、rows、bare、meta`), "warning"));
 		}
 	}
 	return { span, rows, bare, meta };
@@ -180,32 +181,32 @@ function frontmatter(lines: readonly Line[], diagnostics: DraftDiagnostic[]): { 
 	if (lines[0]?.text.trim() === "---") {
 		const end = lines.findIndex((line, index) => index > 0 && line.text.trim() === "---");
 		if (end < 0) {
-			diagnostics.push(diagnostic("draft", 1, "稿头没有结束：在稿头末尾加一行 ---"));
+			diagnostics.push(diagnostic("draft", 1, tr("The front matter is not closed; add a line --- at its end.", "稿头没有结束：在稿头末尾加一行 ---")));
 		} else {
 			const seen = new Set<string>();
 			for (const line of lines.slice(1, end)) {
 				if (!line.text.trim() || line.text.trimStart().startsWith("#")) continue;
 				const match = /^([A-Za-z_][\w-]*)[ \t]*:[ \t]*(.*?)[ \t]*(?:#.*)?$/.exec(line.text);
-				if (!match) { diagnostics.push(diagnostic("draft", line.number, "稿头每行写成 key: value")); continue; }
+				if (!match) { diagnostics.push(diagnostic("draft", line.number, tr("Write each front-matter line as key: value.", "稿头每行写成 key: value"))); continue; }
 				const key = match[1]!, value = match[2]!.replace(/^(["'])(.*)\1$/, "$2");
-				if (seen.has(key)) diagnostics.push(diagnostic("draft", line.number, `稿头 ${key} 重复，只保留一行`, "warning"));
+				if (seen.has(key)) diagnostics.push(diagnostic("draft", line.number, tr(`Front-matter key ${key} is repeated; keep only one line.`, `稿头 ${key} 重复，只保留一行`), "warning"));
 				seen.add(key);
 				switch (key) {
 					case "template":
 						if (value === "sheet" || value === "doc") template = value;
-						else diagnostics.push(diagnostic("draft", line.number, "template 只能是 sheet 或 doc"));
+						else diagnostics.push(diagnostic("draft", line.number, tr("template must be sheet or doc.", "template 只能是 sheet 或 doc")));
 						break;
 					case "title": title = value; break;
 					case "subtitle": subtitle = value; break;
 					case "cols": {
 						const number = Number(value);
 						if (Number.isInteger(number) && number >= 1 && number <= 6) cols = number;
-						else diagnostics.push(diagnostic("draft", line.number, "cols 需要 1 到 6 的整数，例如 cols: 3"));
+						else diagnostics.push(diagnostic("draft", line.number, tr("cols must be an integer from 1 to 6, e.g. cols: 3.", "cols 需要 1 到 6 的整数，例如 cols: 3")));
 						break;
 					}
 					case "lang": break;
 					default:
-						if (IGNORED_KEYS.has(key)) diagnostics.push(diagnostic("draft", line.number, `${key} 在 Playbook 中不生效，已忽略`, "warning"));
+						if (IGNORED_KEYS.has(key)) diagnostics.push(diagnostic("draft", line.number, tr(`${key} has no effect in a Playbook and was ignored.`, `${key} 在 Playbook 中不生效，已忽略`), "warning"));
 						else extra.push({ key, value });
 				}
 			}
@@ -239,7 +240,7 @@ export function parseDocument(text: string): DraftDocument {
 		const match = HEADING.exec(line.text)!;
 		const id = match[1] ?? null;
 		if (id !== null) {
-			if (used.has(id)) diagnostics.push(diagnostic("draft", line.number, `面板 ID ${id} 重复：每个面板的字母 ID 只能用一次`));
+			if (used.has(id)) diagnostics.push(diagnostic("draft", line.number, tr(`Panel ID ${id} is repeated; each panel's letter ID may be used only once.`, `面板 ID ${id} 重复：每个面板的字母 ID 只能用一次`)));
 			used.add(id);
 		}
 		const end = headings[index + 1];
@@ -263,7 +264,7 @@ export function parseDocument(text: string): DraftDocument {
 			id = letter(next);
 			used.add(id);
 		}
-		if (!panel.title && !panel.attrs.bare && panel.segments.length === 0) diagnostics.push(diagnostic("draft", panel.line.number, "面板没有标题也没有内容", "warning"));
+		if (!panel.title && !panel.attrs.bare && panel.segments.length === 0) diagnostics.push(diagnostic("draft", panel.line.number, tr("The panel has neither a title nor content.", "面板没有标题也没有内容"), "warning"));
 		return { id, explicit: panel.id !== null, title: panel.title, titleSpan: panel.titleSpan, ...panel.attrs, line: panel.line.number, start: panel.line.offset, end: panel.end, segments: panel.segments };
 	});
 	return { meta, lead, panels, diagnostics };
@@ -278,7 +279,7 @@ export function fences(text: string): Extract<Segment, { kind: "fence" }>[] {
 /** Text of the panel whose heading writes `id`; panels with assigned IDs cannot be addressed. */
 export function panelText(text: string, id: string): { readonly ok: true; readonly text: string } | { readonly ok: false; readonly reason: string } {
 	const panel = parseDocument(text).panels.find(candidate => candidate.explicit && candidate.id === id);
-	if (!panel) return { ok: false, reason: `Panel ${id} is not written in the design (write "## ${id} Title" in the heading)` };
+	if (!panel) return { ok: false, reason: tr(`Panel ${id} is not written in the design (write "## ${id} Title" in the heading)`, `设计稿中没有写出 ID 为 ${id} 的面板（请在标题中写 "## ${id} 标题"）`) };
 	return { ok: true, text: text.slice(panel.start, panel.end).replace(/\n+$/, "") };
 }
 
@@ -288,10 +289,10 @@ export function panelText(text: string, id: string): { readonly ok: true; readon
  */
 export function replacePanel(text: string, id: string, replacement: string): { readonly ok: true; readonly text: string } | { readonly ok: false; readonly code: "NotFound" | "BadValue"; readonly reason: string } {
 	const panel = parseDocument(text).panels.find(candidate => candidate.explicit && candidate.id === id);
-	if (!panel) return { ok: false, code: "NotFound", reason: `设计稿中没有写出 ID 为 ${id} 的面板` };
+	if (!panel) return { ok: false, code: "NotFound", reason: tr(`The design has no panel with ID ${id}.`, `设计稿中没有写出 ID 为 ${id} 的面板`) };
 	const own = parseDocument(replacement);
 	if (own.panels.length !== 1 || own.lead.length > 0 || !own.panels[0]!.explicit || own.panels[0]!.id !== id) {
-		return { ok: false, code: "BadValue", reason: `替换文本必须是一个面板，以 "## ${id} 标题" 开头` };
+		return { ok: false, code: "BadValue", reason: tr(`The replacement must be one panel starting with "## ${id} Title".`, `替换文本必须是一个面板，以 "## ${id} 标题" 开头`) };
 	}
 	const tail = text.slice(panel.end);
 	const body = replacement.replace(/\n+$/, "");

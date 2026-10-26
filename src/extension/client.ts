@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
+import { tr } from "../i18n";
 import type { EventPayload, ProtocolError, Request, ServerFrame } from "../domain/protocol";
 
 export type ClientError = ProtocolError | { readonly code: "NoService" | "Disconnected" | "StartFailed"; readonly message: string };
@@ -90,7 +91,7 @@ export class K1Client {
 		return (this.state.kind === "connecting" || this.state.kind === "connected") && this.state.link === link;
 	}
 	private failure(id: string, code: "NoService" | "Disconnected"): Reply {
-		return { id, ok: false, error: { code, message: code === "NoService" ? "No Playbook document service is listening at this socket" : "Connection ended before a response; the operation may have been applied" } };
+		return { id, ok: false, error: { code, message: code === "NoService" ? tr("No Playbook document service is listening at this socket", "此 socket 没有 Playbook 文档服务在监听") : tr("Connection ended before a response; the operation may have been applied", "连接在收到响应前结束；操作可能已经应用") } };
 	}
 	private sendOn(link: Link, request: Request, id = randomUUID()): Promise<Reply> {
 		if (!this.owns(link) || link.socket.destroyed) return Promise.resolve(this.failure(id, "Disconnected"));

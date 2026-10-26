@@ -1,3 +1,4 @@
+import { tr } from "../../i18n";
 import { diagnostic, takeMarker, type Change, type ChangeView, type DraftDiagnostic, type FenceInput, type Parsed, type RenderContext, type Rendered } from "./contract";
 import { escapeXml, textWidth, wrapText } from "./text";
 
@@ -64,7 +65,7 @@ export function parseEr(input: FenceInput): Parsed<ErSpec> {
 	switch (arg) {
 		case "": direction = "TB"; break;
 		case "TB": case "LR": case "BT": case "RL": direction = arg; break;
-		default: return fail(input.line, "方向应为 TB、LR、BT 或 RL，例如 er LR");
+		default: return fail(input.line, tr("Direction must be TB, LR, BT, or RL, e.g. er LR", "方向应为 TB、LR、BT 或 RL，例如 er LR"));
 	}
 	const entities: (Omit<ErEntity, "fields"> & { fields: ErField[] })[] = [];
 	const named = new Map<string, ErEntity>();
@@ -79,25 +80,25 @@ export function parseEr(input: FenceInput): Parsed<ErSpec> {
 		const body = text.trim();
 		marked ||= change !== "same";
 		if (/^\s/.test(raw)) {
-			if (!current) return fail(line, "字段前需在第 0 列写实体名，例如 User，然后缩进写 id PK");
+			if (!current) return fail(line, tr("Write the entity name in column 0 before fields, e.g. User, then indent id PK", "字段前需在第 0 列写实体名，例如 User，然后缩进写 id PK"));
 			const inherited = current.change === "added" || current.change === "removed" ? current.change : "same";
-			if (inherited !== "same" && change !== "same" && change !== inherited) return fail(line, `字段标记与实体 ${current.name} 冲突；删除字段标记以继承实体标记`);
+			if (inherited !== "same" && change !== "same" && change !== inherited) return fail(line, tr(`The field marker conflicts with entity ${current.name}; remove the field marker to inherit the entity marker.`, `字段标记与实体 ${current.name} 冲突；删除字段标记以继承实体标记`));
 			const tokens = body.split(/\s+/);
 			const name = tokens.shift()!;
-			if (!name) return fail(line, "字段需要名称，例如 id PK");
+			if (!name) return fail(line, tr("A field needs a name, e.g. id PK", "字段需要名称，例如 id PK"));
 			const arrow = tokens.indexOf("->");
 			const head = arrow < 0 ? tokens : tokens.slice(0, arrow);
 			const ref = arrow < 0 ? null : tokens[arrow + 1];
-			if (arrow >= 0 && (!ref || arrow + 2 !== tokens.length)) return fail(line, `外键目标应写在末尾，例如 ${name} FK -> User`);
-			if (ref !== null && key(head.at(-1)) !== "FK") return fail(line, `只有 FK 字段能引用实体，例如 ${name} FK -> ${ref}`);
+			if (arrow >= 0 && (!ref || arrow + 2 !== tokens.length)) return fail(line, tr(`A foreign-key target must be last, e.g. ${name} FK -> User`, `外键目标应写在末尾，例如 ${name} FK -> User`));
+			if (ref !== null && key(head.at(-1)) !== "FK") return fail(line, tr(`Only an FK field can reference an entity, e.g. ${name} FK -> ${ref}`, `只有 FK 字段能引用实体，例如 ${name} FK -> ${ref}`));
 			const keyAt = head.findIndex(token => key(token) !== null);
-			if (keyAt >= 0 && keyAt !== head.length - 1) return fail(line, `键标记应在类型之后，例如 ${name} string ${head[keyAt]}${ref ? ` -> ${ref}` : ""}`);
+			if (keyAt >= 0 && keyAt !== head.length - 1) return fail(line, tr(`The key marker must follow the type, e.g. ${name} string ${head[keyAt]}${ref ? ` -> ${ref}` : ""}`, `键标记应在类型之后，例如 ${name} string ${head[keyAt]}${ref ? ` -> ${ref}` : ""}`));
 			current.fields.push({ name, type: head.slice(0, keyAt < 0 ? head.length : keyAt).join(" "), key: keyAt < 0 ? null : key(head[keyAt]), ref: ref ?? null, change: inherited === "same" ? change : inherited, line });
 			continue;
 		}
 		const rel = RELATIONSHIP.exec(body);
 		if (rel) {
-			if (change === "changed") return fail(line, "关系不能用 ~；改为两行：- A 1--* B 与 + A 1--1 B");
+			if (change === "changed") return fail(line, tr("A relationship cannot use ~; write two lines: - A 1--* B and + A 1--1 B", "关系不能用 ~；改为两行：- A 1--* B 与 + A 1--1 B"));
 			written.push({ from: rel[1]!, fromCard: card(rel[2]!)!, to: rel[4]!, toCard: card(rel[3]!)!, label: rel[5]?.trim() ?? "", change, line, source: { kind: "written", change } });
 			current = null;
 			continue;
@@ -105,25 +106,25 @@ export function parseEr(input: FenceInput): Parsed<ErSpec> {
 		const mermaid = MERMAID.exec(body);
 		if (mermaid && card(mermaid[2]!) && card(mermaid[3]!)) {
 			const sign = change === "added" ? "+ " : change === "removed" ? "- " : "";
-			return fail(line, `这是 Mermaid 语法；改为 ${sign}${mermaid[1]} ${card(mermaid[2]!)}--${card(mermaid[3]!)} ${mermaid[4]}${mermaid[5]?.trim() ? `: ${mermaid[5].trim()}` : ""}`);
+			return fail(line, tr(`This is Mermaid syntax; change it to ${sign}${mermaid[1]} ${card(mermaid[2]!)}--${card(mermaid[3]!)} ${mermaid[4]}${mermaid[5]?.trim() ? `: ${mermaid[5].trim()}` : ""}`, `这是 Mermaid 语法；改为 ${sign}${mermaid[1]} ${card(mermaid[2]!)}--${card(mermaid[3]!)} ${mermaid[4]}${mermaid[5]?.trim() ? `: ${mermaid[5].trim()}` : ""}`));
 		}
-		if (body.includes("--") || /[{}]/.test(body)) return fail(line, "关系应写为 A 1--* B；实体名称单独写在第 0 列");
+		if (body.includes("--") || /[{}]/.test(body)) return fail(line, tr("A relationship must be written as A 1--* B; write entity names alone in column 0.", "关系应写为 A 1--* B；实体名称单独写在第 0 列"));
 		const highlighted = body.startsWith("*");
 		const name = (highlighted ? body.slice(1) : body).trim();
-		if (!name) return fail(line, "实体需要名称，例如 *User");
-		if (named.has(name)) return fail(line, `实体 ${name} 重复；只在第 0 列声明一次`);
+		if (!name) return fail(line, tr("An entity needs a name, e.g. *User", "实体需要名称，例如 *User"));
+		if (named.has(name)) return fail(line, tr(`Entity ${name} is repeated; declare it only once in column 0.`, `实体 ${name} 重复；只在第 0 列声明一次`));
 		current = { name, highlighted, fields: [], change, line };
 		entities.push(current);
 		named.set(name, current);
 	}
-	if (!entities.length) return fail(input.line, "ER 图需要至少一个实体；在第 0 列写 User");
+	if (!entities.length) return fail(input.line, tr("An ER diagram needs at least one entity; write User in column 0.", "ER 图需要至少一个实体；在第 0 列写 User"));
 	const implied: ErRelationship[] = [];
 	for (const entity of entities) for (const field of entity.fields) {
 		if (field.ref === null) continue;
-		if (!named.has(field.ref)) return fail(field.line, `找不到实体 ${field.ref}；请在第 0 列写 ${field.ref}`);
+		if (!named.has(field.ref)) return fail(field.line, tr(`Entity ${field.ref} was not found; write ${field.ref} in column 0.`, `找不到实体 ${field.ref}；请在第 0 列写 ${field.ref}`));
 		implied.push({ from: entity.name, to: field.ref, fromCard: "*", toCard: "1", label: "", change: field.change === "changed" ? "same" : field.change, line: field.line, source: { kind: "field", name: field.name } });
 	}
-	for (const rel of written) for (const name of [rel.from, rel.to]) if (!named.has(name)) return fail(rel.line, `找不到实体 ${name}；请在第 0 列写 ${name}`);
+	for (const rel of written) for (const name of [rel.from, rel.to]) if (!named.has(name)) return fail(rel.line, tr(`Entity ${name} was not found; write ${name} in column 0.`, `找不到实体 ${name}；请在第 0 列写 ${name}`));
 	const replaced = new Set(written.map(rel => pair(rel.from, rel.to)));
 	const retained = implied.filter(rel => !replaced.has(pair(rel.from, rel.to)));
 	for (const rel of [...retained, ...written]) {
@@ -131,9 +132,9 @@ export function parseEr(input: FenceInput): Parsed<ErSpec> {
 		const b = named.get(rel.to)!;
 		const hasAdded = a.change === "added" || b.change === "added";
 		const hasRemoved = a.change === "removed" || b.change === "removed";
-		if (rel.change === "added" && hasRemoved) return fail(rel.line, "新增关系不能连接已删除实体；删除 + 标记或保留该实体");
-		if (rel.change === "removed" && hasAdded) return fail(rel.line, "删除关系不能连接新增实体；删除 - 标记或保留原实体");
-		if (rel.change === "same" && hasAdded && hasRemoved) return fail(rel.line, "关系两端分别新增和删除，前后视图均不存在；删除关系或修改实体标记");
+		if (rel.change === "added" && hasRemoved) return fail(rel.line, tr("An added relationship cannot connect a removed entity; remove the + marker or keep the entity.", "新增关系不能连接已删除实体；删除 + 标记或保留该实体"));
+		if (rel.change === "removed" && hasAdded) return fail(rel.line, tr("A removed relationship cannot connect an added entity; remove the - marker or keep the original entity.", "删除关系不能连接新增实体；删除 - 标记或保留原实体"));
+		if (rel.change === "same" && hasAdded && hasRemoved) return fail(rel.line, tr("The relationship's ends are respectively added and removed, so neither view contains it; remove the relationship or change the entity markers.", "关系两端分别新增和删除，前后视图均不存在；删除关系或修改实体标记"));
 	}
 	const relationships = [...retained, ...written].map(rel => {
 		let change = rel.change;
@@ -388,13 +389,13 @@ export function renderEr(spec: ErSpec, ctx: RenderContext): Rendered {
 		}
 		svg.push("</g>");
 	}
-	if (!boxes.length) svg.push(textSvg("此视图没有实体", 20, 40, 14));
+	if (!boxes.length) svg.push(textSvg(tr("No entities in this view", "此视图没有实体"), 20, 40, 14));
 	const drawing = `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.min(1000, width)}" height="${height * Math.min(1, 1000 / width)}" viewBox="0 0 ${width} ${height}" font-family="sans-serif">${svg.join("")}</svg>`;
-	const nodes = [ctx.svg(`${ctx.id}.diagram`, drawing, { w: Math.min(1000, width), h: height * Math.min(1, 1000 / width) }, entities.map(entity => entity.name).join("、"))];
+	const nodes = [ctx.svg(`${ctx.id}.diagram`, drawing, { w: Math.min(1000, width), h: height * Math.min(1, 1000 / width) }, tr(entities.map(entity => entity.name).join(", "), entities.map(entity => entity.name).join("、")))];
 	if (spec.marked && changes) {
 		const states = [...spec.entities.flatMap(entity => [entity.change, ...entity.fields.map(field => field.change)]), ...spec.relationships.flatMap(rel => rel.source.kind === "written" ? [rel.source.change] : [])];
 		const counts = ["added", "removed", "changed"].map(change => states.filter(state => state === change).length);
-		nodes.push({ id: `${ctx.id}.counts`, k: "text", p: { text: `+${counts[0]} 新增 · −${counts[1]} 删除 · ~${counts[2]} 修改（实体、字段、关系行）` } });
+		nodes.push({ id: `${ctx.id}.counts`, k: "text", p: { text: tr(`+${counts[0]} added · −${counts[1]} removed · ~${counts[2]} changed (entity, field, relationship rows)`, `+${counts[0]} 新增 · −${counts[1]} 删除 · ~${counts[2]} 修改（实体、字段、关系行）`) } });
 	}
 	return { nodes, diagnostics: [] satisfies DraftDiagnostic[] };
 }

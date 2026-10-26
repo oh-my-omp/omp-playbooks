@@ -5,16 +5,17 @@ import { dirname } from "node:path";
 import { parseBlockId, parseLaunchId, parseRunId, type BlockId, type JudgeReport } from "../domain/model";
 import type { Connection, K1Handler } from "../domain/ports";
 import type { ProtocolError, Request, ServerFrame } from "../domain/protocol";
+import { tr } from "../i18n";
 
 class BadInput extends Error {}
 
 function object(value: unknown, name: string): Record<string, unknown> {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new BadInput(`${name} must be an object`);
+	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new BadInput(tr(`${name} must be an object`, `${name} 必须是对象`));
 	return value as Record<string, unknown>;
 }
 
 function string(value: unknown, name: string): string {
-	if (typeof value !== "string") throw new BadInput(`${name} must be a string`);
+	if (typeof value !== "string") throw new BadInput(tr(`${name} must be a string`, `${name} 必须是字符串`));
 	return value;
 }
 
@@ -23,44 +24,44 @@ function optional<T>(value: unknown, parse: (value: unknown) => T): T | undefine
 }
 
 function flag(value: unknown, name: string): boolean {
-	if (typeof value !== "boolean") throw new BadInput(`${name} must be a boolean`);
+	if (typeof value !== "boolean") throw new BadInput(tr(`${name} must be a boolean`, `${name} 必须是布尔值`));
 	return value;
 }
 
 /** A task block's default agent: a non-blank name, trimmed. */
 function agentName(value: unknown): string {
 	const name = string(value, "agent").trim();
-	if (name === "") throw new BadInput("agent must not be blank");
+	if (name === "") throw new BadInput(tr("agent must not be blank", "agent 不能为空"));
 	return name;
 }
 
 function block(value: unknown): BlockId {
 	const id = parseBlockId(string(value, "block"));
-	if (id === null) throw new BadInput("block must be b followed by a positive integer");
+	if (id === null) throw new BadInput(tr("block must be b followed by a positive integer", "block 必须是 b 后跟正整数"));
 	return id;
 }
 
 function run(value: unknown) {
 	const id = parseRunId(string(value, "run"));
-	if (id === null) throw new BadInput("run must be r followed by a positive integer");
+	if (id === null) throw new BadInput(tr("run must be r followed by a positive integer", "run 必须是 r 后跟正整数"));
 	return id;
 }
 
 function launch(value: unknown) {
 	const id = parseLaunchId(string(value, "launch"));
-	if (id === null) throw new BadInput("launch must be l followed by a positive integer");
+	if (id === null) throw new BadInput(tr("launch must be l followed by a positive integer", "launch 必须是 l 后跟正整数"));
 	return id;
 }
 
 function integer(value: unknown, name: string, minimum = 1): number {
 	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum) {
-		throw new BadInput(`${name} must be ${minimum === 0 ? "a nonnegative" : "a positive"} safe integer`);
+		throw new BadInput(tr(`${name} must be ${minimum === 0 ? "a nonnegative" : "a positive"} safe integer`, `${name} 必须是${minimum === 0 ? "非负" : "正"}安全整数`));
 	}
 	return value;
 }
 
 function array<T>(value: unknown, name: string, parse: (item: unknown) => T): readonly T[] {
-	if (!Array.isArray(value)) throw new BadInput(`${name} must be an array`);
+	if (!Array.isArray(value)) throw new BadInput(tr(`${name} must be an array`, `${name} 必须是数组`));
 	return value.map((item: unknown) => parse(item));
 }
 
@@ -72,12 +73,12 @@ function report(value: unknown): JudgeReport {
 			const values = object(result.answers, "answers");
 			const answers: Record<string, number> = Object.create(null);
 			for (const [key, answer] of Object.entries(values)) {
-				if (typeof answer !== "number" || !Number.isFinite(answer)) throw new BadInput("answers must contain finite numbers");
+				if (typeof answer !== "number" || !Number.isFinite(answer)) throw new BadInput(tr("answers must contain finite numbers", "answers 必须包含有限数字"));
 				answers[key] = answer;
 			}
 			return { kind: "answers", answers };
 		}
-		default: throw new BadInput("result kind must be answers or judge_unavailable");
+		default: throw new BadInput(tr("result kind must be answers or judge_unavailable", "result kind 必须是 answers 或 judge_unavailable"));
 	}
 }
 
@@ -97,20 +98,20 @@ export function parseRequest(op: string, args: unknown): Request | ProtocolError
 					case "title": return { op, args: { ...target, field: "title", value: string(a.value, "value") } };
 					case "status": {
 						const value = a.value;
-						if (value !== "todo" && value !== "running" && value !== "done") throw new BadInput("status value must be todo, running or done");
+						if (value !== "todo" && value !== "running" && value !== "done") throw new BadInput(tr("status value must be todo, running or done", "status 值必须是 todo、running 或 done"));
 						return { op, args: { ...target, field: "status", value } };
 					}
 					case "task": return { op, args: { ...target, field: "task", value: flag(a.value, "task value") } };
 					case "agent": return { op, args: { ...target, field: "agent", value: a.value === null ? null : agentName(a.value) } };
 					case "isolated": return { op, args: { ...target, field: "isolated", value: a.value === null ? null : flag(a.value, "isolated value") } };
-					default: throw new BadInput("field must be title, status, task, agent or isolated");
+					default: throw new BadInput(tr("field must be title, status, task, agent or isolated", "field 必须是 title、status、task、agent 或 isolated"));
 				}
 			}
 			case "edit": return { op, args: { run: optional(a.run, run), block: block(a.block), find: string(a.find, "find"), replace: string(a.replace, "replace") } };
 			case "write": return { op, args: { run: optional(a.run, run), block: block(a.block), text: string(a.text, "text") } };
 			case "panel": {
 				const panel = string(a.panel, "panel");
-				if (!/^[A-Z][0-9]*$/.test(panel)) throw new BadInput("panel must be a panel letter ID such as A");
+				if (!/^[A-Z][0-9]*$/.test(panel)) throw new BadInput(tr("panel must be a panel letter ID such as A", "panel 必须是类似 A 的面板字母 ID"));
 				return { op, args: { run: optional(a.run, run), block: block(a.block), panel, text: string(a.text, "text") } };
 			}
 			case "insert": {
@@ -129,14 +130,14 @@ export function parseRequest(op: string, args: unknown): Request | ProtocolError
 						},
 					};
 					case "design":
-						if (content.requirement !== undefined) throw new BadInput("a design block's requirement belongs to the person; insert it with an empty requirement");
-						if (content.agent !== undefined || content.isolated !== undefined) throw new BadInput("a design block has no execution contract (agent, isolated)");
+						if (content.requirement !== undefined) throw new BadInput(tr("a design block's requirement belongs to the person; insert it with an empty requirement", "设计块的 requirement 属于用户；插入时必须为空"));
+						if (content.agent !== undefined || content.isolated !== undefined) throw new BadInput(tr("a design block has no execution contract (agent, isolated)", "设计块没有执行配置（agent、isolated）"));
 						return { op, args: { run: optional(a.run, run), after: optional(a.after, block), title: string(a.title, "title"), content: { kind: "design", design: string(content.design, "design") } } };
-					default: throw new BadInput("content kind must be task or design");
+					default: throw new BadInput(tr("content kind must be task or design", "content kind 必须是 task 或 design"));
 				}
 			}
 			case "move":
-				if (a.after === undefined) throw new BadInput("after must be a block id, or null for the top");
+				if (a.after === undefined) throw new BadInput(tr("after must be a block id, or null for the top", "after 必须是块 ID，或使用 null 表示顶部"));
 				return { op, args: { run: optional(a.run, run), block: block(a.block), after: a.after === null ? null : block(a.after) } };
 			case "revisions": return { op, args: { run: optional(a.run, run), block: optional(a.block, block), after: optional(a.after, v => integer(v, "after", 0)) } };
 			case "refetch": return { op, args: { run: optional(a.run, run), targets: array(a.targets, "targets", v => string(v, "target")) } };
@@ -154,10 +155,10 @@ export function parseRequest(op: string, args: unknown): Request | ProtocolError
 			case "timeline": return { op, args: { run: optional(a.run, run), after: optional(a.after, v => integer(v, "after", 0)) } };
 			case "post": {
 				const kind = a.kind;
-				if (kind !== "update" && kind !== "result" && kind !== "failure" && kind !== "retrospective") throw new BadInput("unknown post kind");
-				if (a.origin !== undefined && a.origin !== "human") throw new BadInput("origin must be human");
+				if (kind !== "update" && kind !== "result" && kind !== "failure" && kind !== "retrospective") throw new BadInput(tr("unknown post kind", "未知的 post kind"));
+				if (a.origin !== undefined && a.origin !== "human") throw new BadInput(tr("origin must be human", "origin 必须是 human"));
 				const next = optional(a.next, v => integer(v, "next"));
-				if (next !== undefined && kind !== "update") throw new BadInput("next is only valid for update records");
+				if (next !== undefined && kind !== "update") throw new BadInput(tr("next is only valid for update records", "next 只用于 update 记录"));
 				return { op, args: { run: optional(a.run, run), kind, text: string(a.text, "text"), block: optional(a.block, block), launch: optional(a.launch, launch), next, quote: optional(a.quote, v => string(v, "quote")), origin: a.origin } };
 			}
 			case "snooze": return { op, args: { run: run(a.run), after: integer(a.after, "after") } };
@@ -167,11 +168,11 @@ export function parseRequest(op: string, args: unknown): Request | ProtocolError
 				switch (result.kind) {
 					case "listed": return { op, args: { result: { kind: "listed", names: array(result.names, "names", v => agentName(v)) } } };
 					case "unavailable": return { op, args: { result: { kind: "unavailable", reason: string(result.reason, "reason") } } };
-					default: throw new BadInput("result kind must be listed or unavailable");
+					default: throw new BadInput(tr("result kind must be listed or unavailable", "result kind 必须是 listed 或 unavailable"));
 				}
 			}
 			case "reveal": return { op, args: {} };
-			default: throw new BadInput(`Unknown operation: ${op}`);
+			default: throw new BadInput(tr(`Unknown operation: ${op}`, `未知操作：${op}`));
 		}
 	} catch (error) {
 		if (error instanceof BadInput) return { code: "BadValue", message: error.message };
@@ -313,7 +314,7 @@ function listenK1(path: string, handler: K1Handler): { close(): void } {
 		}
 		const id = string(frame.id, "id");
 		if (typeof frame.op !== "string") {
-			send(socket, { id, ok: false, error: { code: "BadValue", message: "op must be a string" } });
+			send(socket, { id, ok: false, error: { code: "BadValue", message: tr("op must be a string", "op 必须是字符串") } });
 			return;
 		}
 		const request = parseRequest(frame.op, frame.args);

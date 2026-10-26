@@ -1,3 +1,4 @@
+import { tr } from "../../i18n";
 import { posix } from "node:path";
 import { diagnostic, type DraftDiagnostic, type FenceInput, type Parsed, type RenderContext, type Rendered } from "./contract";
 
@@ -80,23 +81,23 @@ function rangeOf(value: string): LineRange | null {
 }
 
 function lengthFinding(count: number, line: number): DraftDiagnostic | null {
-	if (count > 200) return diagnostic("code", line, `代码有 ${count} 行；请用 lines=18-30 截取至多 200 行，或拆分代码块。`);
-	if (count > 40) return diagnostic("code", line, `代码有 ${count} 行；请精简为最能说明问题的 10–40 行。`, "warning");
+	if (count > 200) return diagnostic("code", line, tr(`Code has ${count} lines; use lines=18-30 to include at most 200 lines, or split the code block.`, `代码有 ${count} 行；请用 lines=18-30 截取至多 200 行，或拆分代码块。`));
+	if (count > 40) return diagnostic("code", line, tr(`Code has ${count} lines; trim it to the 10–40 lines that best show the issue.`, `代码有 ${count} 行；请精简为最能说明问题的 10–40 行。`), "warning");
 	return null;
 }
 
 function highlightFinding(ranges: readonly LineRange[], first: number, count: number, line: number): DraftDiagnostic | null {
 	const last = first + (count - 1);
-	if (!Number.isSafeInteger(last)) return diagnostic("code", line, "显示行号超出安全整数范围；请减小 start=38。");
+	if (!Number.isSafeInteger(last)) return diagnostic("code", line, tr("Displayed line numbers exceed the safe integer range; reduce start=38.", "显示行号超出安全整数范围；请减小 start=38。"));
 	const outside = ranges.find(range => range.from < first || range.to > last);
-	return outside ? diagnostic("code", line, `hl= 超出显示行号 ${first}–${last}；请仅高亮代码块中实际显示的行。`) : null;
+	return outside ? diagnostic("code", line, tr(`hl= exceeds displayed line numbers ${first}–${last}; highlight only lines actually shown in the code block.`, `hl= 超出显示行号 ${first}–${last}；请仅高亮代码块中实际显示的行。`)) : null;
 }
 
 export function parseCode(input: FenceInput): Parsed<CodeSpec> {
 	const fenceLine = Math.max(1, input.line - 1);
 	const fail = (message: string): Parsed<CodeSpec> => ({ ok: false, diagnostics: [diagnostic("code", fenceLine, message)] });
 	const tokens = argumentsOf(input.args);
-	if (!tokens) return fail('引号未闭合；请写 title="limits.ts · sketch"。');
+	if (!tokens) return fail(tr('Unclosed quote; write title="limits.ts · sketch".', '引号未闭合；请写 title="limits.ts · sketch"。'));
 	const hasLanguage = tokens[0] !== undefined && !tokens[0].includes("=");
 	const language = hasLanguage ? tokens[0]! : "";
 	let src: string | null = null;
@@ -108,24 +109,24 @@ export function parseCode(input: FenceInput): Parsed<CodeSpec> {
 	const seen = new Set<string>();
 	for (const token of tokens.slice(hasLanguage ? 1 : 0)) {
 		const equals = token.indexOf("=");
-		if (equals < 1) return fail("代码设置需要键和值；请写 src=server/routes.ts lines=18-30 hl=22 title=sketch start=38。");
+		if (equals < 1) return fail(tr("Code settings need key=value; write src=server/routes.ts lines=18-30 hl=22 title=sketch start=38.", "代码设置需要键和值；请写 src=server/routes.ts lines=18-30 hl=22 title=sketch start=38。"));
 		const key = token.slice(0, equals);
 		const value = token.slice(equals + 1);
-		if (seen.has(key)) return fail(`设置 ${key}= 重复；请只保留一个值。`);
+		if (seen.has(key)) return fail(tr(`Setting ${key}= is repeated; keep only one value.`, `设置 ${key}= 重复；请只保留一个值。`));
 		seen.add(key);
 		switch (key) {
 			case "src":
-				if (!value) return fail("src= 缺少路径；请写 src=server/routes.ts。");
+				if (!value) return fail(tr("src= is missing a path; write src=server/routes.ts.", "src= 缺少路径；请写 src=server/routes.ts。"));
 				src = value;
 				break;
 			case "lines":
 				lines = rangeOf(value);
-				if (!lines) return fail("lines= 必须是正整数且起点不大于终点；请写 lines=18-30 或 lines=18。");
+				if (!lines) return fail(tr("lines= must be a positive integer with the start no later than the end; write lines=18-30 or lines=18.", "lines= 必须是正整数且起点不大于终点；请写 lines=18-30 或 lines=18。"));
 				break;
 			case "hl":
 				for (const part of value.split(",")) {
 					const range = rangeOf(part.trim());
-					if (!range) return fail("hl= 必须是正整数行号或范围；请写 hl=20-22,25。");
+					if (!range) return fail(tr("hl= must be a positive line number or range; write hl=20-22,25.", "hl= 必须是正整数行号或范围；请写 hl=20-22,25。"));
 					highlights.push(range);
 				}
 				break;
@@ -133,19 +134,19 @@ export function parseCode(input: FenceInput): Parsed<CodeSpec> {
 				title = value;
 				break;
 			case "start":
-				if (!/^\d+$/.test(value) || !rangeOf(value)) return fail("start= 必须是正整数；请写 start=38。");
+				if (!/^\d+$/.test(value) || !rangeOf(value)) return fail(tr("start= must be a positive integer; write start=38.", "start= 必须是正整数；请写 start=38。"));
 				start = Number(value);
 				numbered = true;
 				break;
 			default:
-				return fail(`未知代码设置 ${key}=；请使用 src=、lines=、hl=、title= 或 start=。`);
+				return fail(tr(`Unknown code setting ${key}=; use src=, lines=, hl=, title=, or start=.`, `未知代码设置 ${key}=；请使用 src=、lines=、hl=、title= 或 start=。`));
 		}
 	}
-	if (lines && src === null) return fail("lines= 需要 src=；手写代码请用 start=38 设置起始行号。");
+	if (lines && src === null) return fail(tr("lines= requires src=; for hand-written code, use start=38 to set the starting line number.", "lines= 需要 src=；手写代码请用 start=38 设置起始行号。"));
 	const diagnostics: DraftDiagnostic[] = [];
 	if (src !== null) {
 		const nonempty = input.lines.findIndex(line => line.trim().length > 0);
-		if (nonempty >= 0) diagnostics.push(diagnostic("code", input.line + nonempty, "src= 从文件读取代码，块内文字不会显示；请将代码块留空。", "warning"));
+		if (nonempty >= 0) diagnostics.push(diagnostic("code", input.line + nonempty, tr("src= reads code from a file, so text inside the block is not displayed; leave the code block empty.", "src= 从文件读取代码，块内文字不会显示；请将代码块留空。"), "warning"));
 	} else {
 		const finding = lengthFinding(input.lines.length, input.line);
 		if (finding) diagnostics.push(finding);
@@ -179,19 +180,19 @@ export function renderCode(spec: CodeSpec, ctx: RenderContext): Rendered {
 			break;
 		case "file": {
 			const source = spec.source;
-			if (secretPath(source.path)) return fail("src= 指向按惯例保存密钥或密码的文件；请改引普通源码，或写 title=sketch 的手写代码。");
+			if (secretPath(source.path)) return fail(tr("src= points to a file conventionally used for secrets or passwords; use ordinary source code instead, or write hand-written code with title=sketch.", "src= 指向按惯例保存密钥或密码的文件；请改引普通源码，或写 title=sketch 的手写代码。"));
 			const result = ctx.readFile(source.path);
-			if (!result.ok) return fail("无法读取 src= 文件（不存在、不可读或超出 Playbook 目录）；请改为目录内可读的源码路径。");
-			if (secretPath(result.path)) return fail("src= 实际指向按惯例保存密钥或密码的文件；请改引普通源码，或写 title=sketch 的手写代码。");
-			if (result.bytes.byteLength > 2 * 1024 * 1024) return fail("src= 文件超过 2 MB；请改引较小的源码文件。");
-			if (result.bytes.includes(0)) return fail("src= 是二进制文件；请改引文本源码文件。");
+			if (!result.ok) return fail(tr("Unable to read the src= file (it does not exist, is unreadable, or is outside the Playbook directory); use a readable source path inside the directory.", "无法读取 src= 文件（不存在、不可读或超出 Playbook 目录）；请改为目录内可读的源码路径。"));
+			if (secretPath(result.path)) return fail(tr("src= actually points to a file conventionally used for secrets or passwords; use ordinary source code instead, or write hand-written code with title=sketch.", "src= 实际指向按惯例保存密钥或密码的文件；请改引普通源码，或写 title=sketch 的手写代码。"));
+			if (result.bytes.byteLength > 2 * 1024 * 1024) return fail(tr("The src= file exceeds 2 MB; use a smaller source file instead.", "src= 文件超过 2 MB；请改引较小的源码文件。"));
+			if (result.bytes.includes(0)) return fail(tr("src= is a binary file; use a text source file instead.", "src= 是二进制文件；请改引文本源码文件。"));
 			const text = new TextDecoder().decode(result.bytes);
 			// Inspect the whole file before taking a slice: excluded lines may still hold credentials.
-			if (findSecret(text)) return fail("src= 文件包含疑似密钥或令牌，任何片段都不会显示；请改引不含凭据的源码，或写 title=sketch 的手写代码。");
+			if (findSecret(text)) return fail(tr("The src= file contains a suspected secret or token, so no part will be displayed; use source code without credentials, or write hand-written code with title=sketch.", "src= 文件包含疑似密钥或令牌，任何片段都不会显示；请改引不含凭据的源码，或写 title=sketch 的手写代码。"));
 			const all = text.replace(/\r\n?/g, "\n").replace(/\n$/, "").split("\n");
 			start = source.range?.from ?? 1;
 			const end = source.range?.to ?? all.length;
-			if (end > all.length) return fail(`src= 文件只有 ${all.length} 行；请将 lines= 范围改为文件内实际存在的行。`);
+			if (end > all.length) return fail(tr(`The src= file has only ${all.length} lines; change the lines= range to lines that exist in the file.`, `src= 文件只有 ${all.length} 行；请将 lines= 范围改为文件内实际存在的行。`));
 			body = all.slice(start - 1, end);
 			numbers = true;
 			if (spec.title === null) header = source.path + (source.range ? `:${start}${end === start ? "" : `-${end}`}` : "");
@@ -205,7 +206,7 @@ export function renderCode(spec: CodeSpec, ctx: RenderContext): Rendered {
 	const text = body.join("\n");
 	if (findSecret(text)) {
 		const offset = body.findIndex(line => findSecret(line) !== null);
-		return fail("代码包含疑似密钥或令牌，内容不会显示；请改引不含凭据的代码，或写 title=sketch 的示意代码。", spec.bodyLine + Math.max(0, offset));
+		return fail(tr("The code contains a suspected secret or token, so it will not be displayed; use code without credentials, or write illustrative hand-written code with title=sketch.", "代码包含疑似密钥或令牌，内容不会显示；请改引不含凭据的代码，或写 title=sketch 的示意代码。"), spec.bodyLine + Math.max(0, offset));
 	}
 	const highlight = highlightFinding(spec.highlights, start, body.length, spec.fenceLine);
 	if (highlight) return { nodes: [], diagnostics: [highlight] };

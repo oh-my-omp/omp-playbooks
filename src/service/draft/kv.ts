@@ -1,3 +1,4 @@
+import { tr } from "../../i18n";
 import { diagnostic, type DraftDiagnostic, type FenceInput, type Parsed, type RenderContext, type Rendered, type Span } from "./contract";
 import { inlineText } from "./markdown";
 import type { TspNode } from "../tsp-types";
@@ -27,7 +28,7 @@ export function parseKv(input: FenceInput): Parsed<KvSpec> {
 	if (columnValue !== undefined) {
 		const count = Number(columnValue);
 		if (!Number.isFinite(count) || !Number.isInteger(count)) {
-			diagnostics.push(diagnostic("kv", Math.max(1, input.line - 1), "列数须为整数；请写 cols=2。"));
+			diagnostics.push(diagnostic("kv", Math.max(1, input.line - 1), tr("Column count must be an integer; write cols=2.", "列数须为整数；请写 cols=2。")));
 		} else cols = Math.max(1, Math.min(count || 2, 6));
 	}
 
@@ -40,7 +41,7 @@ export function parseKv(input: FenceInput): Parsed<KvSpec> {
 		const body = kind === "wide" ? text.slice(1).trim() : text;
 		const match = /^([^:：]+)[:：]\s*(.*)$/.exec(body);
 		if (!match) {
-			diagnostics.push(diagnostic("kv", input.line + index, "缺少键名或冒号；请写 key: value。"));
+			diagnostics.push(diagnostic("kv", input.line + index, tr("A key or colon is missing; write key: value.", "缺少键名或冒号；请写 key: value。")));
 			continue;
 		}
 		const key = match[1]!.trim();
@@ -55,7 +56,7 @@ export function parseKv(input: FenceInput): Parsed<KvSpec> {
 		});
 	}
 	if (items.length === 0) {
-		if (diagnostics.length === 0) diagnostics.push(diagnostic("kv", input.line, "至少需要一项；请写 key: value。"));
+		if (diagnostics.length === 0) diagnostics.push(diagnostic("kv", input.line, tr("At least one item is required; write key: value.", "至少需要一项；请写 key: value。")));
 		return { ok: false, diagnostics };
 	}
 	return { ok: true, value: { cols, items }, diagnostics };

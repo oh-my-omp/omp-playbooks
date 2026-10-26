@@ -1,3 +1,4 @@
+import { tr } from "../../i18n";
 import { diagnostic, type DraftDiagnostic, type FenceInput, type Parsed, type RenderContext, type Rendered } from "./contract";
 import { escapeXml, inlineSpans, plainText, textWidth, wrapText } from "./text";
 import type { TspNode } from "../tsp-types";
@@ -23,7 +24,7 @@ export function parseTimeline(input: FenceInput): Parsed<TimelineSpec> {
 		if (!text || text.startsWith("//")) continue;
 		const parts = text.split("|").map(part => part.trim());
 		if (parts.length < 2 || !parts[1]) {
-			diagnostics.push(diagnostic("timeline", input.line + index, "时间线条目需包含标题，格式：时间 | 标题 | 备注（可选）"));
+			diagnostics.push(diagnostic("timeline", input.line + index, tr("A timeline item needs a title, in the format: time | title | note (optional)", "时间线条目需包含标题，格式：时间 | 标题 | 备注（可选）")));
 			continue;
 		}
 		const time = parts[0]!;
@@ -32,7 +33,7 @@ export function parseTimeline(input: FenceInput): Parsed<TimelineSpec> {
 	}
 	if (diagnostics.length) return { ok: false, diagnostics };
 	if (!items.length) {
-		return { ok: false, diagnostics: [diagnostic("timeline", input.line, "时间线至少需要一项，例如：现在 | 发布 | 已上线")] };
+		return { ok: false, diagnostics: [diagnostic("timeline", input.line, tr("A timeline needs at least one item, e.g. now | Ship | Live", "时间线至少需要一项，例如：现在 | 发布 | 已上线"))] };
 	}
 	const vertical = /\bv(ertical)?\b/.test(input.args) || (!/\bh(orizontal)?\b/.test(input.args) && items.length > 6);
 	return { ok: true, value: { direction: vertical ? "vertical" : "horizontal", items }, diagnostics };

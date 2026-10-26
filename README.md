@@ -15,7 +15,7 @@ The Playbook file also carries its own execution state: every tracked block has 
 | Document service | Storing the document, Runs, Launches and records; resolving references; drawing the pane and design components; locking, running deterministic checks and notifying the coordinator |
 | Subagent | Executing the compiled prompt the coordinator hands it, then writing its blocks' `status` and `report` into the Playbook file; it owns none of this Playbook's tools or UI |
 
-**Buttons are requests, not automatic executors.** "启动" (Launch) notifies the main session to execute; "打断执行" (stop) asks it to cancel the worker; a change request or a pick on a design hands the change to the main session. The extension never revises a design, starts or cancels a worker, or accepts a result on its own because a notice arrived.
+**Buttons are requests, not automatic executors.** "Launch" notifies the main session to execute; "Stop" asks it to cancel the worker; a change request or a pick on a design hands the change to the main session. The extension never revises a design, starts or cancels a worker, or accepts a result on its own because a notice arrived.
 
 ## Install and open
 
@@ -47,7 +47,7 @@ tern plugin unlink omp-playbooks
 There are three ways to open a file:
 
 - **From the main session:** write the YAML file first, then call `playbook_open {doc: "/absolute/path/playbook.yaml"}`. With no service running, the extension starts one to the right of the current omp pane; this requires omp to run in a Tern pane managed by the session daemon, with `TERN_PANE` in its environment. With a service already running it only connects: it opens no extra pane and does not move focus.
-- **From Tern:** focus a `.yaml` or `.yml` file pane and choose "Playbook: 打开" in the command palette. It shows the existing service, or starts one beside the pane. This does not start omp or set up a coordinator connection.
+- **From Tern:** focus a `.yaml` or `.yml` file pane and choose "Playbook: open" in the command palette. It shows the existing service, or starts one beside the pane. This does not start omp or set up a coordinator connection.
 - **Starting the service from source:** install dependencies in the repository, then run the commands below in a Tern pane. The main session still has to call `playbook_open` to receive requests.
 
 ```sh
@@ -55,7 +55,7 @@ bun install
 bun src/service/main.ts /absolute/path/playbook.yaml
 ```
 
-One file has one live service and one coordinator connection. Another main session gets `Busy` while the original coordinator is still connected. When the original session ends, the document pane stays and its status strip shows "协调者离线 · 选择协调者" (coordinator offline · choose a coordinator); a new session can take over, or the person picks one from the pane (see [Pane layout](#pane-layout)). An omp without `TERN_PANE` can still connect to a service that is **already running**, but cannot create a pane beside itself from there.
+One file has one live service and one coordinator connection. Another main session gets `Busy` while the original coordinator is still connected. When the original session ends, the document pane stays and its status strip shows "Coordinator offline · choose one"; a new session can take over, or the person picks one from the pane (see [Pane layout](#pane-layout)). An omp without `TERN_PANE` can still connect to a service that is **already running**, but cannot create a pane beside itself from there.
 
 Main-session commands:
 
@@ -64,59 +64,69 @@ Main-session commands:
 
 These commands and the `playbook_*` tools are registered only in the main session; subagents do not see them.
 
+## Language
+
+The pane, its notices and component diagnostics, the coordinator's notices and tool errors, the launch-prompt footer a subagent reads and the Tern command are English or Chinese. Each process picks its language when it starts:
+
+1. `OMP_PLAYBOOKS_LANG=en` or `OMP_PLAYBOOKS_LANG=zh` (any other value is ignored);
+2. otherwise the first non-empty of `LC_ALL`, `LC_MESSAGES` and `LANG`: Chinese when it starts with `zh`, English for anything else;
+3. otherwise English.
+
+The extension starts the document service and new coordinator sessions with its own language, so they match the omp session that opened them. A service started by hand, an omp session attached from the pane and the Tern command use the language of their own environment; the Tern command reads the Tern app's, which may not include your shell profile. Set the variable where omp is started (for example in the shell profile), then restart omp and the Playbook pane: a running process keeps its language. The tool descriptions the model reads are English in both languages, and text already in a Playbook is never translated.
+
 ## The file and its blocks
 
 Save the following as `playbook.yaml` and it can be opened; it needs no network, external files or `am` CLI:
 
 ````yaml
-title: 缓存方案
+title: Cache plan
 blocks:
   - id: b1
-    title: 执行通则
+    title: General rules
     body: |
-      ## A Where · 适用范围
-      本 Playbook 的所有执行块。
+      ## A Where · Scope
+      Every execution block of this Playbook.
 
-      ## B What · 约束
-      只读检查，不修改任何文件。
+      ## B What · Constraint
+      Read-only checks; change no file.
 
-      ## C How · 做法
-      发现需要改动时停下，把要改什么写进完成报告。
+      ## C How · Practice
+      When something needs changing, stop and write what to change into the completion report.
     task: false
   - id: b2
-    title: 缓存设计
+    title: Cache design
     requirement: |
-      数据重启后不能丢。请求路径要简单。
+      Data must survive a restart. The request path should stay simple.
     design: |
-      ## A Where · 请求路径
+      ## A Where · Request path
       ```flow LR
       Client -> Gateway -> [(Cache)]: read
       ```
 
-      ## B What · 结论
-      ```callout ok 使用持久化缓存
-      明确持久化策略，不把“用了 Redis”当成数据不会丢的保证。
+      ## B What · Conclusion
+      ```callout ok Use a persistent cache
+      State the persistence policy explicitly; "we use Redis" is no guarantee that data survives.
       ```
 
-      ## C How · 落地与验证
-      开启 AOF 持久化；重启缓存实例后读回重启前写入的键。
+      ## C How · Rollout and verification
+      Turn on AOF persistence; restart the cache instance and read back a key written before the restart.
     status: todo
   - id: b3
-    title: 检查方案
+    title: Review the plan
     body: |
-      ## A Where · 检查对象
+      ## A Where · What to review
       ((b2 | requirement, panel(B)))
 
-      ## B What · 产出
-      用 {{检查方式}} 列出三个需要验证的边界。
+      ## B What · Output
+      List three boundaries to verify as {{format}}.
 
-      ```slot 检查方式
-      = 清单
-      * 清单 | 每条一行
-      - 表格 | 边界、风险、验证方法三列
+      ```slot format
+      = a checklist
+      * a checklist | one per line
+      - a table | boundary, risk and verification columns
       ```
 
-      ## C How · 做法
+      ## C How · Practice
       ((b1))
     status: todo
 ````
@@ -138,11 +148,11 @@ A card's text is written for a person, so every task body (tracked or `task: fal
 
 | Role | Heading | What its panels say |
 |---|---|---|
-| Where | `## A Where · 现状` | object, location, scope, current state, evidence |
-| What | `## B What · 决定` | goal, decision, expected result, boundaries |
-| How | `## C How · 处置` | steps, verification, failure handling, rollback |
+| Where | `## A Where · Current state` | object, location, scope, current state, evidence |
+| What | `## B What · Decision` | goal, decision, expected result, boundaries |
+| How | `## C How · Handling` | steps, verification, failure handling, rollback |
 
-Every role has content and the roles come in that order. A role may span several panels (`## D How · 验收与回退`); a lead and panels of no role may sit anywhere. The role word is case-sensitive and ends at the title's end, a space or a separator (`·`, `:`, `：`, `|`, `-`, `—`); a role panel may not be `bare`, since its heading would not show. An empty body or design lacks every role. An orchestration block is code and is exempt; so are the person's `requirement` and completion reports, which are fields inside a card rather than its text. An open card lists what breaks the outline under its text, and `playbook_check` reports it as `outline`; neither blocks a launch.
+Every role has content and the roles come in that order. A role may span several panels (`## D How · Acceptance and rollback`); a lead and panels of no role may sit anywhere. The role word is case-sensitive and ends at the title's end, a space or a separator (`·`, `:`, `：`, `|`, `-`, `—`); a role panel may not be `bare`, since its heading would not show. An empty body or design lacks every role. An orchestration block is code and is exempt; so are the person's `requirement` and completion reports, which are fields inside a card rather than its text. An open card lists what breaks the outline under its text, and `playbook_check` reports it as `outline`; neither blocks a launch.
 
 ### Pane layout
 
@@ -150,26 +160,26 @@ The pane shows the Playbook file itself in one column; Runs are not shown there.
 
 - **Card header:** a number (`--` for untracked blocks, then `01`, `02`… for tracked ones), the title, a status icon (empty ring `todo`, spinner `running`, check `done`) and a chevron. Clicking the title or the chevron opens or folds the card; double-clicking the title edits it.
 - **Status icon:** clicking it toggles `done` and `todo` and notifies the coordinator with `status_changed`. Ticking a block done does not touch its report.
-- **Open card:** "⋯" opens a menu with "删除此块" (delete this block). The body is drawn with the components below. An execution block's foot shows "SUBAGENT" (its `agent`) and "独立 WORKTREE" (double-click toggles `isolated`), then the launch button. A `done` block shows a folded "完成报告" (completion report) instead; click to unfold.
-- **SUBAGENT dropdown:** clicking it lists "默认" (unset: omp's default subagent) and the subagent types the coordinator's omp session can launch right now; picking one writes `agent`. The list is asked from the coordinator each time the dropdown opens: the extension reads it from the session's built-in `task` tool, which has already removed disabled agents and applied the spawn policy. Offline, or when the session cannot list them, the dropdown says so and offers only "默认". A saved name the session no longer lists stays shown as the current setting and is never rewritten for you; omp still checks the name again at launch.
-- **Launch button:** "启动" (Launch) sends `launch_requested` for this block; until the coordinator creates a Launch from it, the button reads "已请求启动" (launch requested) and cannot be clicked again. While the block is `running` the button reads "打断执行" (stop): with an open Launch it sends `stop_requested` to the coordinator; with none, nothing is executing and the block simply goes back to `todo`.
-- **Launching several blocks:** ⌘-click card titles to select tracked execution blocks; the dock shows "一起启动 N 块" (launch N together) and "取消" (clear). The blocks are combined into one Launch in document order; an orchestration block can only be launched alone.
-- **Dock status strip:** "协调者在线" (coordinator online; click to focus the coordinator's pane) or "协调者离线 · 选择协调者", and "N / M 已完成" (done count over tracked blocks).
-- **Choosing a coordinator:** while offline, clicking the status opens a list of the omp panes in this Tern window (every session the window holds), asked of Tern (`tern inspect`) each time it opens. A pane whose omp session runs this version of omp-playbooks can be chosen; other omp panes are listed but disabled, and an omp session that was already running before omp-playbooks was upgraded has to be restarted first. Choosing one makes that session connect to this Playbook right away, through the socket the extension keeps for its pane, exactly as `playbook_open` would, and posts a notice in its transcript without starting a turn; a session may coordinate several Playbooks. Then this Playbook pane moves to become the right half of that omp pane (`tern move … right-of …`), however deeply either was nested. "新建会话" (new session) opens omp in a new pane on the left of the Playbook pane, started with an initialization prompt telling it to `playbook_open` this file; the status turns online when it has done so. A failed connection and a failed move are reported separately: if the connection fails nothing moves; if only the move fails, the coordinator is still online.
+- **Open card:** "⋯" opens a menu with "Delete block". The body is drawn with the components below. An execution block's foot shows "SUBAGENT" (its `agent`) and "ISOLATED WORKTREE" (double-click toggles `isolated`), then the launch button. A `done` block shows a folded "Completion report" instead; click to unfold.
+- **SUBAGENT dropdown:** clicking it lists "Default" (unset: omp's default subagent) and the subagent types the coordinator's omp session can launch right now; picking one writes `agent`. The list is asked from the coordinator each time the dropdown opens: the extension reads it from the session's built-in `task` tool, which has already removed disabled agents and applied the spawn policy. Offline, or when the session cannot list them, the dropdown says so and offers only "Default". A saved name the session no longer lists stays shown as the current setting and is never rewritten for you; omp still checks the name again at launch.
+- **Launch button:** "Launch" sends `launch_requested` for this block; until the coordinator creates a Launch from it, the button reads "Launch requested" and cannot be clicked again. While the block is `running` the button reads "Stop": with an open Launch it sends `stop_requested` to the coordinator; with none, nothing is executing and the block simply goes back to `todo`.
+- **Launching several blocks:** ⌘-click card titles to select tracked execution blocks; the dock shows "Launch N blocks together" and "Cancel". The blocks are combined into one Launch in document order; an orchestration block can only be launched alone.
+- **Dock status strip:** "Coordinator online" (click to focus the coordinator's pane) or "Coordinator offline · choose one", and "N / M done" (done count over tracked blocks).
+- **Choosing a coordinator:** while offline, clicking the status opens a list of the omp panes in this Tern window (every session the window holds), asked of Tern (`tern inspect`) each time it opens. A pane whose omp session runs this version of omp-playbooks can be chosen; other omp panes are listed but disabled, and an omp session that was already running before omp-playbooks was upgraded has to be restarted first. Choosing one makes that session connect to this Playbook right away, through the socket the extension keeps for its pane, exactly as `playbook_open` would, and posts a notice in its transcript without starting a turn; a session may coordinate several Playbooks. Then this Playbook pane moves to become the right half of that omp pane (`tern move … right-of …`), however deeply either was nested. "New session" opens omp in a new pane on the left of the Playbook pane, started with an initialization prompt telling it to `playbook_open` this file; the status turns online when it has done so. A failed connection and a failed move are reported separately: if the connection fails nothing moves; if only the move fails, the coordinator is still online.
 
 Requests that need the coordinator (launch, stop with an open Launch, change requests, picks on a design) are refused with a notice while it is offline.
 
 ### How a person edits
 
-Every edit is in place: double-click the text and edit it. `Enter`, `Esc`, the "退出编辑" (done editing) button beside the field, or any other action commits; `Shift+Enter` is a new line in multi-line text. An edit is written only when the field still holds the text you started from; if the coordinator or the file changed it meanwhile, the edit is refused with a notice and you edit the latest content again.
+Every edit is in place: double-click the text and edit it. `Enter`, `Esc`, the "Done" button beside the field, or any other action commits; `Shift+Enter` is a new line in multi-line text. An edit is written only when the field still holds the text you started from; if the coordinator or the file changed it meanwhile, the edit is refused with a notice and you edit the latest content again.
 
 | Part | What a person can do |
 |---|---|
-| Execution body, requirement | Double-click a paragraph, heading, list item, `//` comment, `kv` key or value, panel heading or callout text to edit just that part. Components that are not edited part by part (code, tables, non-chain `flow`, `er`, …) are edited as their whole fence source. An empty field shows "// 双击写正文" or "// 双击写需求" (double-click to write) |
+| Execution body, requirement | Double-click a paragraph, heading, list item, `//` comment, `kv` key or value, panel heading or callout text to edit just that part. Components that are not edited part by part (code, tables, non-chain `flow`, `er`, …) are edited as their whole fence source. An empty field shows "// Double-click to write the body" or "// Double-click to write the requirement" |
 | Numbered list in a body | Click an item's grip to pick it up, then click the row where it goes; the list is renumbered. Clicking the grip again puts it back. Tern has no drag and drop, so this is pick-and-place |
-| Chain `flow` in a body | A flow that is one path (`A -> B -> C`, no groups or change markers) is drawn as a column of nodes. Click a node to show "+ 下方节点" (add below) and "删除" (delete); double-click to rename. A flow keeps at least two nodes; other flows stay drawings |
+| Chain `flow` in a body | A flow that is one path (`A -> B -> C`, no groups or change markers) is drawn as a column of nodes. Click a node to show "+ Node below" and "Delete"; double-click to rename. A flow keeps at least two nodes; other flows stay drawings |
 | Slot | A `{{name}}` shows its current value; click it to pick another option or type your own. In an execution body or a requirement the pick is written to the slot's `=` line; in a design it is sent as a change request |
-| Image | `Ctrl+V` in the pane reads the image data on the system clipboard; `Cmd+V` of copied image files (Finder, chat apps), which Tern pastes as their paths, reads those files, and a file the pane may not open (another app's container) is taken from the clipboard's image data instead. The bytes are kept unchanged as `<file>.assets/<sha256>.<ext>` next to the Playbook, and `![图片](<file>.assets/…)` is written on a line of its own: at the caret of the multi-line text being edited, otherwise at the end of the open card's body (a design card: its requirement). Change the caption like any text. PNG, JPEG, GIF, WebP, AVIF and SVG up to 5 MiB; with no image nothing is written and a notice says so |
+| Image | `Ctrl+V` in the pane reads the image data on the system clipboard; `Cmd+V` of copied image files (Finder, chat apps), which Tern pastes as their paths, reads those files, and a file the pane may not open (another app's container) is taken from the clipboard's image data instead. The bytes are kept unchanged as `<file>.assets/<sha256>.<ext>` next to the Playbook, and `![Image](<file>.assets/…)` is written on a line of its own: at the caret of the multi-line text being edited, otherwise at the end of the open card's body (a design card: its requirement). Change the caption like any text. PNG, JPEG, GIF, WebP, AVIF and SVG up to 5 MiB; with no image nothing is written and a notice says so |
 | Design | Read-only for a person. Double-click the "//" line under the design, write what should change and how, and `Enter` sends it as a change request; the main session revises `design` and does not touch `requirement` |
 
 Editing a block that the coordinator holds takes it back: the coordinator's lock is released and it receives `interrupted`.
@@ -198,7 +208,7 @@ A subagent receives the frozen text, not the UI, a live design page or any impli
 
 ### Stopping
 
-"打断执行" sends `stop_requested` with the block's open Launches and their bound agents. The coordinator runs `await playbook.stop("l3")` in JS eval: it cancels every subagent this session started for that Launch with `playbook.agent`/`playbook.spawn` and sets the Launch's blocks that are still `running` back to `todo`; a pending `playbook.result` then records the failure and closes the Launch. A worker started some other way is stopped by the coordinator its own way, followed by `playbook_edit {op:"status", block, value:"todo"}`.
+"Stop" sends `stop_requested` with the block's open Launches and their bound agents. The coordinator runs `await playbook.stop("l3")` in JS eval: it cancels every subagent this session started for that Launch with `playbook.agent`/`playbook.spawn` and sets the Launch's blocks that are still `running` back to `todo`; a pending `playbook.result` then records the failure and closes the Launch. A worker started some other way is stopped by the coordinator its own way, followed by `playbook_edit {op:"status", block, value:"todo"}`.
 
 ### Changes during execution
 
@@ -234,14 +244,14 @@ Execution bodies use `((target))` or `((target | selector, selector))`. Several 
 |---|---|---|
 | Design block | `((b2))` | The raw requirement and design, wrapped in `<requirement>` and `<design>`; an empty requirement emits no `<requirement>` |
 | Design field/panel | `((b2 \| requirement, panel(B)))` | The raw requirement and the full explicit `## B …` panel, panel heading included; an empty requirement emits nothing |
-| Execution block | `((b1))` | The body, expanded recursively; `lines(1..3)` and `section("标题")` select from the source before expansion |
+| Execution block | `((b1))` | The body, expanded recursively; `lines(1..3)` and `section("Heading")` select from the source before expansion |
 | Block result | `((b3.result))` | The latest `result` record associated with that block in the same Playbook or Run; `lines` and `section` also work, with no recursive expansion |
-| Local text file | `((file:notes.md \| section("背景")))` | Text fetched relative to the Playbook's directory; `lines` also works, with no recursive expansion |
+| Local text file | `((file:notes.md \| section("Background")))` | Text fetched relative to the Playbook's directory; `lines` also works, with no recursive expansion |
 | GitHub issue/PR | `((https://github.com/owner/repo/issues/1 \| title, body))` | The issue/PR title, body or discussion comments; needs an authenticated `gh` |
 
 Rules and limits:
 
-- Design blocks support `requirement`, `design` and `panel(A)`; a panel needs a single uppercase-letter ID written in its heading, such as `## B What · 结论`. Automatically displayed numbers are not referenceable IDs. `((…))` inside requirements and designs stays as written: it is not fetched or expanded.
+- Design blocks support `requirement`, `design` and `panel(A)`; a panel needs a single uppercase-letter ID written in its heading, such as `## B What · Conclusion`. Automatically displayed numbers are not referenceable IDs. `((…))` inside requirements and designs stays as written: it is not fetched or expanded.
 - `lines` is a 1-based closed range written `lines(1..3)`; `section` excludes the selected heading and includes its subsections. Neither works on design blocks.
 - GitHub supports only standard `https://github.com/<owner>/<repo>/issues/<n>` or `/pull/<n>` URLs. `comments`, `comments(1..2)` and `comments(-1)` select discussion comments in time order; a PR does not include its diff, files, reviews or inline review comments. Arbitrary web URLs are not supported.
 - External text is wrapped in `<external source="…" fetched="…">`, showing when it was fetched. A fetch is a copy, not a live sync; for the latest content use `playbook_compile {op:"refetch"}`.
@@ -267,24 +277,24 @@ Execution bodies and designs are drawn with the same component parser. The compo
 
 | Component | Fence opening line and body |
 |---|---|
-| `slot` | `slot 名称`; one `= current value` line, then options `* recommended \| note`, `- option \| note` and `~ option offered earlier \| note`; written `{{名称}}` where the value goes (prose, list items, `kv` values, flow nodes, where the node must be bracketed, such as `({{名称}})`). The fence itself is not drawn. A custom value that is none of the options is kept as a `~` option |
+| `slot` | `slot name`; one `= current value` line, then options `* recommended \| note`, `- option \| note` and `~ option offered earlier \| note`; written `{{name}}` where the value goes (prose, list items, `kv` values, flow nodes, where the node must be bracketed, such as `({{name}})`). The fence itself is not drawn. A custom value that is none of the options is kept as a `~` option |
 | `flow` | `flow LR`; `Client -> [API] -> [(Cache)]: read`; direction `TB/LR/BT/RL`, default `TB`; `-->` dashed, `{Choice}` diamond, `(Reply)` rounded. A single path is drawn as an editable node column, see [How a person edits](#how-a-person-edits) |
 | `er` | `er LR`; one entity per line, indented fields such as `id uuid PK`, `user_id uuid FK -> User`; relations such as `User 1--* Order: owns` |
 | `sequence` | `sequence num`; `participants: Client, API`, `Client -> API: request`, `API --> Client: reply`; supports `note API: text` and `== phase ==` |
 | `tree` | `tree list`; indentation means parent/child, `name \| note`; without `list` the layout is chosen automatically |
 | `timeline` | `timeline h` or `timeline v`; `09:00 \| start \| note`, `*` before the time highlights it |
 | `limits` | `limits`; `Latency \| 13 / 20 \| ms \| p95` or `Workers \| max 8 \| count` |
-| `annot` | `annot`; body `结果可能[过期]{!读取前刷新}`, `# Title \| side note`, `> caption` |
-| `kv` | `kv cols=2`; `存储: Redis`, `*不变量: 一个源头` is a full-width item |
-| `callout` | `callout warn 缓存失效`; the body is Markdown; types `info/ok/warn/err`; drawn as a comment |
-| `diff` | `diff file=src/value.ts title="变更"`; paste a unified diff as the body, it is not loaded from `file`; supports `start`, `hl` |
-| `html` | `html`; structured tags such as `<section><h3>方案</h3><p><strong>结论</strong></p></section>`, converted to TSP; no web page runs |
+| `annot` | `annot`; body `The result may be [stale]{!refresh before reading}`, `# Title \| side note`, `> caption` |
+| `kv` | `kv cols=2`; `Storage: Redis`, `*Invariant: one source` is a full-width item |
+| `callout` | `callout warn Cache invalidation`; the body is Markdown; types `info/ok/warn/err`; drawn as a comment |
+| `diff` | `diff file=src/value.ts title="Change"`; paste a unified diff as the body, it is not loaded from `file`; supports `start`, `hl` |
+| `html` | `html`; structured tags such as `<section><h3>Plan</h3><p><strong>Conclusion</strong></p></section>`, converted to TSP; no web page runs |
 | `svg` | `svg`; a complete, static, safe `<svg>`, preferably with an explicit `viewBox` or `width`/`height` |
-| Code | Other language fences such as `ts title="片段" start=18 hl=19`; write the code in the body, or read a file with `ts src=sample.ts lines=1-2 hl=2` |
+| Code | Other language fences such as `ts title="Excerpt" start=18 hl=19`; write the code in the body, or read a file with `ts src=sample.ts lines=1-2 hl=2` |
 | Table | Markdown tables; standalone lowercase status words `ok`, `no`, `warn` in data cells (optionally followed by a space and a note) show status icons |
 | Image | `![caption](image.png)` on its own line reads a local image file |
 
-`flow`, `er` and `tree` support the change markers `+ `, `- ` and `~ ` and offer "变更/之前/之后" (changes/before/after) views. `~` marks a modified declaration without storing both versions; a changed flow edge or ER relation is written as one removal and one addition. A tree parent or ER entity marked as added or removed passes the marker to its children.
+`flow`, `er` and `tree` support the change markers `+ `, `- ` and `~ ` and offer "Changes / Before / After" views. `~` marks a modified declaration without storing both versions; a changed flow edge or ER relation is written as one removal and one addition. A tree parent or ER entity marked as added or removed passes the marker to its children.
 
 ### Not browser features
 
@@ -322,7 +332,7 @@ With the file above, the main session calls in order:
 
 ```js
 var worker = await playbook.agent({
-  blocks: ["b3"], agent: "task:mid", label: "检查缓存方案"
+  blocks: ["b3"], agent: "task:mid", label: "Review the cache plan"
 });
 ```
 
@@ -332,9 +342,9 @@ var worker = await playbook.agent({
 return await playbook.result(worker);
 ```
 
-It records the worker's final message as a result on b3 (a Launch with a single block is associated automatically) and closes this Launch. When nothing needs answering in between, one blocking call `await playbook.run({ blocks: ["b3"], agent: "task:mid" })` starts, waits, records and closes in one go. A person's "启动" in the pane arrives as `launch_requested`, and the notice gives the same calls.
+It records the worker's final message as a result on b3 (a Launch with a single block is associated automatically) and closes this Launch. When nothing needs answering in between, one blocking call `await playbook.run({ blocks: ["b3"], agent: "task:mid" })` starts, waits, records and closes in one go. A person's "Launch" in the pane arrives as `launch_requested`, and the notice gives the same calls.
 
-To execute the Playbook again from a clean state without touching the file, call `playbook_run {op: "start", name: "检查缓存方案"}`, take the returned Run ID and pass it as `run` to the calls above; finish with `playbook_run {op:"finish", run}`.
+To execute the Playbook again from a clean state without touching the file, call `playbook_run {op: "start", name: "Review the cache plan"}`, take the returned Run ID and pass it as `run` to the calls above; finish with `playbook_run {op:"finish", run}`.
 
 `task:mid` must be an agent available in the current omp; the extension neither provides nor configures it. A call without `agent` uses the block's preset `agent`, and with no preset either, omp's default agent; when the default is disabled, `agent` must be given or preset on the block. `isolated` follows the same order: explicit argument, then the block's preset, then nothing.
 
@@ -360,7 +370,7 @@ The block below can be added under `blocks` in the example file; use a `js`/`py`
 
 ````yaml
   - id: b4
-    title: 编排检查
+    title: Orchestrated review
     body: |
       ```js
       var worker = await playbook.agent({ blocks: ["b3"], agent: "task:mid" });

@@ -1,3 +1,4 @@
+import { tr } from "../../i18n";
 import { findSecret } from "./code";
 import { diagnostic, type DraftDiagnostic, type FenceInput, type Parsed, type RenderContext, type Rendered } from "./contract";
 
@@ -42,7 +43,7 @@ export function parseDiff(input: FenceInput): Parsed<DiffSpec> {
 	while (remaining) {
 		const match = /^([\w-]+)=(?:"([^"]*)"|'([^']*)'|([^\s"']+))(?:\s+|$)/.exec(remaining);
 		if (!match) {
-			fail(argLine, '参数写成 file=src/code.ts title="修改说明" start=22 hl=22-25,30。');
+			fail(argLine, tr('Write arguments as file=src/code.ts title="Change description" start=22 hl=22-25,30.', '参数写成 file=src/code.ts title="修改说明" start=22 hl=22-25,30。'));
 			break;
 		}
 		const value = match[2] ?? match[3] ?? match[4]!;
@@ -51,20 +52,20 @@ export function parseDiff(input: FenceInput): Parsed<DiffSpec> {
 			case "title": title = value; break;
 			case "hl": hl = value; break;
 			case "start":
-				if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < 1) fail(argLine, "起始行号须为正整数，例如 start=22。");
+				if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < 1) fail(argLine, tr("The starting line number must be a positive integer, e.g. start=22.", "起始行号须为正整数，例如 start=22。"));
 				else start = Number(value);
 				break;
-			case "src": fail(argLine, "diff 不支持 src=；把统一 diff 粘贴到围栏内。"); break;
-			case "lines": fail(argLine, "diff 不支持 lines=；用 start=22 或 @@ -22,2 +22,3 @@ 编号。"); break;
-			default: fail(argLine, `未知参数 ${match[1]}；只使用 file=、title=、start=、hl=。`);
+			case "src": fail(argLine, tr("diff does not support src=; paste a unified diff inside the fence.", "diff 不支持 src=；把统一 diff 粘贴到围栏内。")); break;
+			case "lines": fail(argLine, tr("diff does not support lines=; use start=22 or @@ -22,2 +22,3 @@ numbering.", "diff 不支持 lines=；用 start=22 或 @@ -22,2 +22,3 @@ 编号。")); break;
+			default: fail(argLine, tr(`Unknown parameter ${match[1]}; use only file=, title=, start=, and hl=.`, `未知参数 ${match[1]}；只使用 file=、title=、start=、hl=。`));
 		}
 		remaining = remaining.slice(match[0].length);
 	}
-	if (input.lines.length > 200) fail(input.line, "diff 超过 200 行；拆成每块最多 200 行。");
-	else if (input.lines.length > 40) diagnostics.push(diagnostic("diff", input.line, "diff 超过 40 行；选取最能说明修改的 10–40 行。", "warning"));
+	if (input.lines.length > 200) fail(input.line, tr("diff exceeds 200 lines; split it into blocks of at most 200 lines.", "diff 超过 200 行；拆成每块最多 200 行。"));
+	else if (input.lines.length > 40) diagnostics.push(diagnostic("diff", input.line, tr("diff exceeds 40 lines; select the 10–40 lines that best show the change.", "diff 超过 40 行；选取最能说明修改的 10–40 行。"), "warning"));
 	const body = input.lines.join("\n");
 	const secret = findSecret(body);
-	if (secret) fail(input.line + body.slice(0, secret.index).split("\n").length - 1, "此行疑似含密钥或令牌；删除凭据，改用不含秘密的示意代码。");
+	if (secret) fail(input.line + body.slice(0, secret.index).split("\n").length - 1, tr("This line appears to contain a secret or token; remove the credential and use illustrative code without secrets.", "此行疑似含密钥或令牌；删除凭据，改用不含秘密的示意代码。"));
 	if (diagnostics.some(item => item.severity === "error")) return { ok: false, diagnostics };
 
 	const lines: string[] = [];
@@ -80,7 +81,7 @@ export function parseDiff(input: FenceInput): Parsed<DiffSpec> {
 	let previousOldHeader = false;
 	const closeHunk = (): void => {
 		if (hunk && (hunk.oldCount !== hunk.oldSeen || hunk.newCount !== hunk.newSeen)) {
-			diagnostics.push(diagnostic("diff", hunk.line, `区块实际有旧侧 ${hunk.oldSeen} 行、新侧 ${hunk.newSeen} 行；修正 @@ 的行数或补齐内容。`, "warning"));
+			diagnostics.push(diagnostic("diff", hunk.line, tr(`The block has ${hunk.oldSeen} old-side lines and ${hunk.newSeen} new-side lines; correct the @@ counts or add the missing content.`, `区块实际有旧侧 ${hunk.oldSeen} 行、新侧 ${hunk.newSeen} 行；修正 @@ 的行数或补齐内容。`), "warning"));
 		}
 		hunk = undefined;
 	};
@@ -115,7 +116,7 @@ export function parseDiff(input: FenceInput): Parsed<DiffSpec> {
 			const oldCount = match[2] === undefined ? 1 : Number(match[2]);
 			const newCount = match[4] === undefined ? 1 : Number(match[4]);
 			if (![oldStart, newNumber, oldCount, newCount].every(Number.isSafeInteger) || !Number.isSafeInteger(oldStart + oldCount) || !Number.isSafeInteger(newNumber + newCount)) {
-				fail(sourceLine, "区块行号或行数过大；写成 @@ -22,2 +22,3 @@。");
+				fail(sourceLine, tr("The block line numbers or counts are too large; write @@ -22,2 +22,3 @@.", "区块行号或行数过大；写成 @@ -22,2 +22,3 @@。"));
 				continue;
 			}
 			hasHunk = true;
@@ -123,16 +124,16 @@ export function parseDiff(input: FenceInput): Parsed<DiffSpec> {
 			lines.push(line);
 			continue;
 		}
-		if (line.startsWith("@@")) { fail(sourceLine, "区块头写成 @@ -22,2 +22,3 @@（旧起点和行数、新起点和行数）。"); continue; }
-		if (/^ ?(?:\.\.\.|…)\s*$/.test(line)) { fail(sourceLine, "不能用 ... 或 … 省略行；拆成各自带 @@ -22,2 +22,3 @@ 的区块。"); continue; }
+		if (line.startsWith("@@")) { fail(sourceLine, tr("Write a hunk header as @@ -22,2 +22,3 @@ (old start and count, new start and count).", "区块头写成 @@ -22,2 +22,3 @@（旧起点和行数、新起点和行数）。")); continue; }
+		if (/^ ?(?:\.\.\.|…)\s*$/.test(line)) { fail(sourceLine, tr("Do not use ... or … to omit lines; split into blocks that each have @@ -22,2 +22,3 @@.", "不能用 ... 或 … 省略行；拆成各自带 @@ -22,2 +22,3 @@ 的区块。")); continue; }
 		const kind = line === "" ? " " : line[0];
-		if (kind !== "+" && kind !== "-" && kind !== " ") { fail(sourceLine, "diff 行须以 +、- 或空格开头；未修改的代码前加一个空格。"); continue; }
+		if (kind !== "+" && kind !== "-" && kind !== " ") { fail(sourceLine, tr("A diff line must start with +, -, or a space; prefix unchanged code with one space.", "diff 行须以 +、- 或空格开头；未修改的代码前加一个空格。")); continue; }
 		started = true;
 		if (kind === "+") added++;
 		if (kind === "-") removed++;
 		if (kind !== "+" && hunk) hunk.oldSeen++;
 		if (kind !== "-") {
-			if (!Number.isSafeInteger(newNumber)) fail(sourceLine, "行号过大；减小 start= 或 @@ 中的起始行号。");
+			if (!Number.isSafeInteger(newNumber)) fail(sourceLine, tr("The line number is too large; reduce the starting line number in start= or @@.", "行号过大；减小 start= 或 @@ 中的起始行号。"));
 			newLines.add(newNumber++);
 			if (hunk) hunk.newSeen++;
 		}
@@ -141,18 +142,18 @@ export function parseDiff(input: FenceInput): Parsed<DiffSpec> {
 	closeHunk();
 	const highlights = new Set<number>();
 	if (hl !== undefined) {
-		if (!hasHunk && start === undefined) fail(argLine, "hl= 需要新侧行号；添加 @@ -22,2 +22,3 @@ 或 start=22。");
+		if (!hasHunk && start === undefined) fail(argLine, tr("hl= needs new-side line numbers; add @@ -22,2 +22,3 @@ or start=22.", "hl= 需要新侧行号；添加 @@ -22,2 +22,3 @@ 或 start=22。"));
 		for (const part of hl.split(",")) {
 			const match = /^(\d+)(?:-(\d+))?$/.exec(part.trim());
 			const from = match ? Number(match[1]) : 0;
 			const to = match ? Number(match[2] ?? match[1]) : 0;
 			if (!match || !Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 1 || to < from) {
-				fail(argLine, "高亮范围写成 hl=22-25,30，起点须大于零且不晚于终点。");
+				fail(argLine, tr("Write the highlight range as hl=22-25,30; the start must be greater than zero and no later than the end.", "高亮范围写成 hl=22-25,30，起点须大于零且不晚于终点。"));
 				continue;
 			}
 			// At most 200 body lines exist. Stop at the first missing number rather than expanding arbitrary ranges.
 			for (let number = from; number <= to; number++) {
-				if (!newLines.has(number)) { fail(argLine, `hl=${number} 不在 diff 新侧；选择实际存在的新侧行号。`); break; }
+				if (!newLines.has(number)) { fail(argLine, tr(`hl=${number} is not on the new side of the diff; choose an existing new-side line number.`, `hl=${number} 不在 diff 新侧；选择实际存在的新侧行号。`)); break; }
 				highlights.add(number);
 			}
 		}
@@ -184,7 +185,7 @@ export function renderDiff(spec: DiffSpec, ctx: RenderContext): Rendered {
 				{ t: spec.title, s: "strong" }, { t: `${spec.title ? "  " : ""}+${spec.added}`, s: "success" }, { t: ` −${spec.removed}`, s: "error" },
 			] } },
 			{ id: `${ctx.id}.diff`, k: "diff", p: { text, path: spec.file, lang: spec.language } },
-			...(spec.highlights.length ? [{ id: `${ctx.id}.highlights`, k: "text", p: { spans: [{ t: `高亮：${spec.highlights.join(", ")}`, s: "muted" }] } }] : []),
+			...(spec.highlights.length ? [{ id: `${ctx.id}.highlights`, k: "text", p: { spans: [{ t: tr(`Highlight: ${spec.highlights.join(", ")}`, `高亮：${spec.highlights.join(", ")}`), s: "muted" }] } }] : []),
 		],
 		diagnostics: [],
 	};

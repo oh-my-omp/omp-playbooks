@@ -1,5 +1,6 @@
 // Tern panes through the `tern` CLI: the daemon owns panes, their programs and the layout; this module
 // only asks it and reports its answer.
+import { tr } from "../i18n";
 type TernResult = { ok: true; json: unknown } | { ok: false; error: string };
 type PaneResult = { ok: true; pane: string } | { ok: false; error: string };
 
@@ -12,10 +13,10 @@ async function tern(args: readonly string[]): Promise<TernResult> {
 	try {
 		const child = Bun.spawn(["tern", ...args], { env: process.env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
 		const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
-		if (exitCode !== 0) return { ok: false, error: `tern ${args[0]} exited with code ${exitCode}: ${stderr.trim() || stdout.trim()}` };
+		if (exitCode !== 0) return { ok: false, error: tr(`tern ${args[0]} exited with code ${exitCode}: ${stderr.trim() || stdout.trim()}`, `tern 以退出码 ${exitCode} 退出：${stderr.trim() || stdout.trim()}`) };
 		return { ok: true, json: stdout.trim() ? JSON.parse(stdout) : null };
 	} catch (error: unknown) {
-		return { ok: false, error: `tern: ${error instanceof Error ? error.message : String(error)}` };
+		return { ok: false, error: tr(`tern: ${error instanceof Error ? error.message : String(error)}`, `tern：${error instanceof Error ? error.message : String(error)}`) };
 	}
 }
 
@@ -27,7 +28,7 @@ function paneOf(result: TernResult): PaneResult {
 		if (typeof block === "string" && block.length > 0) return { ok: true, pane: block };
 		if (typeof block === "number" && Number.isSafeInteger(block)) return { ok: true, pane: String(block) };
 	}
-	return { ok: false, error: "tern returned an invalid block id" };
+	return { ok: false, error: tr("tern returned an invalid pane ID", "tern 返回了无效的面板 ID") };
 }
 
 /** The daemon, not the caller, owns the new pane and its program (contracts.md K5). */
@@ -65,7 +66,7 @@ export async function listPanes(): Promise<{ ok: true; panes: readonly TernPane[
 	const result = await tern(["inspect", "--json"]);
 	if (!result.ok) return result;
 	const json = result.json;
-	if (typeof json !== "object" || json === null || !("panes" in json) || !Array.isArray(json.panes)) return { ok: false, error: "tern inspect returned no panes" };
+	if (typeof json !== "object" || json === null || !("panes" in json) || !Array.isArray(json.panes)) return { ok: false, error: tr("tern inspect returned no panes", "tern inspect 没有返回面板") };
 	const places = new Map<string, { session: string; tab: number }>();
 	const sessions = "sessions" in json && Array.isArray(json.sessions) ? json.sessions : [];
 	for (const session of sessions) {

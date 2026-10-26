@@ -2,6 +2,7 @@
 // socket of the omp session there says whether omp-playbooks is loaded and makes it connect. The service
 // itself becomes "online" only through that session's K1 hello, as with playbook_open.
 import { tmpdir } from "node:os";
+import { tr, withLanguage } from "../i18n";
 import { paneSocketPath, type PaneReply, type PaneRequest } from "../domain/protocol";
 import { listPanes, movePane, splitPane, type TernPane } from "./panes";
 
@@ -33,7 +34,7 @@ function parseReply(line: string): PaneReply | null {
 async function ask(pane: string, request: PaneRequest, timeoutMs: number): Promise<PaneReply> {
 	const { promise, resolve } = Promise.withResolvers<PaneReply>();
 	const fail = (code: string, message: string): void => resolve({ ok: false, error: { code, message } });
-	const timer = setTimeout(() => fail("Timeout", `pane ${pane} did not answer within ${timeoutMs / 1000} s`), timeoutMs);
+	const timer = setTimeout(() => fail("Timeout", tr(`Pane ${pane} did not respond within ${timeoutMs / 1000} s`, `面板 ${pane} 在 ${timeoutMs / 1000} 秒内没有响应`)), timeoutMs);
 	let text = "";
 	Bun.connect({
 		unix: paneSocketPath(tmpdir(), pane),
@@ -44,7 +45,7 @@ async function ask(pane: string, request: PaneRequest, timeoutMs: number): Promi
 				clearTimeout(timer);
 				const reply = parseReply(text.trim());
 				if (reply) resolve(reply);
-				else fail("BadReply", `pane ${pane} answered ${JSON.stringify(text)}`);
+				else fail("BadReply", tr(`Pane ${pane} responded with ${JSON.stringify(text)}`, `面板 ${pane} 返回了 ${JSON.stringify(text)}`));
 			},
 			error(_socket, error) { clearTimeout(timer); fail("Socket", error.message); },
 		},
@@ -79,14 +80,14 @@ export function pairBeside(own: string, target: string): Promise<Outcome> {
 
 /** The first user prompt of a session started from the Playbook pane. */
 export function initPrompt(doc: string): string {
-	return `调用 playbook_open，doc 为 ${doc}，作为这份 Playbook 的协调者。先用 playbook_read 读一遍它，然后等待：之后每收到 Playbook 通知，就按通知里的下一步做。`;
+	return tr(`Call playbook_open with doc ${doc} and act as this Playbook's coordinator. First use playbook_read to read it once, then wait: after each Playbook notice, follow its Next step.`, `调用 playbook_open，doc 为 ${doc}，作为这份 Playbook 的协调者。先用 playbook_read 读一遍它，然后等待：之后每收到 Playbook 通知，就按通知里的下一步做。`);
 }
 
 /** Start omp with the init prompt in a new pane on the left of `own`, so the Playbook pane is its right half. */
 export async function newSession(own: string, doc: string, cwd: string): Promise<Outcome> {
 	const omp = Bun.which("omp");
-	if (omp === null) return { ok: false, error: "找不到 omp：它不在这个面板的 PATH 里" };
-	const split = await splitPane(own, cwd, [omp, initPrompt(doc)]);
+	if (omp === null) return { ok: false, error: tr("omp was not found in this pane's PATH", "找不到 omp：它不在这个面板的 PATH 里") };
+	const split = await splitPane(own, cwd, withLanguage([omp, initPrompt(doc)]));
 	if (!split.ok) return split;
 	return movePane(split.pane, "left-of", own);
 }
@@ -108,7 +109,7 @@ export interface CoordinatorPicker {
 }
 
 export function coordinatorPicker(doc: string, cwd: string, own: string | null): CoordinatorPicker {
-	const error = "这个 Playbook 面板不在 Tern 的面板里运行（没有 TERN_PANE），无法列出或排列面板";
+	const error = tr("This Playbook pane is not running in a Tern pane (TERN_PANE is missing), so panes cannot be listed or arranged", "这个 Playbook 面板不在 Tern 的面板里运行（没有 TERN_PANE），无法列出或排列面板");
 	return {
 		list: () => own === null ? Promise.resolve({ ok: false, error }) : ompPanes(own),
 		async choose(pane) {

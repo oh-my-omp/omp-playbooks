@@ -1,3 +1,4 @@
+import { tr } from "../../i18n";
 import type { DraftDiagnostic, FenceInput, Parsed, RenderContext, Rendered } from "./contract";
 import { diagnostic } from "./contract";
 import { escapeXml } from "./text";
@@ -132,7 +133,7 @@ function scan(source: string, firstLine: number, diagnostics: DraftDiagnostic[])
 		}
 		// Bound every raw tree, including SVG, before any recursive normalization or rendering.
 		if (stack.length >= 256) {
-			diagnostics.push(diagnostic("html", line, "HTML 嵌套深度超过 256 层；请减少标签嵌套。"));
+			diagnostics.push(diagnostic("html", line, tr("HTML nesting exceeds 256 levels; reduce tag nesting.", "HTML 嵌套深度超过 256 层；请减少标签嵌套。")));
 			return { ok: false, diagnostics };
 		}
 		const attributes: Attribute[] = [];
@@ -141,7 +142,7 @@ function scan(source: string, firstLine: number, diagnostics: DraftDiagnostic[])
 			const attrName = attr[1]!;
 			const key = inSvg || lower === "svg" ? attrName : attrName.toLowerCase();
 			if (attributeNames.has(key)) {
-				diagnostics.push(diagnostic("html", line, `已移除重复属性 ${attrName}，保留首次出现的值。`, "warning"));
+				diagnostics.push(diagnostic("html", line, tr(`Removed duplicate attribute ${attrName}; the first value was kept.`, `已移除重复属性 ${attrName}，保留首次出现的值。`), "warning"));
 				continue;
 			}
 			attributeNames.add(key);
@@ -236,15 +237,15 @@ function svgNode(element: RawElement, warn: (line: number, message: string) => v
 		if (node.kind === "text") return escapeXml(node.text);
 		const lower = node.name.slice(node.name.lastIndexOf(":") + 1).toLowerCase();
 		if (Object.hasOwn(forbidden, lower) || lower === "foreignobject") {
-			warn(node.line, `已移除 <${node.name}>，请改用安全的 SVG 图形。`);
+			warn(node.line, tr(`Removed <${node.name}>; use a safe SVG graphic instead.`, `已移除 <${node.name}>，请改用安全的 SVG 图形。`));
 			return "";
 		}
 		const attributes = node.attributes.filter(attr => {
 			if (attr.name === "xmlns" || attr.name.startsWith("xmlns:")) return true;
 			const name = attr.name.slice(attr.name.lastIndexOf(":") + 1).toLowerCase();
-			if (name.startsWith("on")) { warn(node.line, `已移除 ${attr.name}，请删除 SVG 事件处理器。`); return false; }
+			if (name.startsWith("on")) { warn(node.line, tr(`Removed ${attr.name}; delete SVG event handlers.`, `已移除 ${attr.name}，请删除 SVG 事件处理器。`)); return false; }
 			if (((name === "href" || name === "src") && !/^#[^\s]+$/.test(attr.value.trim())) || externalCssReference(attr.value)) {
-				warn(node.line, `已移除 ${attr.name} 外部引用，请改用 #id 本地引用。`);
+				warn(node.line, tr(`Removed external reference ${attr.name}; use a local #id reference instead.`, `已移除 ${attr.name} 外部引用，请改用 #id 本地引用。`));
 				return false;
 			}
 			return true;
@@ -266,7 +267,7 @@ function svgNode(element: RawElement, warn: (line: number, message: string) => v
 	const h = height ?? (width && boxWidth && boxHeight ? width * boxHeight / boxWidth : boxHeight ?? 150);
 	const scale = Math.min(1, 1000 / w);
 	const title = element.children.find(node => node.kind === "element" && node.name.toLowerCase() === "title");
-	return { kind: "svg", source: serialize(element), w: w * scale, h: h * scale, alt: attribute(element, "aria-label") || (title?.kind === "element" ? rawText(title.children) : "") || "内嵌 SVG" };
+	return { kind: "svg", source: serialize(element), w: w * scale, h: h * scale, alt: attribute(element, "aria-label") || (title?.kind === "element" ? rawText(title.children) : "") || tr("Embedded SVG", "内嵌 SVG") };
 }
 
 export function parseHtml(input: FenceInput): Parsed<HtmlSpec> {
@@ -275,7 +276,7 @@ export function parseHtml(input: FenceInput): Parsed<HtmlSpec> {
 	const normalize = (node: RawNode): HtmlNode[] => {
 		if (node.kind === "text") return [{ kind: "text", text: node.text }];
 		const name = node.name.toLowerCase();
-		if (Object.hasOwn(forbidden, name)) { warn(node.line, `已移除 <${name}> 及其内容，请改用安全的 HTML 标签。`); return []; }
+		if (Object.hasOwn(forbidden, name)) { warn(node.line, tr(`Removed <${name}> and its contents; use safe HTML tags instead.`, `已移除 <${name}> 及其内容，请改用安全的 HTML 标签。`)); return []; }
 		if (name === "svg") return [svgNode(node, warn)];
 		if (name === "br") return [{ kind: "text", text: "\n" }];
 		const children = node.children.flatMap(normalize);
@@ -284,7 +285,7 @@ export function parseHtml(input: FenceInput): Parsed<HtmlSpec> {
 		if (name === "s") return [{ kind: "element", tag: "del", children }];
 		if (name === "h5" || name === "h6") return [{ kind: "element", tag: "h4", children }];
 		if (supported(name)) return [{ kind: "element", tag: name, children }];
-		warn(node.line, `不支持 <${name}>，已保留内容；请改用 <div>。`);
+		warn(node.line, tr(`The <${name}> tag is not supported; its content was kept. Use <div> instead.`, `不支持 <${name}>，已保留内容；请改用 <div>。`));
 		return [{ kind: "element", tag: "div", children }];
 	};
 	const scanned = scan(input.lines.join("\n"), input.line, diagnostics);

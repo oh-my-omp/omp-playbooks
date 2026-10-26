@@ -2,6 +2,7 @@
 // (contracts.md K2 "eval 辅助"). The extension imports it into a cell that uses `playbook.*`.
 // It only composes the public playbook_* tools with the kernel's own `agent()`, so the
 // document service stays the single owner of Launch state.
+import { tr } from "../i18n";
 
 type ToolCall = (args: Record<string, unknown>) => Promise<unknown>;
 type AgentHandle = { readonly id: string; wait(timeout?: number): Promise<unknown>; cancel(): unknown };
@@ -49,12 +50,12 @@ type Created = { readonly launch: string; readonly kind: string; readonly text: 
 type LaunchInfo = { readonly run: string | null; readonly kind: string; readonly text: string; readonly blocks: readonly string[]; readonly closed: boolean };
 
 function objectOf(value: unknown): object {
-	if (typeof value !== "object" || value === null) throw new PlaybookError(`unexpected tool result: ${JSON.stringify(value)}`);
+	if (typeof value !== "object" || value === null) throw new PlaybookError(tr(`Unexpected tool result: ${JSON.stringify(value)}`, `工具返回了意外结果：${JSON.stringify(value)}`));
 	return value;
 }
 function stringAt(value: object, key: string): string {
 	const field: unknown = key in value ? Reflect.get(value, key) : undefined;
-	if (typeof field !== "string") throw new PlaybookError(`tool result has no string ${key}`);
+	if (typeof field !== "string") throw new PlaybookError(tr(`Tool result has no string field ${key}`, `工具结果没有字符串字段 ${key}`));
 	return field;
 }
 
@@ -73,15 +74,15 @@ function created(value: unknown): Created {
 	const result = objectOf(value);
 	const agent: unknown = "agent" in result ? result.agent : undefined;
 	const isolated: unknown = "isolated" in result ? result.isolated : undefined;
-	if (agent !== undefined && typeof agent !== "string") throw new PlaybookError("launch result agent is not a string");
-	if (isolated !== undefined && typeof isolated !== "boolean") throw new PlaybookError("launch result isolated is not a boolean");
+	if (agent !== undefined && typeof agent !== "string") throw new PlaybookError(tr("Launch result's agent is not a string", "启动结果中的 agent 不是字符串"));
+	if (isolated !== undefined && typeof isolated !== "boolean") throw new PlaybookError(tr("Launch result's isolated is not a boolean", "启动结果中的 isolated 不是布尔值"));
 	return {
 		launch: stringAt(result, "launch"), kind: stringAt(result, "kind"), text: stringAt(result, "text"),
 		...(agent === undefined ? {} : { agent }), ...(isolated === undefined ? {} : { isolated }),
 	};
 }
 function strings(value: unknown, key: string): string[] {
-	if (!Array.isArray(value) || !value.every(item => typeof item === "string")) throw new PlaybookError(`tool result has no string list ${key}`);
+	if (!Array.isArray(value) || !value.every(item => typeof item === "string")) throw new PlaybookError(tr(`Tool result has no string list field ${key}`, `工具结果没有字符串列表 ${key}`));
 	return value;
 }
 function launchInfo(value: unknown): LaunchInfo {
@@ -91,7 +92,7 @@ function launchInfo(value: unknown): LaunchInfo {
 	const baselines = strings("baselines" in record ? record.baselines : undefined, "baselines");
 	const closed: unknown = "closed" in record ? record.closed : undefined;
 	const run: unknown = "run" in record ? record.run : undefined;
-	if (run !== null && typeof run !== "string") throw new PlaybookError("launch info run is neither a Run id nor null");
+	if (run !== null && typeof run !== "string") throw new PlaybookError(tr("Launch info's run is neither a Run ID nor null", "启动信息中的 run 既不是 Run id，也不是 null"));
 	return {
 		run, kind: stringAt(record, "kind"),
 		text: baselines.at(-1) ?? stringAt(result, "text"),
@@ -114,7 +115,7 @@ export function createPlaybook(deps: PlaybookDeps) {
 	const context: PlaybookContext = { ...(deps.doc ? { doc: deps.doc } : {}), ...(deps.run ? { run: deps.run } : {}), ...(deps.launch ? { launch: deps.launch } : {}) };
 	const call = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
 		const tool = deps.tool[name];
-		if (!tool) throw new PlaybookError(`tool ${name} is not available in this session`);
+		if (!tool) throw new PlaybookError(tr(`Tool ${name} is not available in this session`, `本会话没有可用的 ${name} 工具`));
 		return decode(await tool(args));
 	};
 	const docArg = (doc: string | undefined): { doc?: string } => {
@@ -142,7 +143,7 @@ export function createPlaybook(deps: PlaybookDeps) {
 		} catch (error) {
 			const reason = error instanceof Error ? error.message : String(error);
 			if (fresh) await call("playbook_launch", { ...docArg(target.doc), op: "close", launch });
-			throw new PlaybookError(`agent() failed for Launch ${launch}${fresh ? " (closed)" : ""}: ${reason}. When the default subagent is disabled, pass agent: "<name>", for example agent: "task:mid".`);
+			throw new PlaybookError(tr(`agent() failed for Launch ${launch}${fresh ? " (closed)" : ""}: ${reason}. When the default subagent is disabled, pass agent: "<name>", for example agent: "task:mid".`, `Launch ${launch}${fresh ? "（已关闭）" : ""} 的 agent() 失败：${reason}。默认 subagent 被禁用时，请传入 agent: "<name>"，例如 agent: "task:mid"。`));
 		}
 		await call("playbook_launch", { ...docArg(target.doc), op: "bind", launch, agent: handle.id });
 		const spawned: Spawned = { ...target, launch, blocks, ownsLaunch: fresh, id: handle.id, handle };
@@ -159,7 +160,7 @@ export function createPlaybook(deps: PlaybookDeps) {
 		const launch = created(await call("playbook_launch", { ...target, op: "launch", blocks: [...request.blocks] }));
 		if (launch.kind === "orchestration") {
 			await call("playbook_launch", { ...docArg(target.doc), op: "close", launch: launch.launch });
-			throw new PlaybookError(`${request.blocks.join(", ")} is an orchestration block (Launch ${launch.launch} closed): start it with playbook_launch {op: "launch"} and run \`await playbook.exec("l<n>")\` as its own eval call`);
+			throw new PlaybookError(tr(`${request.blocks.join(", ")} is an orchestration block (Launch ${launch.launch} closed): start it with playbook_launch {op: "launch"} and run \`await playbook.exec("l<n>")\` as its own eval call`, `${request.blocks.join("、")} 是编排块（Launch ${launch.launch} 已关闭）：请用 playbook_launch {op: "launch"} 启动，然后单独发一个 eval 执行 \`await playbook.exec("l<n>")\``));
 		}
 		const defaults: AgentOptions = { ...(launch.agent !== undefined ? { agent: launch.agent } : {}), ...(launch.isolated !== undefined ? { isolated: launch.isolated } : {}) };
 		return start(target, launch.launch, request.blocks, launch.text, { ...defaults, ...agentOptions(request) }, true);
@@ -197,8 +198,8 @@ export function createPlaybook(deps: PlaybookDeps) {
 		/** Another subagent on an open Launch, with the Launch's current baseline (its snapshot until a rebase); it does not own the Launch. */
 		async spawn(launch: string, request: AgentOptions & { readonly doc?: string } = {}): Promise<Spawned> {
 			const info = launchInfo(await call("playbook_launch", { ...docArg(request.doc), op: "info", launch }));
-			if (info.closed) throw new PlaybookError(`${launch} is closed; start a new Launch instead`);
-			if (info.kind === "orchestration") throw new PlaybookError(`${launch} is an orchestration Launch; it is not a subagent prompt`);
+			if (info.closed) throw new PlaybookError(tr(`${launch} is closed; start a new Launch instead`, `${launch} 已关闭；请改为启动新的 Launch`));
+			if (info.kind === "orchestration") throw new PlaybookError(tr(`${launch} is an orchestration Launch; it is not a subagent prompt`, `${launch} 是编排 Launch，不是 subagent prompt`));
 			return start(scope(request.doc, info.run ?? undefined), launch, info.blocks, info.text, agentOptions(request), false);
 		},
 
@@ -208,7 +209,7 @@ export function createPlaybook(deps: PlaybookDeps) {
 		 */
 		async stop(launch: string, request: { readonly doc?: string } = {}): Promise<{ readonly cancelled: readonly string[] }> {
 			const workers = started.get(launch) ?? [];
-			if (workers.length === 0) throw new PlaybookError(`no subagent of ${launch} was started in this session; stop it where it runs, then set its blocks back to todo with playbook_edit {op: "status"}`);
+			if (workers.length === 0) throw new PlaybookError(tr(`No subagent of ${launch} was started in this session; stop it where it runs, then set its blocks back to todo with playbook_edit {op: "status"}`, `本会话没有启动 ${launch} 的 subagent；请在其运行处停止它，然后用 playbook_edit {op: "status"} 将其块改回 todo`));
 			for (const worker of workers) await worker.handle.cancel();
 			started.delete(launch);
 			const info = launchInfo(await call("playbook_launch", { ...docArg(request.doc), op: "info", launch }));

@@ -6,6 +6,7 @@ import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { socketPath } from "../domain/protocol";
+import { tr } from "../i18n";
 import { checks } from "./checks";
 import { readClipboardImage } from "./clipboard";
 import { coordinatorPicker } from "./coordinators";
@@ -21,7 +22,7 @@ import { startUi } from "./ui";
 const reveal = process.argv[2] === "--reveal";
 const file = reveal ? process.argv[3] : process.argv[2];
 if (!file) {
-	process.stderr.write("用法：omp-playbook [--reveal] <playbook.yaml>\n");
+	process.stderr.write(`${tr("Usage: omp-playbook [--reveal] <playbook.yaml>", "用法：omp-playbook [--reveal] <playbook.yaml>")}\n`);
 	process.exit(2);
 }
 const templatePath = realpathSync(resolve(file));
@@ -43,7 +44,7 @@ const core = new Core({
 });
 const loadError = core.load();
 if (loadError !== null) {
-	process.stderr.write(`Playbook 文件不能解析：${loadError}\n`);
+	process.stderr.write(`${tr(`Playbook file cannot be parsed: ${loadError}`, `Playbook 文件不能解析：${loadError}`)}\n`);
 	process.exit(1);
 }
 let server: { close(): void };
@@ -55,7 +56,7 @@ try {
 	// The document already has its service: show that pane and leave, so this pane closes.
 	const outcome = await revealService(endpoint);
 	if (outcome.kind === "revealed") process.exit(0);
-	process.stderr.write(`这个 Playbook 的文档服务已在运行：${templatePath}\n${outcome.kind === "failed" ? `${outcome.message}\n` : ""}`);
+	process.stderr.write(`${tr(`The document service for this Playbook is already running: ${templatePath}`, `这个 Playbook 的文档服务已在运行：${templatePath}`)}\n${outcome.kind === "failed" ? `${outcome.message}\n` : ""}`);
 	process.exit(3);
 }
 startUi(core, createTspSession(), dirname(templatePath), coordinatorPicker(templatePath, dirname(templatePath), ownPane()), readClipboardImage);

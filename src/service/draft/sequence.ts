@@ -1,3 +1,4 @@
+import { tr } from "../../i18n";
 import { diagnostic, type DraftDiagnostic, type FenceInput, type Parsed, type RenderContext, type Rendered } from "./contract";
 import { escapeXml, plainText, textWidth, wrapText } from "./text";
 
@@ -17,7 +18,7 @@ export function parseSequence(input: FenceInput): Parsed<SequenceSpec> {
 	const steps: SequenceSpec["steps"][number][] = [];
 	const options = input.args.trim().split(/\s+/).filter(Boolean);
 	if (options.some(option => option !== "num")) {
-		diagnostics.push(diagnostic("sequence", Math.max(1, input.line - 1), "时序图参数只支持 num；请写 sequence 或 sequence num。"));
+		diagnostics.push(diagnostic("sequence", Math.max(1, input.line - 1), tr("The sequence diagram accepts only num; write sequence or sequence num.", "时序图参数只支持 num；请写 sequence 或 sequence num。")));
 	}
 	const add = (name: string): void => {
 		if (!participants.includes(name)) participants.push(name);
@@ -25,7 +26,7 @@ export function parseSequence(input: FenceInput): Parsed<SequenceSpec> {
 	const names = (text: string, line: number): string[] | undefined => {
 		const values = text.split(/[,，]/).map(value => value.trim());
 		if (values.some(value => !value || /[:：<>]/.test(value))) {
-			diagnostics.push(diagnostic("sequence", line, "参与者名称不能为空或含冒号、箭头；请写 A, B, C。"));
+			diagnostics.push(diagnostic("sequence", line, tr("Participant names cannot be empty or contain colons or arrows; write A, B, C.", "参与者名称不能为空或含冒号、箭头；请写 A, B, C。")));
 			return undefined;
 		}
 		return values;
@@ -63,10 +64,10 @@ export function parseSequence(input: FenceInput): Parsed<SequenceSpec> {
 			steps.push({ kind: "message", from, to, dashed: message[2] === "-->", label: (message[4] ?? "").trim(), line });
 			continue;
 		}
-		diagnostics.push(diagnostic("sequence", line, "无法解析时序图行；请写 A -> B: 消息、A --> B: 返回、note A, B: 说明或 == 阶段 ==。"));
+		diagnostics.push(diagnostic("sequence", line, tr("Unable to parse the sequence-diagram line; write A -> B: message, A --> B: return, note A, B: note, or == phase ==.", "无法解析时序图行；请写 A -> B: 消息、A --> B: 返回、note A, B: 说明或 == 阶段 ==。")));
 	}
 	if (!participants.length && !diagnostics.length) {
-		diagnostics.push(diagnostic("sequence", input.line, "时序图需要参与者；请写 A -> B: 消息。"));
+		diagnostics.push(diagnostic("sequence", input.line, tr("A sequence diagram needs participants; write A -> B: message.", "时序图需要参与者；请写 A -> B: 消息。")));
 	}
 	if (diagnostics.length) return { ok: false, diagnostics };
 	return { ok: true, value: { participants, numbered: options.includes("num"), steps }, diagnostics };
@@ -162,5 +163,5 @@ export function renderSequence(spec: SequenceSpec, ctx: RenderContext): Rendered
 	const displayWidth = Math.min(1000, width);
 	const displayHeight = height * displayWidth / width;
 	const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${displayWidth}" height="${displayHeight}" viewBox="0 0 ${width} ${height}" role="img"><g font-family="sans-serif" font-size="14" fill="var(--fg)">${actors}${body.join("")}</g></svg>`;
-	return { nodes: [ctx.svg(`${ctx.id}.sequence`, svg, { w: displayWidth, h: displayHeight }, `时序图：${spec.participants.map(plainText).join("、")}`)], diagnostics: [] };
+	return { nodes: [ctx.svg(`${ctx.id}.sequence`, svg, { w: displayWidth, h: displayHeight }, tr(`Sequence diagram: ${spec.participants.map(plainText).join(", ")}`, `时序图：${spec.participants.map(plainText).join("、")}`))], diagnostics: [] };
 }

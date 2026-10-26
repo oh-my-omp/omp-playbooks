@@ -1,8 +1,8 @@
 import { outlinedText, type CompileError, type CompileResult, type Source } from "../domain/model";
 import type { ChecksModule } from "../domain/ports";
+import { tr } from "../i18n";
 import { draftDiagnostics } from "./draft/components";
 import { outlineProblems } from "./draft/outline";
-
 function unreachable(value: never): never {
 	throw new Error(`Unexpected checks variant: ${JSON.stringify(value)}`);
 }
@@ -53,7 +53,7 @@ const questions: ChecksModule["questions"] = [
 		id: "missing",
 		type: "bool",
 		instructions:
-			"`compiled` is the entire prompt a subagent receives; it can see nothing else. Does `compiled` mention material (logs, discussion, files, earlier results) whose content is absent from `compiled`?",
+			tr("`compiled` is the entire prompt a subagent receives; it can see nothing else. Does `compiled` mention material (logs, discussion, files, earlier results) whose content is absent from `compiled`?", "`compiled` 是子代理收到的完整提示；它看不到其他内容。`compiled` 是否提到了日志、讨论、文件或早先结果等材料，而这些材料的内容并不在 `compiled` 中？"),
 		threshold: 0.5,
 	},
 ];

@@ -1,3 +1,4 @@
+import { tr } from "../../i18n";
 import { diagnostic, type FenceInput, type Parsed, type RenderContext, type Rendered, type Span } from "./contract.ts";
 
 export interface CalloutSpec {
@@ -28,7 +29,7 @@ export function parseCallout(input: FenceInput): Parsed<CalloutSpec> {
 	}
 	const body = input.lines.join("\n");
 	if (!title && !body.trim()) {
-		return { ok: false, diagnostics: [diagnostic("callout", input.line, "callout 需要标题或正文，例如：```callout info 提示")] };
+		return { ok: false, diagnostics: [diagnostic("callout", input.line, tr("callout needs a title or body, e.g. ```callout info Hint", "callout 需要标题或正文，例如：```callout info 提示"))] };
 	}
 	const firstLine = input.lines.findIndex(line => line.trim() && !line.trim().startsWith("//"));
 	const misplacedType = firstLine < 0 ? null : /^type\s*[:：]\s*([a-z][\w-]*)\s*(?:#.*)?$/i.exec(input.lines[firstLine]!.trim());
@@ -43,7 +44,7 @@ export function parseCallout(input: FenceInput): Parsed<CalloutSpec> {
 		}
 		return {
 			ok: false,
-			diagnostics: [diagnostic("callout", input.line + firstLine, `类型应写在围栏行而非正文，例如：\`\`\`callout ${suggested} [标题]`)],
+			diagnostics: [diagnostic("callout", input.line + firstLine, tr(`Type must be on the fence line, not in the body, e.g. \`\`\`callout ${suggested} [title]`, `类型应写在围栏行而非正文，例如：\`\`\`callout ${suggested} [标题]`))],
 		};
 	}
 	return { ok: true, value: { type, title, body, span: input.body }, diagnostics: [] };

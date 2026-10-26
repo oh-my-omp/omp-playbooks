@@ -51,6 +51,7 @@ import type {
 } from "../domain/ports";
 import type { EventPayload, Outcome, Request, RunSummary } from "../domain/protocol";
 import { fail, ok } from "../domain/protocol";
+import { tr } from "../i18n";
 import { launchFooter } from "./footer";
 import { IMAGE_EXTENSIONS, MAX_IMAGE_BYTES } from "./draft/image";
 
@@ -245,7 +246,7 @@ export class Core implements CoreApi, K1Handler {
 		for (const record of this.#store.readServiceRecords()) this.#noteRecord(record);
 		for (const [run, parsed] of this.#store.readRuns()) {
 			if (!parsed.ok || parsed.run === null) {
-				this.#errors.push(`Run ${run} 的文件不能解析：${parsed.ok ? "缺少 run 映射" : parsed.error}`);
+				this.#errors.push(tr(`Run ${run} file could not be parsed: ${parsed.ok ? "missing run mapping" : parsed.error}`, `Run ${run} 的文件不能解析：${parsed.ok ? "缺少 run 映射" : parsed.error}`));
 				continue;
 			}
 			this.#docs.set(run, this.#newDocState({ kind: "run", run }, parsed.doc, parsed.run));
@@ -897,19 +898,19 @@ export class Core implements CoreApi, K1Handler {
 		// takes the coordinator slot, so it is answered before admission.
 		if (request.op === "reveal") {
 			const pane = this.#panes.ownPane();
-			if (pane === null) return fail("RevealFailed", "文档服务不在 session daemon 托管的 pane 中");
+			if (pane === null) return fail("RevealFailed", tr("The document service is not in a pane managed by the session daemon", "文档服务不在 session daemon 托管的 pane 中"));
 			const shown = await this.#panes.focusPane(pane);
 			return shown.ok ? ok(null) : fail("RevealFailed", shown.error);
 		}
 		if (this.#conn?.conn !== conn) {
-			if (request.op !== "hello") return fail(this.#conn === null ? "NotHello" : "Busy", this.#conn === null ? "第一条请求必须是 hello" : "另一个协调者已连接");
-			if (this.#conn !== null) return fail("Busy", "另一个协调者已连接");
+			if (request.op !== "hello") return fail(this.#conn === null ? "NotHello" : "Busy", this.#conn === null ? tr("The first request must be hello", "第一条请求必须是 hello") : tr("Another coordinator is already connected", "另一个协调者已连接"));
+			if (this.#conn !== null) return fail("Busy", tr("Another coordinator is already connected", "另一个协调者已连接"));
 			this.#conn = { conn, session: null, pane: null, agents: { kind: "unasked" } };
 		}
 		const session = this.#conn.session;
 		switch (request.op) {
 			case "hello": {
-				if (this.#conn.session !== null) return fail("Busy", "本连接已 hello");
+				if (this.#conn.session !== null) return fail("Busy", tr("This connection has already sent hello", "本连接已 hello"));
 				this.#conn.session = request.args.session;
 				this.#conn.pane = request.args.pane ?? null;
 				for (const launch of this.#launches.values()) {
@@ -945,7 +946,7 @@ export class Core implements CoreApi, K1Handler {
 				if (!doc.ok) return doc;
 				if (request.args.block !== undefined) {
 					const block = this.#block(doc.result, request.args.block);
-					return block ? ok(wireBlock(block)) : fail("UnknownBlock", `块 ${request.args.block} 不存在`);
+					return block ? ok(wireBlock(block)) : fail("UnknownBlock", tr(`Block ${request.args.block} does not exist`, `块 ${request.args.block} 不存在`));
 				}
 				return ok({ title: doc.result.title, blocks: doc.result.blocks.map(wireBlock), ...(doc.result.run ? { run: doc.result.run } : {}) });
 			}
@@ -965,7 +966,7 @@ export class Core implements CoreApi, K1Handler {
 					}
 					case "task": {
 						const block = held.result.block;
-						if (block.content.kind !== "task") return fail("BadValue", "设计块不能声明为非任务块");
+						if (block.content.kind !== "task") return fail("BadValue", tr("A design block cannot be declared as a non-task block", "设计块不能声明为非任务块"));
 						if ((block.progress.kind === "tracked") === request.args.value) return ok(null);
 						const progress: Progress = request.args.value ? { kind: "tracked", status: "todo", report: null } : { kind: "untracked" };
 						this.#applyEdit(doc, "coordinator", { kind: "progress", block: request.args.block, progress });
@@ -974,7 +975,7 @@ export class Core implements CoreApi, K1Handler {
 					case "agent":
 					case "isolated": {
 						const content = held.result.block.content;
-						if (content.kind !== "task") return fail("BadValue", "设计块没有执行配置");
+						if (content.kind !== "task") return fail("BadValue", tr("A design block has no execution configuration", "设计块没有执行配置"));
 						const value = request.args.value ?? undefined;
 						const config = { ...taskConfig(content), [request.args.field]: value };
 						this.#applyEdit(doc, "coordinator", { kind: "config", block: request.args.block, config });
@@ -987,8 +988,8 @@ export class Core implements CoreApi, K1Handler {
 				const held = this.#held(request.args.run, id);
 				if (!held.ok) return held;
 				const { doc } = held.result;
-				if (after === id) return fail("BadValue", "不能把块移到自己后面");
-				if (after !== null && !this.#block(doc, after)) return fail("UnknownBlock", `块 ${after} 不存在`);
+				if (after === id) return fail("BadValue", tr("A block cannot be moved after itself", "不能把块移到自己后面"));
+				if (after !== null && !this.#block(doc, after)) return fail("UnknownBlock", tr(`Block ${after} does not exist`, `块 ${after} 不存在`));
 				const current = doc.blocks.map(block => block.id);
 				const rest = current.filter(other => other !== id);
 				const index = after === null ? 0 : rest.indexOf(after) + 1;
@@ -1003,8 +1004,8 @@ export class Core implements CoreApi, K1Handler {
 				const field = coordinatorField(block.content);
 				const current = fieldText(block, field)!;
 				const first = current.indexOf(request.args.find);
-				if (first < 0) return fail("NotFound", field === "body" ? "find 文本不在块正文中" : "find 文本不在设计稿中");
-				if (current.indexOf(request.args.find, first + 1) >= 0) return fail("Ambiguous", "find 文本出现多次");
+				if (first < 0) return fail("NotFound", field === "body" ? tr("The find text is not in the block body", "find 文本不在块正文中") : tr("The find text is not in the design draft", "find 文本不在设计稿中"));
+				if (current.indexOf(request.args.find, first + 1) >= 0) return fail("Ambiguous", tr("The find text occurs more than once", "find 文本出现多次"));
 				const text = current.slice(0, first) + request.args.replace + current.slice(first + request.args.find.length);
 				this.#applyEdit(doc, "coordinator", { kind: "field", block: block.id, field, text });
 				return ok(null);
@@ -1030,8 +1031,8 @@ export class Core implements CoreApi, K1Handler {
 			case "insert": {
 				const doc = this.#docOf(request.args.run);
 				if (!doc.ok) return doc;
-				if (this.#isFinished(doc.result)) return fail("RunFinished", "Run 已结束");
-				if (request.args.after !== undefined && !this.#block(doc.result, request.args.after)) return fail("UnknownBlock", `块 ${request.args.after} 不存在`);
+				if (this.#isFinished(doc.result)) return fail("RunFinished", tr("Run has finished", "Run 已结束"));
+				if (request.args.after !== undefined && !this.#block(doc.result, request.args.after)) return fail("UnknownBlock", tr(`Block ${request.args.after} does not exist`, `块 ${request.args.after} 不存在`));
 				const id = this.#allocateBlock(doc.result);
 				const given = request.args.content;
 				// A design block's requirement is the person's; the coordinator only drafts the design.
@@ -1057,7 +1058,7 @@ export class Core implements CoreApi, K1Handler {
 				const targets: ExternalTarget[] = [];
 				for (const text of request.args.targets) {
 					const target = this.#refs.parseTarget(text);
-					if (!target || target.kind === "block" || target.kind === "result") return fail("UnknownTarget", `${text} 不是外部目标`);
+					if (!target || target.kind === "block" || target.kind === "result") return fail("UnknownTarget", tr(`${text} is not an external target`, `${text} 不是外部目标`));
 					targets.push(target);
 				}
 				for (const target of targets) {
@@ -1085,7 +1086,7 @@ export class Core implements CoreApi, K1Handler {
 			case "bind": {
 				const launch = this.#owned(session!, request.args.launch);
 				if (!launch.ok) return launch;
-				if (launch.result.record.closed !== null) return fail("BadLaunch", "Launch 已关闭");
+				if (launch.result.record.closed !== null) return fail("BadLaunch", tr("Launch is closed", "Launch 已关闭"));
 				this.#setLaunch(launch.result, { ...launch.result.record, agents: [...launch.result.record.agents, request.args.agent] });
 				this.#append(keyOfRun(launch.result.record.run), "coordinator", { type: "agent_bound", launch: request.args.launch, agent: request.args.agent });
 				this.#emit(refOf(keyOfRun(launch.result.record.run)));
@@ -1102,7 +1103,7 @@ export class Core implements CoreApi, K1Handler {
 			}
 			case "launch_info": {
 				const launch = this.#launches.get(request.args.launch);
-				return launch ? ok(launch.record) : fail("UnknownLaunch", `Launch ${request.args.launch} 不存在`);
+				return launch ? ok(launch.record) : fail("UnknownLaunch", tr(`Launch ${request.args.launch} does not exist`, `Launch ${request.args.launch} 不存在`));
 			}
 			case "start_run":
 				return ok({ run: this.#startRun(request.args.name, request.args.update_every ?? null) });
@@ -1138,10 +1139,10 @@ export class Core implements CoreApi, K1Handler {
 					if (launch.record.dirty.length > 0 && launch.deadline !== null && launch.deadline <= this.#now()) void this.#judge(launch);
 					return ok(null);
 				}
-				return fail("UnknownEvent", `事件 ${request.args.event} 不是待确认的事件`);
+				return fail("UnknownEvent", tr(`Event ${request.args.event} is not awaiting acknowledgement`, `事件 ${request.args.event} 不是待确认的事件`));
 			}
 			case "agents": {
-				if (this.#conn.agents.kind !== "pending") return fail("UnknownEvent", "没有待回答的 agents_requested");
+				if (this.#conn.agents.kind !== "pending") return fail("UnknownEvent", tr("There is no pending agents_requested response", "没有待回答的 agents_requested"));
 				this.#conn.agents = request.args.result;
 				this.#emit(null);
 				return ok(null);
@@ -1153,35 +1154,35 @@ export class Core implements CoreApi, K1Handler {
 
 	#docOf(run: RunId | undefined): Outcome<DocState> {
 		const doc = this.#docs.get(run ?? "template");
-		return doc ? ok(doc) : fail("UnknownRun", `Run ${run} 不存在`);
+		return doc ? ok(doc) : fail("UnknownRun", tr(`Run ${run} does not exist`, `Run ${run} 不存在`));
 	}
 
 	#target(run: RunId | undefined, id: BlockId, modifying: boolean): Outcome<{ doc: DocState; block: Block }> {
 		const doc = this.#docOf(run);
 		if (!doc.ok) return doc;
-		if (modifying && this.#isFinished(doc.result)) return fail("RunFinished", "Run 已结束");
+		if (modifying && this.#isFinished(doc.result)) return fail("RunFinished", tr("Run has finished", "Run 已结束"));
 		const block = this.#block(doc.result, id);
-		return block ? ok({ doc: doc.result, block }) : fail("UnknownBlock", `块 ${id} 不存在`);
+		return block ? ok({ doc: doc.result, block }) : fail("UnknownBlock", tr(`Block ${id} does not exist`, `块 ${id} 不存在`));
 	}
 
 	#held(run: RunId | undefined, id: BlockId): Outcome<{ doc: DocState; block: Block }> {
 		const target = this.#target(run, id, true);
 		if (!target.ok) return target;
 		const lock = target.result.doc.locks.get(id);
-		return lock?.kind === "coordinator" ? target : fail("NotLocked", `本连接不持有块 ${id} 的块锁`);
+		return lock?.kind === "coordinator" ? target : fail("NotLocked", tr(`This connection does not hold block ${id}'s lock`, `本连接不持有块 ${id} 的块锁`));
 	}
 
 	#blocksOf(run: RunId | undefined, blocks: readonly BlockId[]): Outcome<DocState> {
 		const doc = this.#docOf(run);
 		if (!doc.ok) return doc;
-		for (const id of blocks) if (!this.#block(doc.result, id)) return fail("UnknownBlock", `块 ${id} 不存在`);
+		for (const id of blocks) if (!this.#block(doc.result, id)) return fail("UnknownBlock", tr(`Block ${id} does not exist`, `块 ${id} 不存在`));
 		return doc;
 	}
 
 	#owned(session: string, id: LaunchId): Outcome<LaunchState> {
 		const launch = this.#launches.get(id);
-		if (!launch) return fail("UnknownLaunch", `Launch ${id} 不存在`);
-		if (launch.record.session !== session) return fail("NotOwner", `Launch ${id} 属于其他会话`);
+		if (!launch) return fail("UnknownLaunch", tr(`Launch ${id} does not exist`, `Launch ${id} 不存在`));
+		if (launch.record.session !== session) return fail("NotOwner", tr(`Launch ${id} belongs to another session`, `Launch ${id} 属于其他会话`));
 		return ok(launch);
 	}
 
@@ -1198,14 +1199,14 @@ export class Core implements CoreApi, K1Handler {
 		const found = this.#docOf(run);
 		if (!found.ok) return found;
 		const docState = found.result;
-		if (this.#isFinished(docState)) return fail("RunFinished", "Run 已结束");
-		if (blocks.length === 0) return fail("BadLaunch", "blocks 为空");
-		for (const id of blocks) if (!this.#block(docState, id)) return fail("UnknownBlock", `块 ${id} 不存在`);
+		if (this.#isFinished(docState)) return fail("RunFinished", tr("Run has finished", "Run 已结束"));
+		if (blocks.length === 0) return fail("BadLaunch", tr("blocks is empty", "blocks 为空"));
+		for (const id of blocks) if (!this.#block(docState, id)) return fail("UnknownBlock", tr(`Block ${id} does not exist`, `块 ${id} 不存在`));
 		const before = this.#rootsError(docState, blocks);
 		if (before) return fail("BadLaunch", before);
 		await this.#ensureFetched(docState, blocks);
-		if (this.#isFinished(docState)) return fail("RunFinished", "Run 已结束");
-		for (const id of blocks) if (!this.#block(docState, id)) return fail("UnknownBlock", `块 ${id} 不存在`);
+		if (this.#isFinished(docState)) return fail("RunFinished", tr("Run has finished", "Run 已结束"));
+		for (const id of blocks) if (!this.#block(docState, id)) return fail("UnknownBlock", tr(`Block ${id} does not exist`, `块 ${id} 不存在`));
 		// A disk edit may have switched a block's kind while fetching.
 		const after = this.#rootsError(docState, blocks);
 		if (after) return fail("BadLaunch", after);
@@ -1213,7 +1214,7 @@ export class Core implements CoreApi, K1Handler {
 		const bodies = this.#contents(docState);
 		const results = this.#results(keyOf(docState.ref));
 		const result = this.#launchText(docState, blocks, kind, this.#refs.compile(blocks, this.#input(docState, this.#fetches, bodies, results)));
-		if (result.kind === "Err") return fail("CompileError", "编译失败", result.error);
+		if (result.kind === "Err") return fail("CompileError", tr("Compilation failed", "编译失败"), result.error);
 		const fetchKeys = this.#refs.externalTargets(blocks, bodies).map(target => this.#refs.targetKey(target));
 		const fetches = fetchKeys.flatMap(key => {
 			const outcome = this.#fetches.get(key);
@@ -1252,10 +1253,10 @@ export class Core implements CoreApi, K1Handler {
 	/** Why `blocks` cannot be Launch roots: a design or untracked block, or an orchestration block not started alone (README §定义). */
 	#rootsError(doc: DocState, blocks: readonly BlockId[]): string | null {
 		const designs = blocks.filter(id => this.#block(doc, id)!.content.kind === "design");
-		if (designs.length > 0) return `设计块 ${designs.join(", ")} 不能直接启动：在执行块中引用它`;
+		if (designs.length > 0) return tr(`Design block${designs.length === 1 ? "" : "s"} ${designs.join(", ")} cannot be launched directly; reference the listed blocks from an execution block`, `设计块 ${designs.join(", ")} 不能直接启动：在执行块中引用它`);
 		const untracked = blocks.filter(id => this.#block(doc, id)!.progress.kind === "untracked");
-		if (untracked.length > 0) return `块 ${untracked.join(", ")} 声明为非任务块（task: false），不能启动：在执行块中引用它`;
-		if (blocks.length > 1 && this.#launchKind(doc, blocks) === "orchestration") return "编排块只能单独启动";
+		if (untracked.length > 0) return tr(`Block${untracked.length === 1 ? "" : "s"} ${untracked.join(", ")} cannot be launched directly because task: false marks the listed blocks as non-task; reference the listed blocks from an execution block`, `块 ${untracked.join(", ")} 声明为非任务块（task: false），不能启动：在执行块中引用它`);
+		if (blocks.length > 1 && this.#launchKind(doc, blocks) === "orchestration") return tr("An orchestration block must be launched alone", "编排块只能单独启动");
 		return null;
 	}
 
@@ -1272,22 +1273,22 @@ export class Core implements CoreApi, K1Handler {
 		const owned = this.#owned(session, id);
 		if (!owned.ok) return owned;
 		const launch = owned.result;
-		if (launch.record.closed !== null) return fail("BadLaunch", "Launch 已关闭");
+		if (launch.record.closed !== null) return fail("BadLaunch", tr("Launch is closed", "Launch 已关闭"));
 		const key = keyOfRun(launch.record.run);
 		const generation = launch.generation;
 		const accepted = this.#editSeq;
 		const fetches = await this.#launchFetches(launch);
 		const doc = this.#docs.get(key)!;
-		if (this.#isFinished(doc)) return fail("RunFinished", "Run 已结束");
-		if (launch.record.closed !== null) return fail("BadLaunch", "Launch 已关闭");
-		if (launch.generation !== generation) return fail("BadLaunch", "Launch 在 rebase 期间已变化，请重新 rebase");
+		if (this.#isFinished(doc)) return fail("RunFinished", tr("Run has finished", "Run 已结束"));
+		if (launch.record.closed !== null) return fail("BadLaunch", tr("Launch is closed", "Launch 已关闭"));
+		if (launch.generation !== generation) return fail("BadLaunch", tr("Launch changed during rebase; rebase again", "Launch 在 rebase 期间已变化，请重新 rebase"));
 		const missing = launch.record.blocks.filter(block => !this.#block(doc, block));
-		if (missing.length > 0) return fail("BadLaunch", `根块 ${missing.join(", ")} 已删除`);
+		if (missing.length > 0) return fail("BadLaunch", tr(`Deleted root block${missing.length === 1 ? "" : "s"} ${missing.join(", ")}`, `根块 ${missing.join(", ")} 已删除`));
 		const roots = this.#rootsError(doc, launch.record.blocks);
 		if (roots) return fail("BadLaunch", roots);
-		if (this.#launchKind(doc, launch.record.blocks) !== launch.record.kind) return fail("BadLaunch", `根块已不是${launch.record.kind === "prompt" ? "执行块" : "编排块"}：重新启动`);
+		if (this.#launchKind(doc, launch.record.blocks) !== launch.record.kind) return fail("BadLaunch", tr(`Root blocks are no longer ${launch.record.kind === "prompt" ? "execution blocks" : "orchestration blocks"}; launch again`, `根块已不是${launch.record.kind === "prompt" ? "执行块" : "编排块"}：重新启动`));
 		const result = this.#launchText(doc, launch.record.blocks, launch.record.kind, this.#refs.compile(launch.record.blocks, this.#input(doc, fetches)));
-		if (result.kind === "Err") return fail("CompileError", "编译失败", result.error);
+		if (result.kind === "Err") return fail("CompileError", tr("Compilation failed", "编译失败"), result.error);
 		launch.generation++;
 		launch.pending = null;
 		launch.judging = false;
@@ -1304,7 +1305,7 @@ export class Core implements CoreApi, K1Handler {
 	#report(run: RunId | undefined, blocks: readonly BlockId[], version: string, result: JudgeReport): Outcome<unknown> {
 		const doc = this.#blocksOf(run, blocks);
 		if (!doc.ok) return doc;
-		if (!this.#checks.validateReport(result)) return fail("BadReport", "report 的 result 不完整或越界");
+		if (!this.#checks.validateReport(result)) return fail("BadReport", tr("report's result is incomplete or out of range", "report 的 result 不完整或越界"));
 		const setKey = blocks.join(",");
 		const inspection = doc.result.inspections.get(setKey);
 		const current = this.#version(doc.result, blocks, this.#input(doc.result, this.#fetches));
@@ -1347,8 +1348,8 @@ export class Core implements CoreApi, K1Handler {
 
 	#finishRun(run: RunId): Outcome<never> | null {
 		const doc = this.#docs.get(run);
-		if (!doc?.run) return fail("UnknownRun", `Run ${run} 不存在`);
-		if (doc.run.status === "finished") return fail("RunFinished", "Run 已结束");
+		if (!doc?.run) return fail("UnknownRun", tr(`Run ${run} does not exist`, `Run ${run} 不存在`));
+		if (doc.run.status === "finished") return fail("RunFinished", tr("Run has finished", "Run 已结束"));
 		for (const launch of this.#launches.values()) if (launch.record.run === run && launch.record.closed === null) this.#closeLaunch(launch, "run_finished", "service");
 		for (const block of doc.locks.keys()) doc.locks.set(block, { kind: "none" });
 		doc.run = { ...doc.run, status: "finished", finishedAt: this.#now(), updateDue: null };
@@ -1374,13 +1375,13 @@ export class Core implements CoreApi, K1Handler {
 		if (!found.ok) return found;
 		const doc = found.result;
 		const key = keyOf(doc.ref);
-		if (kind === "retrospective" && doc.run?.status !== "finished") return fail("BadValue", "复盘只能写在已结束的 Run 中");
-		if (next !== null && (kind !== "update" || doc.run === null)) return fail("BadValue", "next 只用于 Run 的 update");
-		if (block !== null && !this.#block(doc, block)) return fail("UnknownBlock", `块 ${block} 不存在`);
+		if (kind === "retrospective" && doc.run?.status !== "finished") return fail("BadValue", tr("A retrospective can only be posted to a finished Run", "复盘只能写在已结束的 Run 中"));
+		if (next !== null && (kind !== "update" || doc.run === null)) return fail("BadValue", tr("next is only valid for a Run update", "next 只用于 Run 的 update"));
+		if (block !== null && !this.#block(doc, block)) return fail("UnknownBlock", tr(`Block ${block} does not exist`, `块 ${block} 不存在`));
 		if (launch !== null) {
 			const owner = this.#launches.get(launch);
-			if (!owner) return fail("UnknownLaunch", `Launch ${launch} 不存在`);
-			if (keyOfRun(owner.record.run) !== key) return fail("BadValue", "Launch 不属于这个文档");
+			if (!owner) return fail("UnknownLaunch", tr(`Launch ${launch} does not exist`, `Launch ${launch} 不存在`));
+			if (keyOfRun(owner.record.run) !== key) return fail("BadValue", tr("Launch does not belong to this document", "Launch 不属于这个文档"));
 		}
 		if (kind === "update" && doc.run?.status === "running") {
 			const seconds = next ?? doc.run.updateEvery;
@@ -1405,8 +1406,8 @@ export class Core implements CoreApi, K1Handler {
 
 	#snooze(run: RunId, after: number): Outcome<unknown> {
 		const doc = this.#docs.get(run);
-		if (!doc?.run) return fail("UnknownRun", `Run ${run} 不存在`);
-		if (doc.run.updateDue === null) return fail("BadValue", "没有待到期的状态更新");
+		if (!doc?.run) return fail("UnknownRun", tr(`Run ${run} does not exist`, `Run ${run} 不存在`));
+		if (doc.run.updateDue === null) return fail("BadValue", tr("There is no update due", "没有待到期的状态更新"));
 		const due = this.#now() + after * 1000;
 		this.#setDue(doc, due);
 		this.#append(run, "coordinator", { type: "update_snoozed", due });
@@ -1418,7 +1419,7 @@ export class Core implements CoreApi, K1Handler {
 
 	view(ref: DocRef): DocView {
 		const doc = this.#doc(ref);
-		if (!doc) return { ref, title: "", run: null, blocks: [], errors: [`文档不存在`] };
+		if (!doc) return { ref, title: "", run: null, blocks: [], errors: [tr("The document does not exist", "文档不存在")] };
 		const entries = this.#logs.get(keyOf(ref))?.entries ?? [];
 		// A launch request stays pending until a Launch is created from that block.
 		const pending = new Set<string>();
@@ -1432,7 +1433,7 @@ export class Core implements CoreApi, K1Handler {
 			title: doc.title,
 			run: doc.run,
 			blocks: doc.blocks.map(block => ({ block, launchPending: pending.has(block.id) })),
-			errors: doc.parseError ? [`文件不能解析：${doc.parseError}`] : [],
+			errors: doc.parseError ? [tr(`File cannot be parsed: ${doc.parseError}`, `文件不能解析：${doc.parseError}`)] : [],
 		};
 	}
 
@@ -1483,14 +1484,14 @@ export class Core implements CoreApi, K1Handler {
 			const now = this.#conn;
 			if (asked !== this.#agentsAsked || !now || now.session === null) return;
 			if (now.agents.kind !== "pending" && now.agents.kind !== "unasked") return;
-			now.agents = { kind: "unavailable", reason: "协调者没有回答：它加载的 omp-playbooks 早于这个功能，重启协调者会话后再试" };
+			now.agents = { kind: "unavailable", reason: tr("The coordinator did not answer: its omp-playbooks predates this feature; restart the coordinator session and try again", "协调者没有回答：它加载的 omp-playbooks 早于这个功能，重启协调者会话后再试") };
 			this.#emit(null);
 		}, AGENTS_WAIT_MS);
 	}
 
 	async focusCoordinator(): Promise<string | null> {
 		const pane = this.#conn?.pane ?? null;
-		if (pane === null) return "协调者没有给出它的 pane";
+		if (pane === null) return tr("The coordinator did not provide its pane", "协调者没有给出它的 pane");
 		const result = await this.#panes.focusPane(pane);
 		return result.ok ? null : this.#k5Error(result.error);
 	}
@@ -1520,10 +1521,10 @@ export class Core implements CoreApi, K1Handler {
 
 	#humanTarget(ref: DocRef, id: BlockId): { doc: DocState; block: Block } | string {
 		const doc = this.#doc(ref);
-		if (!doc) return "文档不存在";
-		if (this.#isFinished(doc)) return "Run 已结束";
+		if (!doc) return tr("The document does not exist", "文档不存在");
+		if (this.#isFinished(doc)) return tr("Run has finished", "Run 已结束");
 		const block = this.#block(doc, id);
-		return block ? { doc, block } : `块 ${id} 不存在`;
+		return block ? { doc, block } : tr(`Block ${id} does not exist`, `块 ${id} 不存在`);
 	}
 
 	/**
@@ -1540,17 +1541,17 @@ export class Core implements CoreApi, K1Handler {
 
 	/** The block's progress with `status`, or why a block of its kind cannot have it. */
 	#statusProgress(block: Block, status: Status): Progress | string {
-		if (block.progress.kind === "untracked") return `块 ${block.id} 声明为非任务块（task: false），没有状态`;
-		if (block.content.kind === "design" && status === "running") return "设计块不会执行中";
+		if (block.progress.kind === "untracked") return tr(`Block ${block.id} is declared as a non-task block (task: false) and has no status`, `块 ${block.id} 声明为非任务块（task: false），没有状态`);
+		if (block.content.kind === "design" && status === "running") return tr("A design block cannot be running", "设计块不会执行中");
 		return { ...block.progress, status };
 	}
 
 	edit(ref: DocRef, id: BlockId, field: HumanField, expected: string, text: string): string | null {
 		const target = this.#humanTarget(ref, id);
 		if (typeof target === "string") return target;
-		if (!humanFieldValid(target.block.content, field)) return target.block.content.kind === "task" ? "执行块没有这个字段" : "设计稿由协调者修改：请写修改要求";
+		if (!humanFieldValid(target.block.content, field)) return target.block.content.kind === "task" ? tr("An execution block does not have this field", "执行块没有这个字段") : tr("The design draft is edited by the coordinator; write a change request", "设计稿由协调者修改：请写修改要求");
 		const current = fieldText(target.block, field)!;
-		if (current !== expected) return "内容在你编辑时已被修改，请在最新内容上重新编辑";
+		if (current !== expected) return tr("The content changed while you were editing; edit the latest content again", "内容在你编辑时已被修改，请在最新内容上重新编辑");
 		if (current === text) return null;
 		this.#takeBack(target.doc, id);
 		this.#applyEdit(target.doc, "human", { kind: "field", block: id, field, text });
@@ -1559,9 +1560,9 @@ export class Core implements CoreApi, K1Handler {
 
 	setTitle(ref: DocRef, expected: string, text: string): string | null {
 		const doc = this.#doc(ref);
-		if (!doc) return "文档不存在";
-		if (this.#isFinished(doc)) return "Run 已结束";
-		if (doc.title !== expected) return "标题在你编辑时已被修改，请在最新内容上重新编辑";
+		if (!doc) return tr("The document does not exist", "文档不存在");
+		if (this.#isFinished(doc)) return tr("Run has finished", "Run 已结束");
+		if (doc.title !== expected) return tr("The title changed while you were editing; edit the latest title again", "标题在你编辑时已被修改，请在最新内容上重新编辑");
 		if (doc.title === text) return null;
 		doc.title = text;
 		this.#scheduleWrite(doc);
@@ -1573,9 +1574,9 @@ export class Core implements CoreApi, K1Handler {
 	requestRevision(ref: DocRef, id: BlockId, prompt: string): string | null {
 		const target = this.#humanTarget(ref, id);
 		if (typeof target === "string") return target;
-		if (target.block.content.kind !== "design") return "只有设计块接受修改要求";
-		if (prompt.trim() === "") return "修改要求是空的";
-		if (!this.#conn || this.#conn.session === null) return "协调者离线，修改要求没有发出";
+		if (target.block.content.kind !== "design") return tr("Only design blocks accept change requests", "只有设计块接受修改要求");
+		if (prompt.trim() === "") return tr("The change request is empty", "修改要求是空的");
+		if (!this.#conn || this.#conn.session === null) return tr("The coordinator is offline; the change request was not sent", "协调者离线，修改要求没有发出");
 		const doc = target.doc;
 		const revision: Revision = { seq: (doc.revisions.at(-1)?.seq ?? 0) + 1, at: this.#now(), block: id, prompt };
 		this.#store.appendRevision(doc.ref, revision);
@@ -1599,7 +1600,7 @@ export class Core implements CoreApi, K1Handler {
 	setAgent(ref: DocRef, id: BlockId, agent: string | null): string | null {
 		const target = this.#humanTarget(ref, id);
 		if (typeof target === "string") return target;
-		if (target.block.content.kind !== "task") return "设计块没有执行配置";
+		if (target.block.content.kind !== "task") return tr("A design block has no execution configuration", "设计块没有执行配置");
 		const name = agent?.trim() || undefined;
 		if (name === target.block.content.agent) return null;
 		this.#takeBack(target.doc, id);
@@ -1610,7 +1611,7 @@ export class Core implements CoreApi, K1Handler {
 	setIsolated(ref: DocRef, id: BlockId, isolated: boolean): string | null {
 		const target = this.#humanTarget(ref, id);
 		if (typeof target === "string") return target;
-		if (target.block.content.kind !== "task") return "设计块没有执行配置";
+		if (target.block.content.kind !== "task") return tr("A design block has no execution configuration", "设计块没有执行配置");
 		this.#takeBack(target.doc, id);
 		this.#applyEdit(target.doc, "human", { kind: "config", block: id, config: { ...taskConfig(target.block.content), isolated } });
 		return null;
@@ -1626,14 +1627,14 @@ export class Core implements CoreApi, K1Handler {
 
 	requestLaunch(ref: DocRef, blocks: readonly BlockId[]): string | null {
 		const doc = this.#doc(ref);
-		if (!doc) return "文档不存在";
-		if (this.#isFinished(doc)) return "Run 已结束";
-		if (blocks.length === 0) return "没有选中的块";
+		if (!doc) return tr("The document does not exist", "文档不存在");
+		if (this.#isFinished(doc)) return tr("Run has finished", "Run 已结束");
+		if (blocks.length === 0) return tr("No blocks are selected", "没有选中的块");
 		const missing = blocks.filter(id => !this.#block(doc, id));
-		if (missing.length > 0) return `块 ${missing.join(", ")} 不存在`;
+		if (missing.length > 0) return tr(`Block${missing.length === 1 ? "" : "s"} ${missing.join(", ")} not found`, `块 ${missing.join(", ")} 不存在`);
 		const roots = this.#rootsError(doc, blocks);
 		if (roots) return roots;
-		return this.#send({ event: "launch_requested", data: { ...runField(doc), blocks: [...blocks] } }) ? null : "协调者离线，请求没有发出";
+		return this.#send({ event: "launch_requested", data: { ...runField(doc), blocks: [...blocks] } }) ? null : tr("The coordinator is offline; the request was not sent", "协调者离线，请求没有发出");
 	}
 
 	requestStop(ref: DocRef, id: BlockId): string | null {
@@ -1645,15 +1646,15 @@ export class Core implements CoreApi, K1Handler {
 			.map(launch => ({ id: launch.record.id, agents: launch.record.agents }));
 		// Nothing is executing for this block: the running status is all there is to stop.
 		if (launches.length === 0) return this.setStatus(ref, id, "todo");
-		return this.#send({ event: "stop_requested", data: { ...runField(target.doc), block: id, launches } }) ? null : "协调者离线，请求没有发出";
+		return this.#send({ event: "stop_requested", data: { ...runField(target.doc), block: id, launches } }) ? null : tr("The coordinator is offline; the request was not sent", "协调者离线，请求没有发出");
 	}
 
 	saveImage(bytes: Uint8Array, mimeType: string): { readonly ok: true; readonly path: string } | { readonly ok: false; readonly error: string } {
 		const extension = IMAGE_EXTENSIONS[mimeType];
-		if (!extension) return { ok: false, error: `剪贴板里的图片格式 ${mimeType} 不能显示` };
-		if (bytes.byteLength > MAX_IMAGE_BYTES) return { ok: false, error: `图片超过 ${MAX_IMAGE_BYTES / 1024 / 1024} MiB，卡片显示不了` };
+		if (!extension) return { ok: false, error: tr(`The clipboard image format ${mimeType} cannot be displayed`, `剪贴板里的图片格式 ${mimeType} 不能显示`) };
+		if (bytes.byteLength > MAX_IMAGE_BYTES) return { ok: false, error: tr(`The image exceeds ${MAX_IMAGE_BYTES / 1024 / 1024} MiB and cannot be shown in the card`, `图片超过 ${MAX_IMAGE_BYTES / 1024 / 1024} MiB，卡片显示不了`) };
 		try { return { ok: true, path: this.#store.saveAsset(bytes, extension) }; }
-		catch (error) { return { ok: false, error: `图片没有存下：${error instanceof Error ? error.message : String(error)}` }; }
+		catch (error) { return { ok: false, error: tr(`The image could not be saved: ${error instanceof Error ? error.message : String(error)}`, `图片没有存下：${error instanceof Error ? error.message : String(error)}`) }; }
 	}
 }
 

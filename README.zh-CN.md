@@ -64,6 +64,16 @@ bun src/service/main.ts /绝对路径/playbook.yaml
 
 这些命令和 `playbook_*` 工具只注册在主会话，subagent 看不到它们。
 
+## 语言
+
+面板及其提示和组件诊断、协调者收到的通知和工具错误、subagent 读到的启动 prompt 尾注、Tern 命令，都可以是英文或中文。每个进程在启动时选定语言：
+
+1. `OMP_PLAYBOOKS_LANG=en` 或 `OMP_PLAYBOOKS_LANG=zh`（其他值忽略）；
+2. 否则看 `LC_ALL`、`LC_MESSAGES`、`LANG` 中第一个非空的：以 `zh` 开头为中文，其他都是英文；
+3. 都没有时为英文。
+
+扩展用自己的语言启动文档服务和新的协调者会话，所以它们和打开它们的 omp 会话一致。手动启动的服务、从面板接入的已有 omp 会话和 Tern 命令，用各自环境里的语言；Tern 命令读的是 Tern 应用的环境，可能不包含 shell profile 里的设置。在启动 omp 的地方设置这个变量（例如 shell profile），再重启 omp 和 Playbook 面板：运行中的进程不会换语言。模型读到的工具说明两种语言下都是英文；Playbook 里已有的文字不会被翻译。
+
 ## 文件与块
 
 下面保存成 `playbook.yaml` 即可打开；不需要网络、外部文件或 `am` CLI：

@@ -1,3 +1,4 @@
+import { tr } from "../../i18n";
 import type { TspNode } from "../tsp-types";
 import { diagnostic, takeMarker, type Change, type ChangeView, type DraftDiagnostic, type FenceInput, type Parsed, type RenderContext, type Rendered } from "./contract";
 import { escapeXml, inlineSpans, plainText, textWidth, wrapText, type Span } from "./text";
@@ -45,7 +46,7 @@ export function parseTree(input: FenceInput): Parsed<TreeSpec> {
 		const inherited = parent?.change === "added" || parent?.change === "removed" ? parent.change : "same";
 		if (inherited !== "same" && marker.change !== "same" && marker.change !== inherited) {
 			const symbol = inherited === "added" ? "+" : "-";
-			diagnostics.push(diagnostic("tree", input.line + index, `子节点与父节点的 ${symbol} 标记冲突；删除子节点标记，例如：${label}，或移到该父节点之外。`));
+			diagnostics.push(diagnostic("tree", input.line + index, tr(`A child node's ${symbol} marker conflicts with its parent; remove the child marker, e.g. ${label}, or move it outside that parent.`, `子节点与父节点的 ${symbol} 标记冲突；删除子节点标记，例如：${label}，或移到该父节点之外。`)));
 		}
 		const node: BuildingItem = {
 			line: input.line + index,
@@ -59,7 +60,7 @@ export function parseTree(input: FenceInput): Parsed<TreeSpec> {
 		(parent ? parent.children : roots).push(node);
 		stack.push(node);
 	}
-	if (!roots.length) diagnostics.push(diagnostic("tree", input.line, "树至少需要一个节点，例如：Root。"));
+	if (!roots.length) diagnostics.push(diagnostic("tree", input.line, tr("A tree needs at least one node, e.g. Root.", "树至少需要一个节点，例如：Root。")));
 	if (diagnostics.length) return { ok: false, diagnostics };
 	const close = (node: BuildingItem): TreeItem => ({ line: node.line, label: node.label, note: node.note, highlight: node.highlight, change: node.change, children: node.children.map(close) });
 	const list = /\blist\b/.test(input.args);
@@ -115,9 +116,9 @@ function countRow(spec: TreeSpec, ctx: RenderContext): TspNode {
 	spec.roots.forEach(visit);
 	return {
 		id: `${ctx.id}.counts`, k: "row", p: { gap: 12 }, c: [
-			{ id: `${ctx.id}.count.added`, k: "badge", p: { text: `+ ${counts.added} 新增`, tone: "success" } },
-			{ id: `${ctx.id}.count.removed`, k: "badge", p: { text: `− ${counts.removed} 删除`, tone: "muted" } },
-			{ id: `${ctx.id}.count.changed`, k: "badge", p: { text: `~ ${counts.changed} 修改`, tone: "warning" } },
+			{ id: `${ctx.id}.count.added`, k: "badge", p: { text: tr(`+ ${counts.added} added`, `+ ${counts.added} 新增`), tone: "success" } },
+			{ id: `${ctx.id}.count.removed`, k: "badge", p: { text: tr(`− ${counts.removed} removed`, `− ${counts.removed} 删除`), tone: "muted" } },
+			{ id: `${ctx.id}.count.changed`, k: "badge", p: { text: tr(`~ ${counts.changed} changed`, `~ ${counts.changed} 修改`), tone: "warning" } },
 		],
 	};
 }

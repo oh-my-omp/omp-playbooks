@@ -1,9 +1,9 @@
 import { parseBlockId } from "../domain/model";
 import type { BlockContent, BlockId, CompileInput, CompileResult, ErrorSite, ExternalTarget, IssueValue, Reference, Selector, Source, Target } from "../domain/model";
+import { tr } from "../i18n";
 import { panelText, replacePanel } from "./draft/document";
-import { resolveSlots } from "./draft/slot";
 import type { ReferencesModule } from "../domain/ports";
-
+import { resolveSlots } from "./draft/slot";
 type Span = { start: number; end: number };
 type Selection = { ok: true; text: string } | { ok: false; reason: string };
 type ParsedExpression = { ok: true; selectors: readonly Selector[] } | { ok: false; reason: string };
@@ -167,7 +167,7 @@ function parseExpression(expression: string | null): ParsedExpression {
 		} else if (character === '"') quoted = true;
 		else if (character === ",") { tokens.push(expression.slice(start, index).trim()); start = index + 1; }
 	}
-	if (quoted) return { ok: false, reason: "Unclosed section title" };
+	if (quoted) return { ok: false, reason: tr("Unclosed section title", "未闭合的章节标题") };
 	tokens.push(expression.slice(start).trim());
 	const selectors: Selector[] = [];
 	for (const token of tokens) {
@@ -178,14 +178,14 @@ function parseExpression(expression: string | null): ParsedExpression {
 		if (range) {
 			const from = Number(range[2]);
 			const to = Number(range[3]);
-			if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from > to) return { ok: false, reason: `Invalid range: ${token}` };
+			if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from > to) return { ok: false, reason: tr(`Invalid range: ${token}`, `范围无效：${token}`) };
 			selectors.push({ kind: range[1] === "lines" ? "lines" : "commentsRange", from, to });
 			continue;
 		}
 		const last = /^comments\(\s*-([1-9][0-9]*)\s*\)$/.exec(token);
 		if (last) {
 			const count = Number(last[1]);
-			if (!Number.isSafeInteger(count)) return { ok: false, reason: `Invalid count: ${token}` };
+			if (!Number.isSafeInteger(count)) return { ok: false, reason: tr(`Invalid count: ${token}`, `数量无效：${token}`) };
 			selectors.push({ kind: "commentsLast", count });
 			continue;
 		}
@@ -196,7 +196,7 @@ function parseExpression(expression: string | null): ParsedExpression {
 				if (typeof heading === "string") { selectors.push({ kind: "section", heading }); continue; }
 			} catch { /* Malformed quoted titles are expression errors. */ }
 		}
-		return { ok: false, reason: `Unknown selector: ${token}` };
+		return { ok: false, reason: tr(`Unknown selector: ${token}`, `未知选择器：${token}`) };
 	}
 	return { ok: true, selectors };
 }
@@ -222,7 +222,7 @@ function sectionText(text: string, heading: string): Selection {
 		offset += line.length + 1;
 	}
 	const index = headings.findIndex(candidate => candidate.title === heading);
-	if (index < 0) return { ok: false, reason: `Section not found: ${heading}` };
+	if (index < 0) return { ok: false, reason: tr(`Section not found: ${heading}`, `未找到章节：${heading}`) };
 	const selected = headings[index]!;
 	const next = headings.slice(index + 1).find(candidate => candidate.level <= selected.level);
 	return { ok: true, text: lines.slice(selected.end, next?.line ?? lines.length).join("\n") };
@@ -235,7 +235,7 @@ function selectText(text: string, selectors: readonly Selector[]): Selection {
 		switch (selector.kind) {
 			case "lines": {
 				const lines = text.split("\n");
-				if (selector.to > lines.length) return { ok: false, reason: "Line range out of bounds" };
+				if (selector.to > lines.length) return { ok: false, reason: tr("Line range out of bounds", "行范围超出边界") };
 				selected.push(lines.slice(selector.from - 1, selector.to).join("\n"));
 				break;
 			}
@@ -246,7 +246,7 @@ function selectText(text: string, selectors: readonly Selector[]): Selection {
 				break;
 			}
 			case "title": case "body": case "comments": case "commentsLast": case "commentsRange": case "requirement": case "design": case "panel":
-				return { ok: false, reason: `Selector ${selector.kind} is invalid for text targets` };
+				return { ok: false, reason: tr(`Selector ${selector.kind} is invalid for text targets`, `选择器 ${selector.kind} 对文本目标无效`) };
 		}
 	}
 	return { ok: true, text: selected.join("\n\n") };
@@ -263,14 +263,14 @@ function selectIssue(issue: IssueValue, selectors: readonly Selector[]): Selecti
 			case "body": selected.push(issue.body); break;
 			case "comments": selected.push(format(comments)); break;
 			case "commentsLast":
-				if (selector.count > comments.length) return { ok: false, reason: "Comment count out of bounds" };
+				if (selector.count > comments.length) return { ok: false, reason: tr("Comment count out of bounds", "评论数量超出边界") };
 				selected.push(format(comments.slice(-selector.count)));
 				break;
 			case "commentsRange":
-				if (selector.to > comments.length) return { ok: false, reason: "Comment range out of bounds" };
+				if (selector.to > comments.length) return { ok: false, reason: tr("Comment range out of bounds", "评论范围超出边界") };
 				selected.push(format(comments.slice(selector.from - 1, selector.to)));
 				break;
-			case "lines": case "section": case "requirement": case "design": case "panel": return { ok: false, reason: `Selector ${selector.kind} is invalid for issue targets` };
+			case "lines": case "section": case "requirement": case "design": case "panel": return { ok: false, reason: tr(`Selector ${selector.kind} is invalid for issue targets`, `选择器 ${selector.kind} 对 issue 目标无效`) };
 		}
 	}
 	return { ok: true, text: selected.join("\n\n") };
@@ -333,7 +333,7 @@ function selectDesign(written: Extract<BlockContent, { kind: "design" }>, select
 				break;
 			}
 			case "lines": case "section": case "title": case "body": case "comments": case "commentsLast": case "commentsRange":
-				return { ok: false, reason: `Selector ${selector.kind} is invalid for design blocks` };
+				return { ok: false, reason: tr(`Selector ${selector.kind} is invalid for design blocks`, `选择器 ${selector.kind} 对设计块无效`) };
 		}
 	}
 	return { ok: true, text: selected.join("\n\n") };
@@ -380,8 +380,8 @@ function compiler(input: CompileInput) {
 			}
 			case "file": case "issue": case "pull": {
 				const fetched = input.fetches.get(key);
-				if (!fetched || !fetched.ok) return { kind: "Err", error: { kind: "FetchFailed", target: key, error: fetched?.error ?? "Target is absent from the fetch table", at } };
-				if ((target.kind === "file") !== (fetched.value.kind === "file")) return { kind: "Err", error: { kind: "FetchFailed", target: key, error: "Fetched value does not match target kind", at } };
+				if (!fetched || !fetched.ok) return { kind: "Err", error: { kind: "FetchFailed", target: key, error: fetched?.error ?? tr("Target is absent from the fetch table", "目标不在 fetch 表中"), at } };
+				if ((target.kind === "file") !== (fetched.value.kind === "file")) return { kind: "Err", error: { kind: "FetchFailed", target: key, error: tr("Fetched value does not match target kind", "获取的值与目标类型不匹配"), at } };
 				const selected = fetched.value.kind === "file" ? selectText(fetched.value.text, expression.selectors) : selectIssue(fetched.value.issue, expression.selectors);
 				if (!selected.ok) return badExpression(at, selected.reason);
 				sources.push({ kind: "external", target: key, expression: reference.expressionText, fetchedAt: fetched.at });

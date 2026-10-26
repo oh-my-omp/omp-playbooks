@@ -11,6 +11,7 @@
 //
 // `=` is the current value, `*` the recommended option, `-` another option and `~` an option offered
 // earlier (a value someone picked or wrote before).
+import { tr } from "../../i18n";
 import { diagnostic, type DraftDiagnostic, type FenceInput, type Parsed } from "./contract";
 import { fences } from "./document";
 
@@ -34,7 +35,7 @@ const USE = /\{\{([^{}\n]+?)\}\}/g;
 export function parseSlot(input: FenceInput): Parsed<SlotDecl> {
 	const diagnostics: DraftDiagnostic[] = [];
 	const name = input.args.trim();
-	if (!name || /[{}|]/.test(name)) return { ok: false, diagnostics: [diagnostic("slot", Math.max(1, input.line - 1), "槽位需要名称，写在围栏行：```slot 名称（不含 { } |）")] };
+	if (!name || /[{}|]/.test(name)) return { ok: false, diagnostics: [diagnostic("slot", Math.max(1, input.line - 1), tr("Slot needs a name on the fence line: ```slot name (without { } |)", "槽位需要名称，写在围栏行：```slot 名称（不含 { } |）"))] };
 	let value: string | null = null;
 	const options: SlotOption[] = [];
 	input.lines.forEach((raw, index) => {
@@ -44,21 +45,21 @@ export function parseSlot(input: FenceInput): Parsed<SlotDecl> {
 		const marker = text[0];
 		const rest = text.slice(1).trim();
 		if (marker === "=") {
-			if (value !== null) diagnostics.push(diagnostic("slot", line, "当前值只能写一行 = 值"));
+			if (value !== null) diagnostics.push(diagnostic("slot", line, tr("The current value may be written on only one line: = value", "当前值只能写一行 = 值")));
 			else value = rest;
 			return;
 		}
 		if (marker !== "*" && marker !== "-" && marker !== "~") {
-			diagnostics.push(diagnostic("slot", line, "每行以 = 当前值、* 建议项、- 选项 或 ~ 曾提出的选项 开头"));
+			diagnostics.push(diagnostic("slot", line, tr("Each line must start with = current value, * recommended option, - option, or ~ previously offered option", "每行以 = 当前值、* 建议项、- 选项 或 ~ 曾提出的选项 开头")));
 			return;
 		}
 		const [label = "", note = ""] = rest.split("|").map(part => part.trim());
-		if (!label) { diagnostics.push(diagnostic("slot", line, "选项需要名称：写成 - 名称 | 说明")); return; }
+		if (!label) { diagnostics.push(diagnostic("slot", line, tr("An option needs a name: write - name | note", "选项需要名称：写成 - 名称 | 说明"))); return; }
 		// A repeated option adds nothing: the first one stays, and the slot still works.
-		if (options.some(option => option.label === label)) { diagnostics.push(diagnostic("slot", line, `选项 ${label} 重复，只保留第一次出现`, "warning")); return; }
+		if (options.some(option => option.label === label)) { diagnostics.push(diagnostic("slot", line, tr(`Option ${label} is repeated; keep the first occurrence`, `选项 ${label} 重复，只保留第一次出现`), "warning")); return; }
 		options.push({ label, note, kind: marker === "*" ? "recommended" : marker === "-" ? "option" : "past" });
 	});
-	if (value === null) diagnostics.push(diagnostic("slot", input.line, "槽位需要当前值：写一行 = 值"));
+	if (value === null) diagnostics.push(diagnostic("slot", input.line, tr("A slot needs a current value: write one line = value", "槽位需要当前值：写一行 = 值")));
 	if (value === null || diagnostics.some(found => found.severity === "error")) return { ok: false, diagnostics };
 	return { ok: true, value: { name, value, options, line: input.line }, diagnostics };
 }
@@ -72,7 +73,7 @@ export function parseSlots(text: string): { readonly slots: ReadonlyMap<string, 
 		if (fence.name !== "slot") { code.push(fence.span); continue; }
 		const parsed = parseSlot(fence.input);
 		if (!parsed.ok) continue;
-		if (slots.has(parsed.value.name)) diagnostics.push(diagnostic("slot", fence.line, `槽位 ${parsed.value.name} 重复声明`));
+		if (slots.has(parsed.value.name)) diagnostics.push(diagnostic("slot", fence.line, tr(`Slot ${parsed.value.name} is declared more than once`, `槽位 ${parsed.value.name} 重复声明`)));
 		else slots.set(parsed.value.name, parsed.value);
 	}
 	for (const match of text.matchAll(/`[^`\n]+`/g)) code.push({ start: match.index, end: match.index + match[0].length });
@@ -80,7 +81,7 @@ export function parseSlots(text: string): { readonly slots: ReadonlyMap<string, 
 		const name = match[1]!.trim();
 		// `{{…}}` in code is the code's own syntax (a Go or Docker template), not a slot left undeclared.
 		if (slots.has(name) || code.some(range => match.index >= range.start && match.index < range.end)) continue;
-		diagnostics.push(diagnostic("slot", text.slice(0, match.index).split("\n").length, `{{${name}}} 没有对应的 slot 声明`, "warning"));
+		diagnostics.push(diagnostic("slot", text.slice(0, match.index).split("\n").length, tr(`{{${name}}} has no corresponding slot declaration`, `{{${name}}} 没有对应的 slot 声明`), "warning"));
 	}
 	return { slots, diagnostics };
 }
@@ -127,7 +128,7 @@ export function setSlotValue(text: string, name: string, value: string): string 
 	if (current >= 0) lines[current] = `= ${value}`;
 	else lines.unshift(`= ${value}`);
 	const known = parsed.ok && parsed.value.options.some(option => option.label === value);
-	if (!known && !value.includes("|") && value.trim()) lines.push(`~ ${value} | 自定义`);
+	if (!known && !value.includes("|") && value.trim()) lines.push(tr(`~ ${value} | Custom`, `~ ${value} | 自定义`));
 	const body = lines.join("\n");
 	const { start, end } = fence.input.body;
 	// An empty body has no line to replace: the new lines go in with their own line break.

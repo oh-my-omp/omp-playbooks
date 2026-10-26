@@ -9,6 +9,7 @@ import { K1Client, type Reply } from "./client";
 import { splitPane } from "../service/panes";
 import { ensureTernPlugin, type TernPluginState } from "./tern-setup";
 import { availableAgents } from "./agents";
+import { tr, withLanguage } from "../i18n";
 import { listenPane, type PaneListener } from "./pane-listener";
 
 /** A block body that is one fenced js/py code block is an orchestration block (launch-events.md §1). */
@@ -18,8 +19,8 @@ const ORCHESTRATION = /^\s*```(js|py)\s*\n([\s\S]*)\n```\s*$/;
 function ternNotice(state: TernPluginState): { readonly text: string; readonly level: "info" | "warning" } | null {
 	switch (state.kind) {
 		case "current": return null;
-		case "reloaded": return { text: `omp-playbooks: Tern 插件已从 ${state.from ?? "未加载"} 重新加载为 ${state.to}`, level: "info" };
-		case "stale": return { text: `omp-playbooks: Tern 仍在运行插件 ${state.loaded ?? "未加载"}，磁盘上是 ${state.wanted}；手动执行 \`tern plugin reload\` 查看原因。\n${state.detail}`, level: "warning" };
+		case "reloaded": return { text: tr(`omp-playbooks: Tern plugin reloaded from ${state.from ?? "not loaded"} to ${state.to}`, `omp-playbooks: Tern 插件已从 ${state.from ?? "未加载"} 重新加载为 ${state.to}`), level: "info" };
+		case "stale": return { text: tr(`omp-playbooks: Tern is still running plugin ${state.loaded ?? "not loaded"}; the disk has ${state.wanted}; run \`tern plugin reload\` manually to see why.\n${state.detail}`, `omp-playbooks: Tern 仍在运行插件 ${state.loaded ?? "未加载"}，磁盘上是 ${state.wanted}；手动执行 \`tern plugin reload\` 查看原因。\n${state.detail}`), level: "warning" };
 		default: { const unreachable: never = state; return unreachable; }
 	}
 }
@@ -28,13 +29,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const ternState = await ensureTernPlugin();
 	const z = pi.zod;
 	const block = z.string().regex(/^b[1-9][0-9]*$/).transform(value => {
-		const id = parseBlockId(value); if (id === null) throw new Error("Invalid block id"); return id;
+		const id = parseBlockId(value); if (id === null) throw new Error(tr("Invalid block id", "块 id 无效")); return id;
 	});
 	const run = z.string().regex(/^r[1-9][0-9]*$/).transform(value => {
-		const id = parseRunId(value); if (id === null) throw new Error("Invalid Run id"); return id;
+		const id = parseRunId(value); if (id === null) throw new Error(tr("Invalid Run id", "Run id 无效")); return id;
 	});
 	const launch = z.string().regex(/^l[1-9][0-9]*$/).transform(value => {
-		const id = parseLaunchId(value); if (id === null) throw new Error("Invalid Launch id"); return id;
+		const id = parseLaunchId(value); if (id === null) throw new Error(tr("Invalid Launch id", "Launch id 无效")); return id;
 	});
 	const kind = z.enum(["update", "result", "failure", "retrospective"]);
 	/** A task block's default agent, as K1 stores it: trimmed and not blank. */
@@ -145,15 +146,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	async function documentFor(file: string | undefined): Promise<string> {
 		if (file !== undefined) {
 			try { return await realpath(file); }
-			catch { throw new Error(`NoService: cannot resolve Playbook ${file}`); }
+			catch { throw new Error(tr(`NoService: cannot resolve Playbook ${file}`, `NoService：无法解析 Playbook ${file}`)); }
 		}
 		const connected = [...clients.entries()].filter(([, client]) => client.connected).map(([path]) => path);
 		if (connected.length === 1) return connected[0]!;
-		throw new Error(connected.length === 0 ? "NoService: no Playbook is open in this session; pass doc or call playbook_open first" : `NoService: several Playbooks are open (${connected.join(", ")}); pass doc`);
+		throw new Error(connected.length === 0
+			? tr("NoService: no Playbook is open in this session; pass doc or call playbook_open first", "NoService：本会话没有打开的 Playbook；请传入 doc 或先调用 playbook_open")
+			: tr(`NoService: several Playbooks are open (${connected.join(", ")}); pass doc`, `NoService：打开了多个 Playbook（${connected.join("、")}）；请传入 doc`));
 	}
 
 	async function clientFor(absolute: string, ctx: ExtensionContext): Promise<K1Client> {
-		if (stopped) throw new Error("Disconnected: coordinator session has ended");
+		if (stopped) throw new Error(tr("Disconnected: coordinator session has ended", "Disconnected：协调者会话已结束"));
 		const currentSession = ctx.sessionManager.getSessionId();
 		if (session !== undefined && session !== currentSession) {
 			for (const client of clients.values()) client.close();
@@ -196,15 +199,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		const ready = await client.connect();
 		if (ready.ok || ready.error.code !== "NoService") return ready;
 		const pane = process.env.TERN_PANE;
-		if (!pane) return startFailed("omp is not running in a Tern pane hosted by the session daemon (no TERN_PANE), so it cannot open the document service beside this session. Start it yourself in a Tern pane with `bun " + serviceEntry + " <playbook.yaml>`, then call playbook_open again from this session to connect");
-		const split = await splitPane(pane, dirname(absolute), ["bun", serviceEntry, absolute]);
+		if (!pane) return startFailed(tr(`omp is not running in a Tern pane hosted by the session daemon (no TERN_PANE), so it cannot open the document service beside this session. Start it yourself in a Tern pane with \`bun ${serviceEntry} <playbook.yaml>\`, then call playbook_open again from this session to connect`, `omp 未运行在 session daemon 托管的 Tern 面板中（没有 TERN_PANE），因此无法在本会话旁打开文档服务。请在 Tern 面板中自行运行 \`bun ${serviceEntry} <playbook.yaml>\`，然后从本会话再次调用 playbook_open 进行连接`));
+		const split = await splitPane(pane, dirname(absolute), withLanguage(["bun", serviceEntry, absolute]));
 		if (!split.ok) return startFailed(split.error);
 		const deadline = Date.now() + OPEN_WAIT_MS;
 		for (;;) {
 			await Bun.sleep(250);
 			const next = await client.connect();
 			if (next.ok || next.error.code !== "NoService") return next;
-			if (Date.now() >= deadline) return startFailed(`The document service in Tern pane ${split.pane} did not listen within ${OPEN_WAIT_MS / 1000} s; its pane shows why`);
+			if (Date.now() >= deadline) return startFailed(tr(`The document service in Tern pane ${split.pane} did not listen within ${OPEN_WAIT_MS / 1000} s; its pane shows why`, `Tern 面板 ${split.pane} 中的文档服务在 ${OPEN_WAIT_MS / 1000} 秒内没有监听；原因见该面板`));
 		}
 	}
 
@@ -218,7 +221,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		const changed = await client.request(change);
 		if (change.op !== "delete") await client.request({ op: "unlock", args: { ...scope, request: lockId } });
 		if (!changed.ok && changed.error.code === "NotLocked") {
-			return { ...changed, error: { ...changed.error, message: "The person took this block back (interrupt) before the change landed; nothing was applied. Read the block again before deciding whether to edit it." } };
+			return { ...changed, error: { ...changed.error, message: tr("The person took this block back (interrupt) before the change landed; nothing was applied. Read the block again before deciding whether to edit it.", "人在变更生效前通过打断收回了此块；没有应用任何修改。重新读取该块后再决定是否编辑。") } };
 		}
 		return changed;
 	}
@@ -242,19 +245,19 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	type Tool<T> = { readonly name: string; readonly label: string; readonly description: string; readonly parameters: { parse(value: unknown): T }; run(params: T, ctx: ExtensionContext): Promise<Reply> };
 	const tools = [
 		{
-			name: "playbook_open", label: "Playbook: open", parameters: openParams,
+			name: "playbook_open", label: tr("Playbook: open", "Playbook: 打开"), parameters: openParams,
 			description: `${overview} ${format} ${order} ${evalHelp} playbook_open {doc} connects this session to the Playbook file, opening its document service in a new Tern pane beside this session when none runs; this session then is the Playbook's coordinator. Result: the template's block ids and the Runs.`,
 			run: (params, ctx) => open(params.doc, ctx),
 		} satisfies Tool<{ doc: string }>,
 		{
-			name: "playbook_read", label: "Playbook: read", parameters: readParams,
+			name: "playbook_read", label: tr("Playbook: read", "Playbook: 读取"), parameters: readParams,
 			description: "Read a Playbook's committed blocks: all blocks `{title, blocks}` (with the Run's state when `run` is given) or one `block`; each block has `kind` task (body) or design (requirement, design). Omit `run` for the template. No lock needed. op revisions {block?, after?} returns the person's change requests for design blocks `{revisions: [{seq, at, block, prompt}]}` — they are not part of a normal read; query them when a revision_requested notice arrives or you need the history.",
 			run: (params, ctx) => "op" in params
 				? request(params.doc, ctx, { op: "revisions", args: { ...scoped(params.run), ...(params.block ? { block: params.block } : {}), ...(params.after !== undefined ? { after: params.after } : {}) } })
 				: request(params.doc, ctx, { op: "read", args: { ...scoped(params.run), ...(params.block ? { block: params.block } : {}) } }),
 		} satisfies Tool<ReturnType<typeof readParams.parse>>,
 		{
-			name: "playbook_edit", label: "Playbook: edit", parameters: editParams,
+			name: "playbook_edit", label: tr("Playbook: edit", "Playbook: 编辑"), parameters: editParams,
 			description: "Change one block of the template (or of Run `run`); bodies and designs you write keep the Where/What/How outline. op title {block, value}; status {block, value: todo|running|done} (the subagent that runs a block writes its own status; set it yourself only to correct one); task {block, value: false} declares a task block untracked (no status, not launchable, not counted), true tracks it again from todo; replace {block, find, replace} where find occurs exactly once in your field (a task's body, a design's draft); write {block, text} replaces your field whole; panel {block, panel, text} replaces one panel addressed by the letter ID its heading writes, `text` being that whole panel starting with `## <ID> Title`; insert {after?, title, body, agent?, isolated?} adds a task block, insert_design {after?, title, design} adds a design block whose requirement starts empty (the person writes it) → {block}; delete {block}; move {block, after: <block> or null for the top} reorders; agent {block, value: <agent name> or null} and isolated {block, value: boolean or null} set or clear a task block's execution contract, the defaults playbook.agent/playbook.run use for its subagent (design blocks have none). The outline: panels `## A Where · <title>`, `## B What · <title>`, `## C How · <title>`, each with content and in that order, more panels of a role allowed; an orchestration block, being code, is exempt; playbook_check reports a text that breaks it as `outline`. A design's requirement is never yours to change. Each call locks the block, applies the change and unlocks it; when the person changes the block meanwhile, the call fails with NotLocked and nothing is applied.",
 			run: (params, ctx) => {
 				switch (params.op) {
@@ -274,21 +277,21 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			},
 		} satisfies Tool<ReturnType<typeof editParams.parse>>,
 		{
-			name: "playbook_compile", label: "Playbook: compile", parameters: compileParams,
+			name: "playbook_compile", label: tr("Playbook: compile", "Playbook: 编译"), parameters: compileParams,
 			description: "compile {blocks} returns the exact prompt the blocks produce (references expanded), without starting anything; refetch {targets} fetches external references (GitHub, URLs) again.",
 			run: (params, ctx) => params.op === "compile"
 				? request(params.doc, ctx, { op: "compile", args: { ...scoped(params.run), blocks: params.blocks } })
 				: request(params.doc, ctx, { op: "refetch", args: { ...scoped(params.run), targets: params.targets } }),
 		} satisfies Tool<ReturnType<typeof compileParams.parse>>,
 		{
-			name: "playbook_check", label: "Playbook: check", parameters: checkParams,
+			name: "playbook_check", label: tr("Playbook: check", "Playbook: 检查"), parameters: checkParams,
 			description: "inspect {blocks} returns the blocks' deterministic findings, the judge questions and a `version`; answer the questions with `judge` in eval, then report {blocks, version, result: {kind: \"answers\", answers: {<question id>: P(yes)}} or {kind: \"judge_unavailable\"}}.",
 			run: (params, ctx) => params.op === "inspect"
 				? request(params.doc, ctx, { op: "inspect", args: { ...scoped(params.run), blocks: params.blocks } })
 				: request(params.doc, ctx, { op: "report", args: { ...scoped(params.run), blocks: params.blocks, version: params.version, result: params.result } }),
 		} satisfies Tool<ReturnType<typeof checkParams.parse>>,
 		{
-			name: "playbook_run", label: "Playbook: Run", parameters: runParams,
+			name: "playbook_run", label: tr("Playbook: Run", "Playbook: 运行"), parameters: runParams,
 			description: "start {name, update_every?} copies the Playbook into a new Run (every status back to todo, no reports) for another execution and returns its id; finish {run} ends it; list returns the Run summaries.",
 			run: (params, ctx) => {
 				switch (params.op) {
@@ -299,7 +302,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			},
 		} satisfies Tool<ReturnType<typeof runParams.parse>>,
 		{
-			name: "playbook_timeline", label: "Playbook: timeline", parameters: timelineParams,
+			name: "playbook_timeline", label: tr("Playbook: timeline", "Playbook: 时间线"), parameters: timelineParams,
 			description: "The execution log of the Playbook, or of Run `run`. read {run?, after?} returns entries after a sequence number; post {run?, kind: update|result|failure|retrospective, text, block?, launch?, next?, quote?} writes a record (`next`: seconds until the next update, only for a Run's update; retrospective only in a finished Run); snooze {run, after} postpones a Run's update reminder by `after` seconds.",
 			run: (params, ctx) => {
 				switch (params.op) {
@@ -313,7 +316,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			},
 		} satisfies Tool<ReturnType<typeof timelineParams.parse>>,
 		{
-			name: "playbook_launch", label: "Playbook: Launch", parameters: launchParams,
+			name: "playbook_launch", label: tr("Playbook: Launch", "Playbook: 启动"), parameters: launchParams,
 			description: "A Launch is the frozen prompt of blocks of the Playbook (or of Run `run`) that subagents work from; the person's later edits to those blocks arrive here as block_changed notices. A prompt Launch's text ends with the instructions for its subagent to write the blocks' status and report into the file. launch {run?, blocks} → {launch, kind, text, agent?, isolated?} (agent/isolated: the execution contract every block presets; prefer `playbook.agent`/`playbook.run` in eval, which also start and bind the subagent and apply that contract); bind {launch, agent}; info {launch} → the full record; rebase {launch} accepts the current text as the new baseline, which playbook.spawn and playbook.exec then use; close {launch} ends it (playbook.result closes the Launch playbook.agent created).",
 			run: (params, ctx) => {
 				switch (params.op) {
@@ -344,7 +347,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
 	/** Event aside: header line, the next call to make, then the data (launch-events.md §6). */
 	async function notice(absolute: string, event: Exclude<EventPayload, { event: "interrupted" | "agents_requested" }>): Promise<string> {
-		const header = "这是 Playbook 文档服务的通知，不是用户消息";
+		const header = tr("This is a Playbook document service notice, not a user message", "这是 Playbook 文档服务的通知，不是用户消息");
 		const docLiteral = JSON.stringify(absolute);
 		let next: string;
 		switch (event.event) {
@@ -356,27 +359,33 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				const orchestration = requested.some(item => item.kind === "task" && ORCHESTRATION.test(item.body));
 				const only = requested.length === 1 && requested[0]!.kind === "task" ? requested[0]! : null;
 				const preset = only && (only.agent !== undefined || only.isolated !== undefined)
-					? `块 ${only.id} 已预设${only.agent !== undefined ? ` agent: "${only.agent}"` : ""}${only.isolated !== undefined ? ` isolated: ${only.isolated}` : ""}，不显式传参时 playbook.agent / playbook.run 自动使用。`
+					? tr(`Block ${only.id} has preset${only.agent !== undefined ? ` agent: "${only.agent}"` : ""}${only.isolated !== undefined ? ` isolated: ${only.isolated}` : ""}, so playbook.agent / playbook.run use it automatically when arguments are omitted.`, `块 ${only.id} 已预设${only.agent !== undefined ? ` agent: "${only.agent}"` : ""}${only.isolated !== undefined ? ` isolated: ${only.isolated}` : ""}，不显式传参时 playbook.agent / playbook.run 自动使用。`)
 					: "";
 				const where = event.data.run === undefined ? "Playbook" : `Run ${event.data.run}`;
 				const runArg = event.data.run === undefined ? "" : `, run: "${event.data.run}"`;
 				const call = `{ doc: ${docLiteral}${runArg}, blocks: ${blocks} }`;
 				next = orchestration
-					? `人请求启动编排块 ${blocks}。下一步：调用 playbook_launch {doc: ${docLiteral}, op: "launch"${runArg}, blocks: ${blocks}} 得到 l<n>，再单独发一个 eval，代码只写 \`await playbook.exec("l<n>")\`。`
-					: `人请求启动 ${where} 的块 ${blocks}。${preset}下一步二选一：① 不阻塞：在 eval 中 \`var worker = await playbook.agent(${call})\`，启动并绑定后立即返回；用顶层 wait 等它，期间仍能处理面板通知；结束后另发 eval \`await playbook.result(worker)\` 记录结果并关闭 Launch。② 单步：\`await playbook.run(${call})\` 启动、等待、记录并关闭。subagent 自己把块的状态与完成报告写进文件，你不用代写。默认 subagent 被禁用且块没有预设 agent 时加上 \`agent: "<可用的 agent>"\`（例如 "task:mid"）。eval 单元开头那行 \`var playbook = …\` 由扩展自动加入，不要自己再写。`;
+					? tr(`A person requested launching orchestration blocks ${blocks}. Next: call playbook_launch {doc: ${docLiteral}, op: "launch"${runArg}, blocks: ${blocks}} to get l<n>, then send a separate eval whose code is only \`await playbook.exec("l<n>")\`.`, `人请求启动编排块 ${blocks}。下一步：调用 playbook_launch {doc: ${docLiteral}, op: "launch"${runArg}, blocks: ${blocks}} 得到 l<n>，再单独发一个 eval，代码只写 \`await playbook.exec("l<n>")\`。`)
+					: tr(`A person requested launching blocks ${blocks} of ${where === "Playbook" ? "the Playbook" : where}. ${preset ? `${preset} ` : ""}Next, choose one: ① Non-blocking: in eval, \`var worker = await playbook.agent(${call})\` returns as soon as the subagent is started and bound; wait for it with the top-level wait tool, which still lets you handle pane notices meanwhile; after it finishes, send another eval \`await playbook.result(worker)\` to record the result and close the Launch. ② Single step: \`await playbook.run(${call})\` starts, waits, records and closes. The subagent writes the block's status and completion report into the file itself; you do not write them for it. When the default subagent is disabled and the block has no preset agent, add \`agent: "<available agent>"\` (for example "task:mid"). The extension adds the \`var playbook = …\` line at the start of an eval cell automatically; do not write it yourself.`, `人请求启动 ${where} 的块 ${blocks}。${preset}下一步二选一：① 不阻塞：在 eval 中 \`var worker = await playbook.agent(${call})\`，启动并绑定后立即返回；用顶层 wait 等它，期间仍能处理面板通知；结束后另发 eval \`await playbook.result(worker)\` 记录结果并关闭 Launch。② 单步：\`await playbook.run(${call})\` 启动、等待、记录并关闭。subagent 自己把块的状态与完成报告写进文件，你不用代写。默认 subagent 被禁用且块没有预设 agent 时加上 \`agent: "<可用的 agent>"\`（例如 "task:mid"）。eval 单元开头那行 \`var playbook = …\` 由扩展自动加入，不要自己再写。`)
 				break;
 			}
 			case "stop_requested": {
-				const stops = event.data.launches.map(item => `\`await playbook.stop("${item.id}")\``).join("、");
+				const stopCalls = event.data.launches.map(item => `\`await playbook.stop("${item.id}")\``);
+				const stopsEn = stopCalls.join(", ");
+				const stopsZh = stopCalls.join("、");
 				const agents = event.data.launches.flatMap(item => item.agents);
-				next = `人请求打断块 ${event.data.block} 的执行（Launch ${event.data.launches.map(item => item.id).join("、")}${agents.length ? `，subagent ${agents.join("、")}` : ""}）。下一步：在 eval 中执行 ${stops}：它取消本会话为这些 Launch 启动的 subagent，并把仍在执行中的块改回 todo；等着的 playbook.result 随后记录失败并关闭 Launch。若 subagent 不是本会话通过 playbook.agent / playbook.spawn 启动的，先用你自己的方式停止它，再用 playbook_edit {op: "status", block: "${event.data.block}", value: "todo"${event.data.run === undefined ? "" : `, run: "${event.data.run}"`}} 改回 todo。`;
+				const launchesEn = event.data.launches.map(item => item.id).join(", ");
+				const launchesZh = event.data.launches.map(item => item.id).join("、");
+				const agentsEn = agents.join(", ");
+				const agentsZh = agents.join("、");
+				next = tr(`A person requested stopping execution of block ${event.data.block} (Launch ${launchesEn}${agents.length ? `, subagent ${agentsEn}` : ""}). Next: execute ${stopsEn} in eval: this cancels the subagents this session started for these Launches and sets blocks still running back to todo; any waiting playbook.result calls then record the failure and close the Launch. If a subagent was not started in this session through playbook.agent / playbook.spawn, stop it your own way first, then use playbook_edit {op: "status", block: "${event.data.block}", value: "todo"${event.data.run === undefined ? "" : `, run: "${event.data.run}"`}} to set it back to todo.`, `人请求打断块 ${event.data.block} 的执行（Launch ${launchesZh}${agents.length ? `，subagent ${agentsZh}` : ""}）。下一步：在 eval 中执行 ${stopsZh}：它取消本会话为这些 Launch 启动的 subagent，并把仍在执行中的块改回 todo；等着的 playbook.result 随后记录失败并关闭 Launch。若 subagent 不是本会话通过 playbook.agent / playbook.spawn 启动的，先用你自己的方式停止它，再用 playbook_edit {op: "status", block: "${event.data.block}", value: "todo"${event.data.run === undefined ? "" : `, run: "${event.data.run}"`}} 改回 todo。`);
 				break;
 			}
 			case "block_changed":
-				next = `人修改了 Launch ${event.data.launch.id} 依赖的块 ${JSON.stringify(event.data.changed)}（diff 见下）。可以：调用 playbook_launch {op: "rebase", launch: "${event.data.launch.id}"} 接受当前文本为新基线（之后 playbook.spawn 与 playbook.exec 使用它）；告诉仍在运行的 subagent；或不处理。`;
+				next = tr(`A person changed block ${JSON.stringify(event.data.changed)}, on which Launch ${event.data.launch.id} depends (see the diff below). You can: call playbook_launch {op: "rebase", launch: "${event.data.launch.id}"} to accept the current text as the new baseline (then playbook.spawn and playbook.exec use it); notify the subagent that is still running; or do nothing.`, `人修改了 Launch ${event.data.launch.id} 依赖的块 ${JSON.stringify(event.data.changed)}（diff 见下）。可以：调用 playbook_launch {op: "rebase", launch: "${event.data.launch.id}"} 接受当前文本为新基线（之后 playbook.spawn 与 playbook.exec 使用它）；告诉仍在运行的 subagent；或不处理。`);
 				break;
 			case "update_due":
-				next = `Run ${event.data.run} 的状态更新到期。下一步：playbook_timeline {op: "post", run: "${event.data.run}", kind: "update", text: ...} 写更新，或 {op: "snooze"} 推迟。`;
+				next = tr(`The status update for Run ${event.data.run} is due. Next: playbook_timeline {op: "post", run: "${event.data.run}", kind: "update", text: ...} writes the update, or {op: "snooze"} postpones it.`, `Run ${event.data.run} 的状态更新到期。下一步：playbook_timeline {op: "post", run: "${event.data.run}", kind: "update", text: ...} 写更新，或 {op: "snooze"} 推迟。`);
 				break;
 			case "revision_requested": {
 				const where = event.data.run === undefined ? "Playbook" : `Run ${event.data.run}`;
@@ -385,11 +394,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				const found = answer?.ok ? revisionsResult.safeParse(answer.result) : undefined;
 				const prompt = found?.success ? found.data.revisions.find(item => item.seq === event.data.revision)?.prompt : undefined;
 				const history = `playbook_read {doc: ${docLiteral}, ${scope}op: "revisions", block: "${event.data.block}"}`;
-				next = `人对${where}的设计块 ${event.data.block} 提交了修改 prompt #${event.data.revision}${prompt === undefined ? `（读取失败，用 ${history} 查询）` : `：\n<prompt>\n${prompt}\n</prompt>`}\n下一步：playbook_read {doc: ${docLiteral}, ${scope}block: "${event.data.block}"} 读需求与当前设计稿，按 prompt 修订设计：用 playbook_edit 的 write、replace 或 panel 改 design；不要改 requirement。修订后的设计稿保持 Where/What/How 面板结构。prompt 选定了某个槽位的取值时，把那个 slot 围栏的 \`= \` 行改成该值；原来的值不在选项里时补一行 \`~ <原值>\`。需要以前的修改要求时用 ${history}。`;
+				next = tr(`A person submitted change request #${event.data.revision} for the ${where} design block ${event.data.block}${prompt === undefined ? `(failed to read; query with ${history})` : `:\n<prompt>\n${prompt}\n</prompt>`}\nNext: read the requirement and current design with playbook_read {doc: ${docLiteral}, ${scope}block: "${event.data.block}"}, then revise the design according to the change request: use playbook_edit write, replace, or panel to change design; do not change requirement. Keep the revised design in the Where/What/How panel structure. When the prompt selects a value for a slot, change that slot fence's \`= \` line to that value; when the original value is not in the options, add a \`~ <original value>\` line. To retrieve previous change requests, use ${history}.`, `人对${where}的设计块 ${event.data.block} 提交了修改 prompt #${event.data.revision}${prompt === undefined ? `（读取失败，用 ${history} 查询）` : `：\n<prompt>\n${prompt}\n</prompt>`}\n下一步：playbook_read {doc: ${docLiteral}, ${scope}block: "${event.data.block}"} 读需求与当前设计稿，按 prompt 修订设计：用 playbook_edit 的 write、replace 或 panel 改 design；不要改 requirement。修订后的设计稿保持 Where/What/How 面板结构。prompt 选定了某个槽位的取值时，把那个 slot 围栏的 \`= \` 行改成该值；原来的值不在选项里时补一行 \`~ <原值>\`。需要以前的修改要求时用 ${history}。`);
 				break;
 			}
 			case "status_changed":
-				next = `人把块 ${event.data.block} 的状态改为 ${event.data.status}。无需动作。`;
+				next = tr(`A person changed block ${event.data.block} to status ${event.data.status}. No action is needed.`, `人把块 ${event.data.block} 的状态改为 ${event.data.status}。无需动作。`);
 				break;
 		}
 		return `${header}\n${next}\n${JSON.stringify({ doc: absolute, ...event })}`;
@@ -411,17 +420,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		const exec = execCall.exec(input.code);
 		if (exec) {
 			const launchId = parseLaunchId(exec[1]!);
-			if (launchId === null) return { block: true, reason: `${exec[1]} is not a Launch id` };
+			if (launchId === null) return { block: true, reason: tr(`${exec[1]} is not a Launch id`, `${exec[1]} 不是 Launch id`) };
 			let absolute: string;
 			try { absolute = await documentFor(exec[3]); }
 			catch (thrown) { return { block: true, reason: thrown instanceof Error ? thrown.message : String(thrown) }; }
 			const info = await (await clientFor(absolute, ctx)).request({ op: "launch_info", args: { launch: launchId } });
 			if (!info.ok) return { block: true, reason: `${info.error.code}: ${info.error.message}` };
 			const record = launchRecord.parse(info.result);
-			if (record.kind !== "orchestration") return { block: true, reason: `${launchId} is a prompt Launch; start its subagent with \`await playbook.spawn("${launchId}")\` or \`playbook.run\`` };
+			if (record.kind !== "orchestration") return { block: true, reason: tr(`${launchId} is a prompt Launch; start its subagent with \`await playbook.spawn("${launchId}")\` or \`playbook.run\``, `${launchId} 是提示 Launch；请用 \`await playbook.spawn("${launchId}")\` 或 \`playbook.run\` 启动其 subagent`) };
 			// The latest baseline: the frozen snapshot until a rebase accepted newer code.
 			const fence = ORCHESTRATION.exec(record.baselines?.at(-1) ?? record.snapshot.result.text);
-			if (!fence) return { block: true, reason: `${launchId} has no fenced js/py code in its snapshot` };
+			if (!fence) return { block: true, reason: tr(`${launchId} has no fenced js/py code in its snapshot`, `${launchId} 的快照中没有带围栏的 js/py 代码`) };
 			const context = { doc: absolute, ...(record.run === null ? {} : { run: record.run }), launch: launchId };
 			const code = fence[1] === "js"
 				? `// playbook.exec("${launchId}") replaced by the Launch's orchestration code (its latest baseline).\n` + importLine(context) + fence[2]!
@@ -429,7 +438,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			return { input: { ...input, language: fence[1], code, timeout: 0, title: input.title ?? `Playbook ${launchId}` } };
 		}
 		if (/\bplaybook\.exec\s*\(/.test(input.code)) {
-			return { block: true, reason: "playbook.exec must be the whole eval code: `await playbook.exec(\"l<n>\")`" };
+			return { block: true, reason: tr("playbook.exec must be the whole eval code: `await playbook.exec(\"l<n>\")`", "playbook.exec 必须是完整的 eval 代码：`await playbook.exec(\"l<n>\")`") };
 		}
 		if (input.language !== "js" || !usesHelpers.test(input.code) || input.code.includes(preludeEntry)) return;
 		return { input: { ...input, code: importLine({}) + input.code, ...(input.timeout === undefined && waits.test(input.code) ? { timeout: 0 } : {}) } };
@@ -449,7 +458,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		catch { return { ok: false, error: { code: "NoService", message: `cannot resolve Playbook ${request.doc}` } }; }
 		const ready = await (await clientFor(absolute, ctx)).connect();
 		if (!ready.ok) return { ok: false, error: { code: ready.error.code, message: ready.error.message } };
-		pi.sendMessage({ customType: "playbook-event", content: `这是 Playbook 文档服务的通知，不是用户消息\n人在 Playbook 面板里指定本会话为 ${absolute} 的协调者，扩展已经连接（等同 playbook_open）。用 playbook_read {doc: ${JSON.stringify(absolute)}} 了解它；之后每收到 Playbook 通知，按通知里的下一步做。`, display: true });
+		pi.sendMessage({ customType: "playbook-event", content: tr(`This is a Playbook document service notice, not a user message\nA person designated this session as the coordinator for ${absolute} in the Playbook pane; the extension is connected (equivalent to playbook_open). Use playbook_read {doc: ${JSON.stringify(absolute)}} to learn it; then follow the next step in each Playbook notice.`, `这是 Playbook 文档服务的通知，不是用户消息\n人在 Playbook 面板里指定本会话为 ${absolute} 的协调者，扩展已经连接（等同 playbook_open）。用 playbook_read {doc: ${JSON.stringify(absolute)}} 了解它；之后每收到 Playbook 通知，按通知里的下一步做。`), display: true });
 		return here;
 	}
 	let paneListener: PaneListener | null = null;
@@ -480,8 +489,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		if (!file) {
 			const connected = [...clients.entries()].filter(([, client]) => client.connected);
 			if (connected.length === 1) file = connected[0]![0];
-			else if (connected.length > 1) { const selected = await ctx.ui.select("Choose Playbook", connected.map(([path]) => path)); if (selected === undefined) return; file = selected; }
-			else { ctx.ui.notify("请指定 Playbook 文件路径", "error"); return; }
+			else if (connected.length > 1) { const selected = await ctx.ui.select(tr("Choose Playbook", "选择 Playbook"), connected.map(([path]) => path)); if (selected === undefined) return; file = selected; }
+			else { ctx.ui.notify(tr("Please specify the Playbook file path", "请指定 Playbook 文件路径"), "error"); return; }
 		}
 		const client = await clientFor(await documentFor(file), ctx);
 		const ready = await client.connect();
@@ -496,7 +505,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
 	function registerCommands(): void {
 	pi.registerCommand("playbook-add", {
-		description: "Add a recent session message to a Playbook's execution log (the Playbook's own, or a Run's)",
+		description: tr("Add a recent session message to a Playbook's execution log (the Playbook's own, or a Run's)", "将最近的会话消息添加到 Playbook 的执行日志（Playbook 本身或 Run）"),
 		handler: async (args, ctx) => {
 			try {
 				const client = await commandClient(args, ctx); if (!client) return;
@@ -506,36 +515,37 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					const text = typeof content === "string" ? content : content.flatMap(part => part.type === "text" ? [part.text] : []).join("\n");
 					return text ? [{ id: entry.id, text, label: `${entry.id}: ${text.replace(/\s+/g, " ").slice(0, 90)}` }] : [];
 				}).slice(-20).reverse();
-				if (!messages.length) { ctx.ui.notify("No user or assistant messages with text", "warning"); return; }
-				const messageLabel = await ctx.ui.select("Choose session message", messages.map(message => message.label)); if (messageLabel === undefined) return;
-				const message = messages.find(item => item.label === messageLabel); if (!message) throw new Error("Unknown message selection");
+				if (!messages.length) { ctx.ui.notify(tr("No user or assistant messages with text", "没有包含文本的用户或助手消息"), "warning"); return; }
+				const messageLabel = await ctx.ui.select(tr("Choose session message", "选择会话消息"), messages.map(message => message.label)); if (messageLabel === undefined) return;
+				const message = messages.find(item => item.label === messageLabel); if (!message) throw new Error(tr("Unknown message selection", "消息选择无效"));
 				const runs = runsResult.parse(await result(client, { op: "runs", args: {} })).runs;
-				const targetChoices = [{ id: undefined, label: "Playbook 本身" }, ...runs.map(item => ({ id: item.id, label: `${item.id}: ${item.name} (${item.status})` }))];
-				const targetLabel = await ctx.ui.select("Choose log", targetChoices.map(item => item.label)); if (targetLabel === undefined) return;
-				const target = targetChoices.find(item => item.label === targetLabel); if (!target) throw new Error("Unknown log selection");
-				const kindLabel = await ctx.ui.select("Choose record kind", ["update", "result", "failure", "retrospective"]); if (kindLabel === undefined) return;
+				const targetChoices = [{ id: undefined, label: tr("Playbook itself", "Playbook 本身") }, ...runs.map(item => ({ id: item.id, label: `${item.id}: ${item.name} (${item.status})` }))];
+				const targetLabel = await ctx.ui.select(tr("Choose log", "选择日志"), targetChoices.map(item => item.label)); if (targetLabel === undefined) return;
+				const target = targetChoices.find(item => item.label === targetLabel); if (!target) throw new Error(tr("Unknown log selection", "日志选择无效"));
+				const kindLabel = await ctx.ui.select(tr("Choose record kind", "选择记录类型"), ["update", "result", "failure", "retrospective"]); if (kindLabel === undefined) return;
 				const chosenKind = kind.parse(kindLabel);
 				const document = readResult.parse(await result(client, { op: "read", args: scoped(target.id) }));
 				const blockChoices = document.blocks.map(item => ({ id: item.id, label: `${item.id}: ${item.title}` }));
-				const blockLabel = await ctx.ui.select("Choose block", ["不关于块", ...blockChoices.map(item => item.label)]); if (blockLabel === undefined) return;
-				const chosenBlock = blockLabel === "不关于块" ? undefined : blockChoices.find(item => item.label === blockLabel)?.id;
-				if (blockLabel !== "不关于块" && chosenBlock === undefined) throw new Error("Unknown block selection");
+				const noBlock = tr("Not about a block", "不关于块");
+				const blockLabel = await ctx.ui.select(tr("Choose block", "选择块"), [noBlock, ...blockChoices.map(item => item.label)]); if (blockLabel === undefined) return;
+				const chosenBlock = blockLabel === noBlock ? undefined : blockChoices.find(item => item.label === blockLabel)?.id;
+				if (blockLabel !== noBlock && chosenBlock === undefined) throw new Error(tr("Unknown block selection", "块选择无效"));
 				const posted = postResult.parse(await result(client, { op: "post", args: { ...scoped(target.id), kind: chosenKind, text: message.text, ...(chosenBlock ? { block: chosenBlock } : {}), quote: message.id, origin: "human" } }));
-				ctx.ui.notify(`Playbook timeline entry ${posted.seq} written`, "info");
+				ctx.ui.notify(tr(`Playbook timeline entry ${posted.seq} written`, `已写入 Playbook 时间线条目 ${posted.seq}`), "info");
 			} catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); }
 		},
 	});
 	pi.registerCommand("playbook-show", {
-		description: "Focus the Playbook document pane in Tern",
+		description: tr("Focus the Playbook document pane in Tern", "聚焦 Tern 中的 Playbook 文档面板"),
 		handler: async (args, ctx) => {
 			try {
 				const client = await commandClient(args, ctx); if (!client) return;
 				const hello = helloResult.parse(client.hello);
-				if (!hello.pane) { ctx.ui.notify("文档服务不在 session daemon 托管的 pane 中", "error"); return; }
-				if (!process.env.TERN_PANE) throw new Error("Playbook focus requires a coordinator Tern pane");
+				if (!hello.pane) { ctx.ui.notify(tr("The document service is not in a pane managed by the session daemon", "文档服务不在 session daemon 托管的 pane 中"), "error"); return; }
+				if (!process.env.TERN_PANE) throw new Error(tr("Playbook focus requires a coordinator Tern pane", "Playbook 聚焦需要协调者 Tern 面板"));
 				const child = Bun.spawn(["tern", "focus", hello.pane, "--json"], { env: process.env, stdout: "pipe", stderr: "pipe" });
 				const [exit, stderr] = await Promise.all([child.exited, new Response(child.stderr).text(), new Response(child.stdout).text()]);
-				if (exit !== 0) throw new Error(`tern focus exited ${exit}: ${stderr.trim()}`);
+				if (exit !== 0) throw new Error(tr(`tern focus exited ${exit}: ${stderr.trim()}`, `tern focus 退出 ${exit}：${stderr.trim()}`));
 			} catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); }
 		},
 	});

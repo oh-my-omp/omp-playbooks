@@ -10,6 +10,31 @@ local MAIN = tern.plugin.dir .. "/../src/service/main.ts"
 -- `main.ts --reveal` exits 4 when no service listens for the document (contracts.md K6).
 local ABSENT = 4
 
+-- The language rule of src/i18n.ts, read from the Tern app's environment: OMP_PLAYBOOKS_LANG
+-- when it is en or zh, else the first non-empty of LC_ALL, LC_MESSAGES and LANG (Chinese when
+-- it starts with zh), else English.
+local function chinese(): boolean
+	local explicit = tern.getenv("OMP_PLAYBOOKS_LANG")
+	if explicit ~= nil then
+		local named = string.lower((string.gsub(explicit, "^%s*(.-)%s*$", "%1")))
+		if named == "zh" or named == "en" then
+			return named == "zh"
+		end
+	end
+	for _, key in { "LC_ALL", "LC_MESSAGES", "LANG" } do
+		local value = tern.getenv(key)
+		if value ~= nil and string.match(value, "%S") ~= nil then
+			return string.match(string.lower(value), "^%s*zh") ~= nil
+		end
+	end
+	return false
+end
+local ZH = chinese()
+
+local function tr(en: string, zh: string): string
+	return if ZH then zh else en
+end
+
 local function quote(text: string): string
 	return "'" .. (string.gsub(text, "'", "'\\''")) .. "'"
 end
@@ -30,17 +55,17 @@ local function show(path: string)
 			return
 		end
 		if result.status ~= ABSENT then
-			cx:toast("error", "Playbook 无法显示", result.stderr)
+			cx:toast("error", tr("Playbook cannot be shown", "Playbook 无法显示"), result.stderr)
 			return
 		end
 		local target = cx.session:focused()
 		if target == nil then
-			cx:toast("error", "没有可以在旁边打开 Playbook 的 pane")
+			cx:toast("error", tr("No focused pane to open the Playbook beside", "没有可以在旁边打开 Playbook 的 pane"))
 			return
 		end
 		local launch = { cwd = dirname(path), command = "exec bun " .. quote(MAIN) .. " " .. quote(path) }
 		if cx.layout:split(target, "right", launch) == nil then
-			cx:toast("error", "无法建立 Playbook pane", path)
+			cx:toast("error", tr("Cannot create the Playbook pane", "无法建立 Playbook pane"), path)
 		end
 	end)
 end
@@ -62,7 +87,7 @@ end
 
 tern.command({
 	id = "open",
-	title = "Playbook: 打开",
+	title = tr("Playbook: open", "Playbook: 打开"),
 	icon = "file",
 	available = function(cx)
 		return focused_yaml(cx) ~= nil
@@ -73,7 +98,7 @@ tern.command({
 			return
 		end
 		if not tern.fs.exists(MAIN) then
-			cx:toast("error", "找不到文档服务入口；请重新安装 omp 插件 omp-playbooks", MAIN)
+			cx:toast("error", tr("The document service entry is missing; reinstall the omp plugin omp-playbooks", "找不到文档服务入口；请重新安装 omp 插件 omp-playbooks"), MAIN)
 			return
 		end
 		show(path)
