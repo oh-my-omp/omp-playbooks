@@ -72,7 +72,9 @@ The pane, its notices and component diagnostics, the coordinator's notices and t
 2. otherwise the first non-empty of `LC_ALL`, `LC_MESSAGES` and `LANG`: Chinese when it starts with `zh`, English for anything else;
 3. otherwise English.
 
-The extension starts the document service and new coordinator sessions with its own language, so they match the omp session that opened them. A service started by hand, an omp session attached from the pane and the Tern command use the language of their own environment; the Tern command reads the Tern app's, which may not include your shell profile. Set the variable where omp is started (for example in the shell profile), then restart omp and the Playbook pane: a running process keeps its language. The tool descriptions the model reads are English in both languages, and text already in a Playbook is never translated.
+The extension starts the document service and new coordinator sessions with its own language, so they match the omp session that opened them. A service started by hand, an omp session attached from the pane and the Tern command use the language of their own environment; the Tern command reads the Tern app's, which may not include your shell profile. Set the variable where omp is started (for example in the shell profile), then restart omp and the Playbook pane: a running process keeps its language.
+
+The Playbook file's content is never translated: what the file says is shown and compiled as written. The language only decides what new text is written in. The tool descriptions the model reads are English, and they tell the coordinator to write the titles, bodies, designs and slot options it adds in the session's language, keeping the English role words of `## A Where · …` panels and leaving existing text untouched; the launch-prompt footer asks the subagent for its completion report in that language. Texts the pane itself inserts (a new flow node's name, a pasted image's caption) follow the pane's language.
 
 ## The file and its blocks
 

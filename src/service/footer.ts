@@ -20,7 +20,7 @@ export function launchFooter(file: string, blocks: readonly { readonly id: strin
 		"      - One completed item per line: what was actually done and where it was changed",
 		"      - The last line must state the verification: what was run and what result was observed",
 		"```",
-		"   Write only what actually happened in the report. If the work could not be completed, change `status:` back to `todo` and state how far you got and what blocked you in the report.",
+		"   Write only what actually happened in the report, in English. If the work could not be completed, change `status:` back to `todo` and state how far you got and what blocked you in the report.",
 		"3. Change only the `status` and `report` of these blocks; keep YAML indentation and all other content unchanged.",
 	].join("\n"), [
 		"---",
@@ -34,7 +34,7 @@ export function launchFooter(file: string, blocks: readonly { readonly id: strin
 		"      - 每行一件已完成的事：实际做了什么、改了哪里",
 		"      - 最后一行写验证：运行了什么、看到了什么结果",
 		"```",
-		"   报告只写真实发生的事。没能完成时把 `status:` 改回 `todo`，在 report 里写明做到哪一步、卡在哪里。",
+		"   报告用中文写，只写真实发生的事。没能完成时把 `status:` 改回 `todo`，在 report 里写明做到哪一步、卡在哪里。",
 		"3. 只改这些块的 `status` 与 `report`；保持 YAML 的缩进与其他内容不变。",
 	].join("\n"));
 }
