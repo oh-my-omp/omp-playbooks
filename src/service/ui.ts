@@ -10,6 +10,15 @@ import { renderDraft, type DraftHost } from "./draft/components";
 import type { ChangeView, EditHost, FileRead, ListItem, Span } from "./draft/contract";
 import { parseSlots, setSlotValue, type SlotDecl } from "./draft/slot";
 import type { FrameOp, TspEvent, TspInput, TspNode, TspSession } from "./tsp-types";
+import type { CoordinatorPicker, OmpPane } from "./coordinators";
+
+/** The offline coordinator picker: closed, asking Tern, showing an answer, or carrying out a choice. */
+type CoordPickerState =
+	| { readonly kind: "closed" }
+	| { readonly kind: "loading" }
+	| { readonly kind: "listed"; readonly panes: readonly OmpPane[] }
+	| { readonly kind: "failed"; readonly error: string }
+	| { readonly kind: "working"; readonly text: string };
 
 const SURFACE = "playbook";
 const ESC = "\x1b";
@@ -194,7 +203,7 @@ function reorderedList(source: string, span: Span, items: readonly ListItem[], o
 }
 
 /** K4 front end. Core owns every document; this keeps only what the pane shows and what is being edited. */
-export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
+export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordinators: CoordinatorPicker): void {
 	initThemeSync();
 	let opened = false;
 	let mounted = false;
@@ -206,6 +215,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 	let menu: BlockId | null = null;
 	/** The task block whose SUBAGENT dropdown is open. */
 	let agentMenu: BlockId | null = null;
+	let coordPicker: CoordPickerState = { kind: "closed" };
 	let editing: Editing | null = null;
 	let picker: Picker | null = null;
 	/** An ordered list item picked up to be placed elsewhere. */
@@ -554,7 +564,11 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 		const tracked = view.blocks.filter(item => item.block.progress.kind === "tracked");
 		const done = tracked.filter(item => item.block.progress.kind === "tracked" && item.block.progress.status === "done").length;
 		const online = core.coordinator().connected;
-		on("status.coordinator", { click: () => { void core.focusCoordinator().then(error => { outcome(error); redraw(); }); } });
+		on("status.coordinator", { click: () => {
+			if (online) { void core.focusCoordinator().then(error => { outcome(error); redraw(); }); return; }
+			if (coordPicker.kind !== "closed") { coordPicker = { kind: "closed" }; return; }
+			openCoordPicker();
+		} });
 		const rows: TspNode[] = [];
 		const chosen = view.blocks.filter(item => selected.has(item.block.id)).map(item => item.block.id);
 		if (chosen.length) {
@@ -566,10 +580,70 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 			]));
 		}
 		rows.push({ id: "status", k: "status", c: [
-			{ id: "status.coordinator", k: "seg", p: { spans: [{ t: "● ", s: online ? "success" : "warning" }, { t: online ? "协调者在线" : "协调者离线" }], actions: { click: "invoke" } } },
+			{ id: "status.coordinator", k: "seg", p: { spans: [{ t: "● ", s: online ? "success" : "warning" }, { t: online ? "协调者在线" : "协调者离线 · 选择协调者" }], actions: { click: "invoke" } } },
 			{ id: "status.done", k: "seg", p: { side: "right", text: `${done} / ${tracked.length} 已完成` } },
 		] });
 		return { id: "dock.view", k: "col", c: rows };
+	}
+
+	/** Ask Tern and the omp sessions for the candidates now; the list is shown, never kept as truth. */
+	function openCoordPicker(): void {
+		const opened = { kind: "loading" } as const;
+		coordPicker = opened;
+		void coordinators.list().then(listed => {
+			if (coordPicker !== opened) return;
+			coordPicker = listed.ok ? { kind: "listed", panes: listed.panes } : { kind: "failed", error: listed.error };
+			redraw();
+		});
+	}
+	/** Run one picker action; the picker shows what it is doing until the owner answers. */
+	function coordWork(text: string, work: () => Promise<{ readonly error: string | null; readonly done: string }>): void {
+		if (coordPicker.kind === "working") return;
+		coordPicker = { kind: "working", text };
+		void work().then(result => {
+			coordPicker = { kind: "closed" };
+			if (result.error) notify(result.error); else notify(result.done, "success");
+			redraw();
+		});
+	}
+	function coordOptions(): TspNode[] {
+		const notice = (text: string): TspNode => el("coord.notice", "div", "pb-opt-note pb-opt-notice", [], { text });
+		const nodes: TspNode[] = [el("coord.head", "div", "pb-label pb-opt-notice", [], { text: "选择协调者：本窗口里运行 omp 的面板" })];
+		switch (coordPicker.kind) {
+			case "closed": return [];
+			case "loading": nodes.push(notice("正在向 Tern 读取面板…")); break;
+			case "working": nodes.push(notice(coordPicker.text)); return nodes;
+			case "failed": nodes.push(notice(coordPicker.error)); break;
+			case "listed": {
+				if (coordPicker.panes.length === 0) nodes.push(notice("这个窗口里没有运行 omp 的面板"));
+				coordPicker.panes.forEach((pane, index) => {
+					const id = `coord.o${index}`;
+					const where = [pane.place === null ? null : `${pane.place.session} · 标签页 ${pane.place.tab}`, pane.cwd || null].filter(part => part !== null).join(" · ");
+					if (pane.loaded) on(id, { click: () => coordWork(`正在让「${pane.title || "omp"}」连接…`, async () => {
+						const chosen = await coordinators.choose(pane.pane);
+						switch (chosen.kind) {
+							case "paired": return { error: null, done: "已连接为协调者，Playbook 面板已移到它的右侧" };
+							case "attachFailed": return { error: `没有连上：${chosen.error}`, done: "" };
+							case "moveFailed": return { error: `已连接为协调者，但移动面板失败：${chosen.error}`, done: "" };
+						}
+					}) });
+					nodes.push(el(id, "div", `pb-opt${pane.loaded ? "" : " pb-opt-stale"}`, [
+						el(`${id}.row`, "div", "pb-opt-row", [el(`${id}.label`, "span", "pb-opt-label", [], { text: pane.title || "omp" })]),
+						el(`${id}.note`, "span", "pb-opt-note", [], { text: pane.loaded ? where : `${where} · 这个 omp 会话没有加载支持选择协调者的 omp-playbooks（升级后需重启该会话）` }),
+					], pane.loaded ? { actions: { click: "invoke" } } : {}));
+				});
+				break;
+			}
+		}
+		on("coord.new", { click: () => coordWork("正在新建会话…", async () => {
+			const started = await coordinators.newSession();
+			return started.ok ? { error: null, done: "已在左侧新建 omp 会话并发送初始化提示；它连上后这里显示协调者在线" } : { error: `新建会话失败：${started.error}`, done: "" };
+		}) });
+		nodes.push(el("coord.new", "div", "pb-opt", [
+			el("coord.new.row", "div", "pb-opt-row", [el("coord.new.label", "span", "pb-opt-label", [], { text: "新建会话" })]),
+			el("coord.new.note", "span", "pb-opt-note", [], { text: "在左侧新开 omp，发送初始化提示让它打开这份 Playbook" }),
+		], { actions: { click: "invoke" } }));
+		return nodes;
 	}
 
 	/** The SUBAGENT dropdown: 默认, then what the coordinator's session can launch, as it last answered. */
@@ -610,6 +684,10 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 		const agentItem = agentMenu === null ? undefined : view.blocks.find(item => item.block.id === agentMenu);
 		if (agentItem && open === agentItem.block.id && agentItem.block.content.kind === "task" && agentItem.block.progress.kind === "tracked" && agentItem.block.progress.status !== "done") {
 			children.push({ id: "agents", k: "overlay", p: { anchor: { node: `${agentItem.block.id}.foot.agent` }, size: "sm" }, c: agentOptions(agentItem.block.id, agentItem.block.content.agent ?? null) });
+		}
+		// Only while offline: a hello arriving meanwhile is the answer, and the picker goes away.
+		if (coordPicker.kind !== "closed" && !core.coordinator().connected) {
+			children.push({ id: "coord", k: "overlay", p: { anchor: { node: "status.coordinator" }, size: "sm" }, c: coordOptions() });
 		}
 		if (picker) {
 			const current = picker;
@@ -759,7 +837,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 	/** Enter or Esc: apply the edit; with nothing being edited, Esc closes the menu, the picker and a picked item. */
 	function end(): void {
 		if (editing) finishEdit();
-		else { menu = null; agentMenu = null; picker = null; picked = null; node = null; }
+		else { menu = null; agentMenu = null; picker = null; picked = null; node = null; if (coordPicker.kind !== "working") coordPicker = { kind: "closed" }; }
 		redraw();
 	}
 
@@ -779,6 +857,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string): void {
 				else dblclick?.();
 				if (!input.id.startsWith("picker.") && !input.id.endsWith(".more") && !input.id.startsWith("menu.")) menu = null;
 				if (!input.id.startsWith("agents.") && !input.id.endsWith(".foot.agent")) agentMenu = null;
+				if (coordPicker.kind !== "working" && !input.id.startsWith("coord.") && input.id !== "status.coordinator") coordPicker = { kind: "closed" };
 				redraw();
 				break;
 			}

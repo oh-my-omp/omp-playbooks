@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { startUi } from "../src/service/ui";
 import type { FrameOp, FrameStatus, TspEvent, TspInput, TspNode, TspSession } from "../src/service/tsp-types";
+import type { CoordinatorPicker, OmpPane } from "../src/service/coordinators";
 import { registerCoreCleanup, coreFixture, design, task, template } from "./core-fixture";
 
 class TestTsp implements TspSession {
@@ -30,13 +31,23 @@ class TestTsp implements TspSession {
 	}
 	node(id: string): TspNode { const found = this.nodes().find(node => node.id === id); if (!found) throw new Error(`Missing node ${id}`); return found; }
 }
-async function fixture(blocks = [task("b1"), task("b2")]) {
+/** A coordinator picker that answers from fixed data and records what was asked of it. */
+function fakeCoordinators(panes: readonly OmpPane[] = []) {
+	const calls: string[] = [];
+	const coordinators: CoordinatorPicker = {
+		list: async () => { calls.push("list"); return { ok: true, panes }; },
+		choose: async pane => { calls.push(`choose ${pane}`); return { kind: "paired" }; },
+		newSession: async () => { calls.push("new"); return { ok: true }; },
+	};
+	return { coordinators, calls };
+}
+async function fixture(blocks = [task("b1"), task("b2")], coordinators = fakeCoordinators()) {
 	const f = coreFixture(blocks);
 	const tsp = new TestTsp();
-	startUi(f.core, tsp, f.directory);
+	startUi(f.core, tsp, f.directory, coordinators.coordinators);
 	tsp.input({ kind: "hello", dark: true });
 	await tsp.ready.promise;
-	return { ...f, tsp };
+	return { ...f, tsp, calls: coordinators.calls };
 }
 
 describe("current Playbook user interactions", () => {
@@ -163,6 +174,36 @@ describe("current Playbook user interactions", () => {
 		f.tsp.keys("Extra requirement");
 		f.tsp.keys("\x1b[13;5u");
 		expect(f.core.view(template).blocks[0]?.block.content).toEqual({ kind: "design", requirement: "Requirement\nExtra requirement", design: "## A Plan\nDesign" });
+	});
+	test("the 退出编辑 button commits the edit like Enter", async () => {
+		const f = await fixture();
+		f.tsp.action("b1.title", "edit");
+		f.tsp.keys(" renamed");
+		f.tsp.action("b1.title.exit");
+		expect(f.core.view(template).blocks[0]?.block.title).toBe("b1 renamed");
+		expect(f.tsp.nodes().some(node => node.id === "b1.title.edit")).toBe(false);
+	});
+	test("offline, the status lists omp panes; only panes with omp-playbooks can be chosen, and 新建会话 is always offered", async () => {
+		const panes: OmpPane[] = [
+			{ pane: "11", title: "omp", cwd: "/work", place: { session: "Default", tab: 2 }, ompSession: "/s/a.jsonl", loaded: true },
+			{ pane: "12", title: "old omp", cwd: "/old", place: { session: "Default", tab: 3 }, ompSession: "/s/b.jsonl", loaded: false },
+		];
+		const f = await fixture(undefined, fakeCoordinators(panes));
+		// The fake answers at once; draining queued promise callbacks lets the UI apply each answer.
+		const settle = async (): Promise<void> => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+		f.tsp.action("status.coordinator");
+		await settle();
+		expect(f.calls).toEqual(["list"]);
+		expect(f.tsp.node("coord.o0").p?.actions).toEqual({ click: "invoke" });
+		expect(f.tsp.node("coord.o1").p?.actions).toBeUndefined();
+		f.tsp.action("coord.o0");
+		await settle();
+		expect(f.calls).toEqual(["list", "choose 11"]);
+		f.tsp.action("status.coordinator");
+		await settle();
+		f.tsp.action("coord.new");
+		await settle();
+		expect(f.calls).toEqual(["list", "choose 11", "list", "new"]);
 	});
 });
 

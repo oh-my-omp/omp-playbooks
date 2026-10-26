@@ -162,3 +162,21 @@ export function socketPath(tmpdir: string, playbookAbsPath: string): string {
 	const hash = new Bun.CryptoHasher("sha256").update(playbookAbsPath).digest("hex");
 	return `${tmpdir.replace(/\/$/, "")}/omp-playbooks/${hash}.sock`;
 }
+
+// Pane socket: a main omp session running in Tern pane P listens at `paneSocketPath(tmpdir, P)` while it
+// lives, so a document service can ask that session to become a Playbook's coordinator. One JSON line
+// each way; the session closes the connection after its reply.
+
+export type PaneRequest =
+	/** Is a session with omp-playbooks here? */
+	| { readonly op: "ping" }
+	/** Connect to the document service of `doc` as its coordinator (the K1 hello), now. */
+	| { readonly op: "attach"; readonly doc: string };
+
+export type PaneReply =
+	| { readonly ok: true; readonly session: string; readonly cwd: string }
+	| { readonly ok: false; readonly error: { readonly code: string; readonly message: string } };
+
+export function paneSocketPath(tmpdir: string, pane: string): string {
+	return `${tmpdir.replace(/\/$/, "")}/omp-playbooks/pane-${pane}.sock`;
+}

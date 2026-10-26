@@ -4,11 +4,12 @@ import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { parseBlockId, parseLaunchId, parseRunId, type BlockId, type LaunchId, type RunId } from "../domain/model";
-import { socketPath, type EventPayload, type Request, type ServerFrame } from "../domain/protocol";
+import { paneSocketPath, socketPath, type EventPayload, type PaneReply, type PaneRequest, type Request, type ServerFrame } from "../domain/protocol";
 import { K1Client, type Reply } from "./client";
 import { splitPane } from "../service/panes";
 import { ensureTernPlugin, type TernPluginState } from "./tern-setup";
 import { availableAgents } from "./agents";
+import { listenPane, type PaneListener } from "./pane-listener";
 
 /** A block body that is one fenced js/py code block is an orchestration block (launch-events.md §1). */
 const ORCHESTRATION = /^\s*```(js|py)\s*\n([\s\S]*)\n```\s*$/;
@@ -434,16 +435,42 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		return { input: { ...input, code: importLine({}) + input.code, ...(input.timeout === undefined && waits.test(input.code) ? { timeout: 0 } : {}) } };
 	});
 
+	/**
+	 * A pane socket request from a document service: `attach` connects this session to that Playbook's
+	 * service as its coordinator (what playbook_open does for an already running service), then tells the
+	 * model so in the transcript without starting a turn.
+	 */
+	async function onPaneRequest(request: PaneRequest, ctx: ExtensionContext): Promise<PaneReply> {
+		const here = { ok: true as const, session: ctx.sessionManager.getSessionId(), cwd: ctx.cwd };
+		if (request.op === "ping") return here;
+		if (stopped) return { ok: false, error: { code: "Disconnected", message: "coordinator session has ended" } };
+		let absolute: string;
+		try { absolute = await realpath(request.doc); }
+		catch { return { ok: false, error: { code: "NoService", message: `cannot resolve Playbook ${request.doc}` } }; }
+		const ready = await (await clientFor(absolute, ctx)).connect();
+		if (!ready.ok) return { ok: false, error: { code: ready.error.code, message: ready.error.message } };
+		pi.sendMessage({ customType: "playbook-event", content: `这是 Playbook 文档服务的通知，不是用户消息\n人在 Playbook 面板里指定本会话为 ${absolute} 的协调者，扩展已经连接（等同 playbook_open）。用 playbook_read {doc: ${JSON.stringify(absolute)}} 了解它；之后每收到 Playbook 通知，按通知里的下一步做。`, display: true });
+		return here;
+	}
+	let paneListener: PaneListener | null = null;
+	let paneContext: ExtensionContext | null = null;
+
 	pi.on("session_start", async (_event, ctx) => {
 		if (ctx.agent.kind !== "main") return;
 		registerTools();
 		registerCommands();
 		const notice = ternNotice(ternState);
 		if (notice) ctx.ui.notify(notice.text, notice.level);
+		paneContext = ctx;
+		const pane = process.env.TERN_PANE;
+		// The pane id becomes part of a socket path: only the daemon's numeric form is used.
+		if (pane && /^[0-9]+$/.test(pane) && paneListener === null) paneListener = await listenPane(paneSocketPath(tmpdir(), pane), request => onPaneRequest(request, paneContext!));
 	});
 
 	pi.on("session_shutdown", () => {
 		stopped = true;
+		paneListener?.close();
+		paneListener = null;
 		for (const client of clients.values()) client.close();
 		clients.clear();
 	});
