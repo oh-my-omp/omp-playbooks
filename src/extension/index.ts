@@ -9,8 +9,11 @@ import { K1Client, type Reply } from "./client";
 import { splitPane } from "../service/panes";
 import { ensureTernPlugin, type TernPluginState } from "./tern-setup";
 import { availableAgents } from "./agents";
-import { LANGUAGE, tr, withLanguage } from "../i18n";
+import { language, tr, withLanguage } from "../i18n";
+import { configureExtensionLanguage } from "./language";
 import { listenPane, type PaneListener } from "./pane-listener";
+
+configureExtensionLanguage();
 
 /** A block body that is one fenced js/py code block is an orchestration block (launch-events.md §1). */
 const ORCHESTRATION = /^\s*```(js|py)\s*\n([\s\S]*)\n```\s*$/;
@@ -142,6 +145,29 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	let session: string | undefined;
 	let stopped = false;
 
+	type LaunchData = Extract<EventPayload, { event: "launch_requested" }>["data"];
+	type QueuedLaunch = { readonly absolute: string; readonly data: LaunchData };
+	// A Launch click reaches the model only at an input-ready state: requests made while this session
+	// runs a turn wait here and leave together as one notice when the turn ends. `busy` follows the
+	// session's own agent_start/agent_end; `delivering` keeps deliveries in order, one at a time.
+	let launches: QueuedLaunch[] = [];
+	let busy = false;
+	let delivering: Promise<void> = Promise.resolve();
+
+	/** Send every held launch request as one notice, unless a turn started meanwhile (its agent_end delivers them). */
+	function deliverLaunches(ctx: ExtensionContext): Promise<void> {
+		const delivered = delivering.then(async () => {
+			if (busy || launches.length === 0) return;
+			const batch = launches;
+			launches = [];
+			const content = await launchNotice(batch);
+			// Still unwinding the ended turn: followUp waits for idle (or, after Esc, for the person's next prompt).
+			pi.sendMessage({ customType: "playbook-event", content, display: true }, { deliverAs: ctx.isIdle() ? "aside" : "followUp", triggerTurn: true });
+		});
+		delivering = delivered.catch(() => undefined);
+		return delivered;
+	}
+
 	/** Absolute Playbook path for a tool call: the given file, else the only connected document. */
 	async function documentFor(file: string | undefined): Promise<string> {
 		if (file !== undefined) {
@@ -161,6 +187,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		if (session !== undefined && session !== currentSession) {
 			for (const client of clients.values()) client.close();
 			clients.clear();
+			launches = [];
 		}
 		session = currentSession;
 		let client = clients.get(absolute);
@@ -173,6 +200,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				if (event.event === "agents_requested") {
 					await clients.get(absolute)?.request({ op: "agents", args: { result: availableAgents(pi.getAllTools()) } });
 					return;
+				}
+				if (event.event === "launch_requested") {
+					launches.push({ absolute, data: event.data });
+					return deliverLaunches(ctx);
 				}
 				pi.sendMessage({ customType: "playbook-event", content: await notice(absolute, event), display: true }, { deliverAs: "aside", triggerTurn: true });
 			});
@@ -238,12 +269,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
 	// Model-facing text: what the Playbook is, then the one working order across the tools.
 	// New Playbook text is written in this session's language; text already in a file stays as it is.
-	const writeIn = LANGUAGE === "zh" ? "Chinese" : "English";
-	const language = `Write the text you add to a Playbook (titles, task bodies, designs, panel titles after the role word, slot options) in ${writeIn}. That language is set by OMOMP_LANG (else the locale) of this omp process, and it holds whatever language the user writes to you in and whatever language the file already uses. Text already in the file stays exactly as written: never translate it, also when you edit around it.`;
-	const overview = `omp-playbooks: a Playbook is a YAML prompt document the user and you edit together; a document service shows it in a Tern pane beside this session, one card per block. Use the playbook_* tools when the user wants to write, review or run multi-step agent work as a Playbook, or points at a Playbook .yaml file. ${language}`;
+	const writeIn = language() === "zh" ? "Chinese" : "English";
+	const languageInstruction = `Write the text you add to a Playbook (titles, task bodies, designs, panel titles after the role word, slot options) in ${writeIn}. That language is set by OMOMP_LANG (else the locale) of this omp process, and it holds whatever language the user writes to you in and whatever language the file already uses. Text already in the file stays exactly as written: never translate it, also when you edit around it.`;
+	const overview = `omp-playbooks: a Playbook is a YAML prompt document the user and you edit together; a document service shows it in a Tern pane beside this session, one card per block. Use the playbook_* tools when the user wants to write, review or run multi-step agent work as a Playbook, or points at a Playbook .yaml file. ${languageInstruction}`;
 	const format = "File format: `title: <text>` and `blocks:` a list of blocks of two kinds, each written as YAML block scalars (`|`). A task block `{id: b<n>, title, body, status: todo}` is a prompt that runs: `body` is Markdown and may reference `((b2))` (another block), `((file:path | lines(1..40)))` (path relative to the Playbook) or `((https://github.com/o/r/issues/1))`; a body that is exactly one ```js or ```py fenced block is an orchestration block. `status` is todo, running or done; the subagent that runs a block writes `status: running` when it starts and `status: done` with a `report: |` completion report when it finishes (its launch prompt tells it how), so you never write them for it. Write `task: false` instead of `status` on a task block that is not a piece of work (an overview, shared rules others reference): it has no status or report, cannot be launched and is left out of the done count. A design block `{id: b<n>, title, requirement, design, status: todo}` is one design or business unit (status todo or done): `requirement` is the person's, written only by them; `design` is yours, written in answer-me-with-html draft format (optional `---` frontmatter with template sheet|doc, title, subtitle, cols; a lead; `## A Panel title {span=2 meta=\"…\"}` panels; Markdown with tables (status words ok/no/warn), `$…$`/`$$` math and `![alt](path)` images; fences flow, er, sequence, tree, timeline, limits, annot, kv, callout, slot, diff, html, svg, and code blocks with src=/lines=/hl=; flow/er/tree lines may start with `+ ` `- ` `~ ` change markers) and drawn in the pane; it never expands `((…))`. Task bodies use the same panels and fences and are drawn the same way. Every card's text is written for the person as Where/What/How: each task body (tracked or `task: false`; not an orchestration block, which is code) and each design has panels whose titles start with the role word, which stays English whatever language the rest is in — `## A Where · <title>` (object, location, scope, current state, evidence), `## B What · <title>` (goal, decision, expected result, boundaries), `## C How · <title>` (steps, verification, failure handling, rollback). Every role has content and they come in that order; a role may span several panels (`## D How · <title>`), and a lead or panels of no role may sit anywhere. playbook_check reports a text that breaks this as `outline`, and the pane lists what is missing; the person's `requirement` and completion reports are free-form. A slot is a value the person picks: a ```slot <name> fence declares it with `= <current value>`, then options `* <recommended> | note`, `- <option> | note` and `~ <option offered earlier> | note`; write `{{<name>}}` in the same text (prose, list items, kv values, flow node labels) where the value goes. The pane draws `{{<name>}}` as the current value the person can switch; compiling replaces it with the value and drops the fence. Task blocks pull designs in by reference: `((b3))` (requirement and design), `((b3 | requirement))`, `((b3 | design))` or `((b3 | panel(A)))`, where A is a letter ID written in that panel's heading (write IDs on every panel a task may reference). Design blocks cannot be launched themselves.";
 	const order = "Order: write the YAML, playbook_open it, playbook_read/playbook_edit blocks, then run blocks of the Playbook from eval: a prompt block with `var worker = await playbook.agent({ blocks: [\"b2\"] })` (returns once the subagent is started and bound) and, after it finishes, `await playbook.result(worker)` in a later eval (records its final message on the block and closes the Launch), or in one blocking call `await playbook.run({ blocks: [\"b2\"] })`; an orchestration block with playbook_launch {op:\"launch\"} and then an eval whose whole code is `await playbook.exec(\"l<n>\")`. To run the same Playbook again from a clean state, playbook_run {op:\"start\"} copies it into a Run (r<n>) with every status back to todo and no reports; pass `run: \"r1\"` to the same calls to work in that Run. `doc` may be omitted while exactly one Playbook is open.";
-	const evalHelp = "In eval, `playbook` is provided automatically: the extension adds the `var playbook = …` first line to any JS cell that uses it, so do not write that line yourself. playbook.agent({run?, blocks, agent?, isolated?, label?, schema?}) → {launch, blocks, id, handle} without waiting: keep it in a top-level `var` and wait with the top-level `wait` tool, so panel notices (launch and stop requests, revision requests, block changes) still reach you while the subagent works; then `await playbook.result(worker, {block?, close?})` in a later eval records the subagent's final message (or failure) on the given block, by default the Launch's only block, and closes the Launch that playbook.agent created. Options left out come from the block's preset `agent`/`isolated`; pass agent: \"<name>\" (for example \"task:mid\") when the default subagent is disabled and the block sets none. playbook.run({...}) = agent + result in one blocking call. playbook.spawn(launch, {...}) adds a subagent to an open prompt Launch using its current baseline (after rebase, the rebased text); its result does not close the shared Launch unless {close: true}. playbook.stop(launch) cancels every subagent this session started for that Launch and sets the Launch's running blocks back to todo; the pending playbook.result then records the failure and closes the Launch. playbook.post({run?, kind, text, block?, launch?}); playbook.timeline({run?, after?}); playbook.read({run?, block?}); inside an orchestration Launch, playbook.context is {doc, run, launch}.";
+	const evalHelp = "In eval, `playbook` is provided automatically: the extension adds the `var playbook = …` first line to any JS cell that uses it, so do not write that line yourself. playbook.agent({run?, blocks, agent?, isolated?, label?, schema?}) → {launch, blocks, id, handle} without waiting: keep it in a top-level `var` and wait with the top-level `wait` tool, so panel notices (stop requests, revision requests, block changes) still reach you while the subagent works; launch requests the person makes while you are in a turn (waiting included) are held and reach you together as one notice when the turn ends. Then `await playbook.result(worker, {block?, close?})` in a later eval records the subagent's final message (or failure) on the given block, by default the Launch's only block, and closes the Launch that playbook.agent created. Options left out come from the block's preset `agent`/`isolated`; pass agent: \"<name>\" (for example \"task:mid\") when the default subagent is disabled and the block sets none. playbook.run({...}) = agent + result in one blocking call. playbook.spawn(launch, {...}) adds a subagent to an open prompt Launch using its current baseline (after rebase, the rebased text); its result does not close the shared Launch unless {close: true}. playbook.stop(launch) cancels every subagent this session started for that Launch and sets the Launch's running blocks back to todo; the pending playbook.result then records the failure and closes the Launch. playbook.post({run?, kind, text, block?, launch?}); playbook.timeline({run?, after?}); playbook.read({run?, block?}); inside an orchestration Launch, playbook.context is {doc, run, launch}.";
 
 	type Tool<T> = { readonly name: string; readonly label: string; readonly description: string; readonly parameters: { parse(value: unknown): T }; run(params: T, ctx: ExtensionContext): Promise<Reply> };
 	const tools = [
@@ -348,30 +379,46 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		}
 	}
 
+	const header = tr("This is a Playbook document service notice, not a user message", "这是 Playbook 文档服务的通知，不是用户消息");
+
+	/** The next call for one launch request: which execution its blocks take and how to start it. */
+	async function launchNext(absolute: string, data: LaunchData): Promise<string> {
+		const docLiteral = JSON.stringify(absolute);
+		const blocks = JSON.stringify(data.blocks);
+		const bodies = await clients.get(absolute)?.request({ op: "read", args: scoped(data.run) });
+		const parsed = bodies?.ok ? readResult.safeParse(bodies.result) : undefined;
+		const requested = parsed?.success === true ? parsed.data.blocks.filter(item => data.blocks.includes(item.id)) : [];
+		const orchestration = requested.some(item => item.kind === "task" && ORCHESTRATION.test(item.body));
+		const only = requested.length === 1 && requested[0]!.kind === "task" ? requested[0]! : null;
+		const preset = only && (only.agent !== undefined || only.isolated !== undefined)
+			? tr(`Block ${only.id} has preset${only.agent !== undefined ? ` agent: "${only.agent}"` : ""}${only.isolated !== undefined ? ` isolated: ${only.isolated}` : ""}, so playbook.agent / playbook.run use it automatically when arguments are omitted.`, `块 ${only.id} 已预设${only.agent !== undefined ? ` agent: "${only.agent}"` : ""}${only.isolated !== undefined ? ` isolated: ${only.isolated}` : ""}，不显式传参时 playbook.agent / playbook.run 自动使用。`)
+			: "";
+		const where = data.run === undefined ? "Playbook" : `Run ${data.run}`;
+		const runArg = data.run === undefined ? "" : `, run: "${data.run}"`;
+		const call = `{ doc: ${docLiteral}${runArg}, blocks: ${blocks} }`;
+		return orchestration
+					? tr(`A person requested launching orchestration blocks ${blocks}. Next: call playbook_launch {doc: ${docLiteral}, op: "launch"${runArg}, blocks: ${blocks}} to get l<n>, then send a separate eval whose code is only \`await playbook.exec("l<n>")\`.`, `人请求启动编排块 ${blocks}。下一步：调用 playbook_launch {doc: ${docLiteral}, op: "launch"${runArg}, blocks: ${blocks}} 得到 l<n>，再单独发一个 eval，代码只写 \`await playbook.exec("l<n>")\`。`)
+					: tr(`A person requested launching blocks ${blocks} of ${where === "Playbook" ? "the Playbook" : where}. ${preset ? `${preset} ` : ""}Next, choose one: ① Non-blocking: in eval, \`var worker = await playbook.agent(${call})\` returns as soon as the subagent is started and bound; wait for it with the top-level wait tool, which still lets you handle pane notices meanwhile; after it finishes, send another eval \`await playbook.result(worker)\` to record the result and close the Launch. ② Single step: \`await playbook.run(${call})\` starts, waits, records and closes. The subagent writes the block's status and completion report into the file itself; you do not write them for it. When the default subagent is disabled and the block has no preset agent, add \`agent: "<available agent>"\` (for example "task:mid"). The extension adds the \`var playbook = …\` line at the start of an eval cell automatically; do not write it yourself.`, `人请求启动 ${where} 的块 ${blocks}。${preset}下一步二选一：① 不阻塞：在 eval 中 \`var worker = await playbook.agent(${call})\`，启动并绑定后立即返回；用顶层 wait 等它，期间仍能处理面板通知；结束后另发 eval \`await playbook.result(worker)\` 记录结果并关闭 Launch。② 单步：\`await playbook.run(${call})\` 启动、等待、记录并关闭。subagent 自己把块的状态与完成报告写进文件，你不用代写。默认 subagent 被禁用且块没有预设 agent 时加上 \`agent: "<可用的 agent>"\`（例如 "task:mid"）。eval 单元开头那行 \`var playbook = …\` 由扩展自动加入，不要自己再写。`)
+	}
+
+	/**
+	 * The launch requests of one delivery as one notice: a single request reads like every other
+	 * notice; several (clicked while this session was busy) are numbered in click order, each with its
+	 * own next call, followed by one data line per request.
+	 */
+	async function launchNotice(batch: readonly QueuedLaunch[]): Promise<string> {
+		const nexts = await Promise.all(batch.map(item => launchNext(item.absolute, item.data)));
+		const data = batch.map(item => JSON.stringify({ doc: item.absolute, event: "launch_requested", data: item.data }));
+		if (batch.length === 1) return `${header}\n${nexts[0]}\n${data[0]}`;
+		const intro = tr(`${batch.length} launch requests arrived while this session was busy, collected here in click order. Each is a separate Launch; handle them one by one:`, `本会话忙碌期间收到 ${batch.length} 个启动请求，按点击顺序合并在这里。它们是各自独立的 Launch，逐个处理：`);
+		return [header, intro, ...nexts.map((next, index) => `${index + 1}. ${next}`), ...data].join("\n");
+	}
+
 	/** Event aside: header line, the next call to make, then the data (launch-events.md §6). */
-	async function notice(absolute: string, event: Exclude<EventPayload, { event: "interrupted" | "agents_requested" }>): Promise<string> {
-		const header = tr("This is a Playbook document service notice, not a user message", "这是 Playbook 文档服务的通知，不是用户消息");
+	async function notice(absolute: string, event: Exclude<EventPayload, { event: "interrupted" | "agents_requested" | "launch_requested" }>): Promise<string> {
 		const docLiteral = JSON.stringify(absolute);
 		let next: string;
 		switch (event.event) {
-			case "launch_requested": {
-				const blocks = JSON.stringify(event.data.blocks);
-				const bodies = await clients.get(absolute)?.request({ op: "read", args: scoped(event.data.run) });
-				const parsed = bodies?.ok ? readResult.safeParse(bodies.result) : undefined;
-				const requested = parsed?.success === true ? parsed.data.blocks.filter(item => event.data.blocks.includes(item.id)) : [];
-				const orchestration = requested.some(item => item.kind === "task" && ORCHESTRATION.test(item.body));
-				const only = requested.length === 1 && requested[0]!.kind === "task" ? requested[0]! : null;
-				const preset = only && (only.agent !== undefined || only.isolated !== undefined)
-					? tr(`Block ${only.id} has preset${only.agent !== undefined ? ` agent: "${only.agent}"` : ""}${only.isolated !== undefined ? ` isolated: ${only.isolated}` : ""}, so playbook.agent / playbook.run use it automatically when arguments are omitted.`, `块 ${only.id} 已预设${only.agent !== undefined ? ` agent: "${only.agent}"` : ""}${only.isolated !== undefined ? ` isolated: ${only.isolated}` : ""}，不显式传参时 playbook.agent / playbook.run 自动使用。`)
-					: "";
-				const where = event.data.run === undefined ? "Playbook" : `Run ${event.data.run}`;
-				const runArg = event.data.run === undefined ? "" : `, run: "${event.data.run}"`;
-				const call = `{ doc: ${docLiteral}${runArg}, blocks: ${blocks} }`;
-				next = orchestration
-					? tr(`A person requested launching orchestration blocks ${blocks}. Next: call playbook_launch {doc: ${docLiteral}, op: "launch"${runArg}, blocks: ${blocks}} to get l<n>, then send a separate eval whose code is only \`await playbook.exec("l<n>")\`.`, `人请求启动编排块 ${blocks}。下一步：调用 playbook_launch {doc: ${docLiteral}, op: "launch"${runArg}, blocks: ${blocks}} 得到 l<n>，再单独发一个 eval，代码只写 \`await playbook.exec("l<n>")\`。`)
-					: tr(`A person requested launching blocks ${blocks} of ${where === "Playbook" ? "the Playbook" : where}. ${preset ? `${preset} ` : ""}Next, choose one: ① Non-blocking: in eval, \`var worker = await playbook.agent(${call})\` returns as soon as the subagent is started and bound; wait for it with the top-level wait tool, which still lets you handle pane notices meanwhile; after it finishes, send another eval \`await playbook.result(worker)\` to record the result and close the Launch. ② Single step: \`await playbook.run(${call})\` starts, waits, records and closes. The subagent writes the block's status and completion report into the file itself; you do not write them for it. When the default subagent is disabled and the block has no preset agent, add \`agent: "<available agent>"\` (for example "task:mid"). The extension adds the \`var playbook = …\` line at the start of an eval cell automatically; do not write it yourself.`, `人请求启动 ${where} 的块 ${blocks}。${preset}下一步二选一：① 不阻塞：在 eval 中 \`var worker = await playbook.agent(${call})\`，启动并绑定后立即返回；用顶层 wait 等它，期间仍能处理面板通知；结束后另发 eval \`await playbook.result(worker)\` 记录结果并关闭 Launch。② 单步：\`await playbook.run(${call})\` 启动、等待、记录并关闭。subagent 自己把块的状态与完成报告写进文件，你不用代写。默认 subagent 被禁用且块没有预设 agent 时加上 \`agent: "<可用的 agent>"\`（例如 "task:mid"）。eval 单元开头那行 \`var playbook = …\` 由扩展自动加入，不要自己再写。`)
-				break;
-			}
 			case "stop_requested": {
 				const stopCalls = event.data.launches.map(item => `\`await playbook.stop("${item.id}")\``);
 				const stopsEn = stopCalls.join(", ");
@@ -474,9 +521,22 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		const notice = ternNotice(ternState);
 		if (notice) ctx.ui.notify(notice.text, notice.level);
 		paneContext = ctx;
+		busy = !ctx.isIdle();
 		const pane = process.env.TERN_PANE;
 		// The pane id becomes part of a socket path: only the daemon's numeric form is used.
 		if (pane && /^[0-9]+$/.test(pane) && paneListener === null) paneListener = await listenPane(paneSocketPath(tmpdir(), pane), request => onPaneRequest(request, paneContext!));
+	});
+
+	pi.on("agent_start", (_event, ctx) => {
+		if (ctx.agent.kind === "main") busy = true;
+	});
+
+	// The turn ended at an input-ready state: deliver the launch requests held during it. An automatic
+	// continuation keeps the turn going; a settle that only awaits background work leaves the session open for input.
+	pi.on("agent_end", (event, ctx) => {
+		if (ctx.agent.kind !== "main" || (event.willContinue === true && event.awaitingAsyncWork !== true)) return;
+		busy = false;
+		return deliverLaunches(ctx);
 	});
 
 	pi.on("session_shutdown", () => {
@@ -485,6 +545,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		paneListener = null;
 		for (const client of clients.values()) client.close();
 		clients.clear();
+		launches = [];
 	});
 
 	async function commandClient(args: string, ctx: ExtensionContext): Promise<K1Client | undefined> {

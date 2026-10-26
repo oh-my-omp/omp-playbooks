@@ -124,6 +124,7 @@ async function harness(kind: "main" | "sub" = "main") {
 	const choices: (string | null | undefined)[] = [];
 	const sent = Promise.withResolvers<void>();
 	let aborted = 0;
+	let idle = true;
 	let selectHook: ((title: string) => Promise<void>) | undefined;
 	let branch: Entry[] = [
 		{ type: "message", id: "user-1", message: { role: "user", content: "USER" } },
@@ -133,6 +134,7 @@ async function harness(kind: "main" | "sub" = "main") {
 		agent: { kind },
 		sessionManager: { getSessionId: () => "session-test", getBranch: () => branch },
 		abort: () => { aborted++; },
+		isIdle: () => idle,
 		ui: {
 			select: async (title: string, options: string[]) => {
 				menus.push({ title, options }); await selectHook?.(title);
@@ -142,11 +144,12 @@ async function harness(kind: "main" | "sub" = "main") {
 		},
 	} as unknown as ExtensionCommandContext;
 	// Only the host surfaces this extension consumes are supplied; production types remain unchanged.
+	const waiting: (() => void)[] = [];
 	const api = {
 		zod, registerTool: (value: Tool) => { tools.set(value.name, value); },
 		on: (event: string, handler: Handler) => { handlers.set(event, handler); },
 		registerCommand: (name: string, value: { handler(args: string, ctx: ExtensionCommandContext): Promise<void> }) => { commands.set(name, value); },
-		sendMessage: (message: { customType: string; content: string; display: boolean }, options: unknown) => { messages.push({ message, options }); sent.resolve(); },
+		sendMessage: (message: { customType: string; content: string; display: boolean }, options: unknown) => { messages.push({ message, options }); sent.resolve(); for (const resolve of waiting.splice(0)) resolve(); },
 	} as unknown as ExtensionAPI;
 	await extension(api);
 	let started = false;
@@ -162,6 +165,8 @@ async function harness(kind: "main" | "sub" = "main") {
 	return {
 		ctx, messages, notices, menus, choices, event, tools, messageSent: sent.promise,
 		get aborted() { return aborted; }, get registered() { return { tools: [...tools.keys()], commands: [...commands.keys()] }; },
+		set idle(value: boolean) { idle = value; },
+		nextMessage: (): Promise<void> => { const next = Promise.withResolvers<void>(); waiting.push(next.resolve); return next.promise; },
 		set branch(value: Entry[]) { branch = value; }, set selectHook(value: typeof selectHook) { selectHook = value; },
 		execute: async (name: string, params: unknown) => { await start(); return tools.get(name)!.execute("tool", params, undefined, undefined, ctx); },
 		call: async (input: unknown, toolName = "eval"): Promise<ToolCallResult> => { await start(); return await event("tool_call", { toolName, input }) as ToolCallResult; },
@@ -577,6 +582,44 @@ test("launch_requested names a single block's preset agent and isolated", async 
 	await h.messageSent;
 	const lines = h.messages[0]!.message.content.split("\n");
 	expect(lines[1]).toContain('块 b1 已预设 agent: "task:mid" isolated: true，不显式传参时 playbook.agent / playbook.run 自动使用。');
+});
+
+test("launch requests made during a turn wait for its end and arrive as one notice", async () => {
+	const s = await service(); const h = await harness();
+	await h.execute("playbook_open", { doc: s.doc });
+	const doc = await realpath(s.doc);
+	s.handler = (frame, socket) => respond(socket, frame, frame.op === "runs" ? { runs: [summary] } : { title: "Book", blocks: [block, { ...block, id: "b2", body: "Second" }] });
+	await h.event("agent_start");
+	s.push({ event: "launch_requested", data: { blocks: ["b1"] } } as EventPayload);
+	s.push({ event: "launch_requested", data: { run: "r1", blocks: ["b2"] } } as EventPayload);
+	// A reply after both events on the same socket: the extension has handled them.
+	await h.execute("playbook_run", { doc: s.doc, op: "list" });
+	await h.event("agent_end", { messages: [], willContinue: true });
+	expect(h.messages).toHaveLength(0);
+	// The turn settles while the prompt is still unwinding: the notice queues behind it as a followUp.
+	h.idle = false;
+	await h.event("agent_end", { messages: [] });
+	expect(h.messages).toHaveLength(1);
+	expect(h.messages[0]!.options).toEqual({ deliverAs: "followUp", triggerTurn: true });
+	const lines = h.messages[0]!.message.content.split("\n");
+	expect(lines).toHaveLength(6);
+	expect(lines[0]).toBe("这是 Playbook 文档服务的通知，不是用户消息");
+	expect(lines[1]).toBe("本会话忙碌期间收到 2 个启动请求，按点击顺序合并在这里。它们是各自独立的 Launch，逐个处理：");
+	expect(lines[2]).toStartWith(`1. 人请求启动 Playbook 的块 ["b1"]`);
+	expect(lines[3]).toStartWith(`2. 人请求启动 Run r1 的块 ["b2"]`);
+	expect(lines[3]).toContain(`run: "r1"`);
+	expect(lines.slice(4).map(line => JSON.parse(line))).toEqual([
+		{ doc, event: "launch_requested", data: { blocks: ["b1"] } },
+		{ doc, event: "launch_requested", data: { run: "r1", blocks: ["b2"] } },
+	]);
+	// Idle again: the next click is delivered at once, alone.
+	h.idle = true;
+	const delivered = h.nextMessage();
+	s.push({ event: "launch_requested", data: { blocks: ["b2"] } } as EventPayload);
+	await delivered;
+	expect(h.messages).toHaveLength(2);
+	expect(h.messages[1]!.options).toEqual({ deliverAs: "aside", triggerTurn: true });
+	expect(h.messages[1]!.message.content.split("\n")).toHaveLength(3);
 });
 
 test("exec runs the latest rebased orchestration code, not the frozen snapshot", async () => {

@@ -164,7 +164,7 @@ blocks:
 - **状态图标：** 点击在 `done` 和 `todo` 之间切换，并用 `status_changed` 通知协调者。勾选完成不改动块的报告。
 - **展开的卡片：** “⋯”打开菜单，里面是“删除此块”。正文用下文的组件绘制。执行块底部显示“SUBAGENT”（即 `agent`）和“独立 WORKTREE”（双击切换 `isolated`），再下面是启动按钮。`done` 的块改为显示折叠的“完成报告”，点击展开。
 - **SUBAGENT 下拉框：** 点击后列出“默认”（不指定，用 omp 的默认 subagent）和协调者的 omp 会话此刻能启动的 subagent 类型，选中即写入 `agent`。每次打开下拉框都会向协调者重新询问：扩展从会话内置的 `task` 工具读取这份列表，其中已去掉被禁用的 agent 并应用了 spawn 策略。协调者离线或会话无法列出时，下拉框会说明原因，只提供“默认”。已保存但会话不再列出的名称仍作为当前设置显示，不会被自动改掉；启动时 omp 还会再检查一次。
-- **启动按钮：** “启动”为这个块发出 `launch_requested`；在协调者从这个块建立 Launch 之前，按钮显示“已请求启动”且不能再点。块在 `running` 时按钮变成“打断执行”：有未关闭的 Launch 时向协调者发 `stop_requested`；没有时说明并没有在执行，块直接改回 `todo`。
+- **启动按钮：** “启动”为这个块发出 `launch_requested`；在协调者从这个块建立 Launch 之前，按钮显示“已请求启动”且不能再点。协调者会话空闲时立即收到请求；正在一轮对话中（包括用 wait 等 worker）时，请求等到这一轮结束才送达，这一轮里点过的所有启动合并成一条通知送达，每个仍是独立的 Launch。块在 `running` 时按钮变成“打断执行”：有未关闭的 Launch 时向协调者发 `stop_requested`；没有时说明并没有在执行，块直接改回 `todo`。
 - **一起启动多块：** ⌘ 点卡片标题选中跟踪的执行块；dock 显示“一起启动 N 块”和“取消”。这些块按文档顺序合成一个 Launch；编排块只能单独启动。
 - **dock 状态栏：** “协调者在线”（点击转到协调者的 pane）或“协调者离线 · 选择协调者”，以及“N / M 已完成”（跟踪块中的完成数）。
 - **选择协调者：** 离线时点状态栏，列出这个 Tern 窗口里（窗口包含的所有会话）运行 omp 的 pane；每次打开都重新向 Tern（`tern inspect`）读取。运行本版本 omp-playbooks 的 omp 会话可以选；其他 omp pane 也会列出但不能选，升级 omp-playbooks 之前就已在运行的 omp 会话需要先重启。选中后，扩展通过它为自己 pane 保留的 socket 让该会话立即连接这份 Playbook，效果等同 `playbook_open`，并在它的对话里留一条通知（不开始新的一轮）；一个会话可以同时协调多份 Playbook。随后 Playbook pane 被移到那个 omp pane 的右半边（`tern move … right-of …`），无论两者原来嵌套多深。“新建会话”在 Playbook pane 左侧新开一个 omp pane，启动时带一条初始化提示，让它 `playbook_open` 这份文件；它连上后状态栏变为在线。连接失败和移动失败分开提示：连接失败时什么都不移动；只有移动失败时，协调者仍然在线。
@@ -338,13 +338,13 @@ var worker = await playbook.agent({
 });
 ```
 
-`playbook.agent` 在 worker 启动并绑定后立即返回。`worker` 是顶层变量，后续 eval 单元仍可使用；用 omp 的 `wait` 工具等待 worker，期间主会话照常处理面板上的请求和变更通知。subagent 把 b3 改成 `running`，结束时改成 `done` 并写报告。之后另发一个 eval：
+`playbook.agent` 在 worker 启动并绑定后立即返回。`worker` 是顶层变量，后续 eval 单元仍可使用；用 omp 的 `wait` 工具等待 worker，期间主会话照常处理面板上的打断、修改要求和变更通知；点“启动”的请求等这一轮结束才送达。subagent 把 b3 改成 `running`，结束时改成 `done` 并写报告。之后另发一个 eval：
 
 ```js
 return await playbook.result(worker);
 ```
 
-它把 worker 的最终消息作为结果记到 b3（Launch 只有一个块时自动关联）并关闭这个 Launch。不需要中途响应面板时，也可以用一次阻塞调用 `await playbook.run({ blocks: ["b3"], agent: "task:mid" })` 完成启动、等待、记录和关闭。人在面板上点“启动”会以 `launch_requested` 到达，通知里给出同样的调用。
+它把 worker 的最终消息作为结果记到 b3（Launch 只有一个块时自动关联）并关闭这个 Launch。不需要中途响应面板时，也可以用一次阻塞调用 `await playbook.run({ blocks: ["b3"], agent: "task:mid" })` 完成启动、等待、记录和关闭。人在面板上点“启动”会在协调者空闲时以 `launch_requested` 到达（同一轮里点的多个启动合成一条通知，按点击顺序编号），通知里给出同样的调用。
 
 要在不动文件的情况下从干净状态再执行一遍，调用 `playbook_run {op: "start", name: "检查缓存方案"}`，把返回的 Run ID 作为 `run` 传给上面的调用；最后 `playbook_run {op:"finish", run}`。
 
