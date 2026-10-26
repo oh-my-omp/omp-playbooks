@@ -107,6 +107,12 @@ describe("editable kv rendering", () => {
 		expect(new Set(ids).size).toBe(ids.length);
 		expect(ids.every(id => id.startsWith(`${context.id}.`))).toBe(true);
 	});
+	test("inline Markdown in values is drawn, not shown as literal backticks", () => {
+		const nodes = flatten(renderKv(spec(["Target: only `mail-to-root` (**sendmail**)"]), context).nodes);
+		expect(nodes.filter(node => node.p?.tag === "code").map(node => node.p?.text)).toEqual(["mail-to-root"]);
+		expect(nodes.filter(node => node.p?.tag === "strong").map(node => node.p?.text)).toEqual(["sendmail"]);
+		expect(nodes.some(node => typeof node.p?.text === "string" && node.p.text.includes("`"))).toBe(false);
+	});
 	test("declared slots in values use the slot host without changing keys", () => {
 		const uses: string[] = [];
 		const slot = { name: "owner", value: "Platform", options: [], line: 1 };

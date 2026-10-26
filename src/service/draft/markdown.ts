@@ -100,12 +100,13 @@ function inlineNodes(id: string, text: string): TspNode[] {
 }
 
 /**
- * Text drawn as Markdown, or, when it uses declared slots, as inline runs with each slot's control
- * in its place (a `md` node cannot hold controls).
+ * Text drawn as Markdown. A block (`div`) without slots is a `md` node; inline text (`span`, such as a
+ * kv value) and text with slots become inline runs, each slot's control in its place (a `md` node is a
+ * block and cannot hold controls).
  */
 export function inlineText(ctx: RenderContext, id: string, text: string, tag: "div" | "span" = "div"): TspNode {
 	const parts = slotParts(text, ctx.slots);
-	if (!parts.some(part => part.kind === "slot")) return tag === "div" ? { id, k: "md", p: { text } } : { id, k: "el", p: { tag, class: "pb-inline", text } };
+	if (tag === "div" && !parts.some(part => part.kind === "slot")) return { id, k: "md", p: { text } };
 	return {
 		id, k: "el", p: { tag, class: "pb-inline" },
 		c: parts.flatMap((part, index): TspNode[] => part.kind === "slot" ? [ctx.edit.slot(`${id}.s${index}`, part.name)] : inlineNodes(`${id}.t${index}`, part.text)),
