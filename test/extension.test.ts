@@ -8,7 +8,7 @@ import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { z as zod } from "@oh-my-pi/omptype/zod";
-import { LANGUAGE } from "../src/i18n";
+import { language } from "../src/i18n";
 import { parseRunId } from "../src/domain/model";
 import { socketPath, type EventPayload, type Request, type ServerFrame } from "../src/domain/protocol";
 import extension from "../src/extension/index";
@@ -393,7 +393,7 @@ test("open starts the document service beside the coordinator pane and returns h
 	expect(result.isError).toBe(false);
 	expect(JSON.parse(result.content[0]!.text!)).toMatchObject({ blocks: ["b1"], pane: "document-pane" });
 	const real = await realpath(doc);
-	expect(await tern.args()).toEqual(["split", "coordinator-pane", "right", "--cwd", dirname(real), "--json", "--", "env", `OMOMP_LANG=${LANGUAGE}`, "bun", resolve(import.meta.dir, "../src/service/main.ts"), real]);
+	expect(await tern.args()).toEqual(["split", "coordinator-pane", "right", "--cwd", dirname(real), "--json", "--", "env", `OMOMP_LANG=${language()}`, "bun", resolve(import.meta.dir, "../src/service/main.ts"), real]);
 	expect(s.frames.map(frame => frame.op)).toEqual(["hello"]);
 });
 

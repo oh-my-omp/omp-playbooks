@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { LANGUAGE } from "../src/i18n";
+import { language } from "../src/i18n";
 import { availableAgents } from "../src/extension/agents";
 import { initPrompt } from "../src/service/coordinators";
 import { launchFooter } from "../src/service/footer";
@@ -20,7 +20,7 @@ function texts(nodes: readonly TspNode[]): string[] {
 	});
 }
 
-describe.skipIf(LANGUAGE !== "en")("English texts", () => {
+describe.skipIf(language() !== "en")("English texts", () => {
 	test("the pane, its overlays and notices have no Chinese", async () => {
 		const pane = await fixture([task("b1", "Do it."), design("b2")]);
 		const seen: string[] = [];
@@ -58,7 +58,7 @@ describe.skipIf(LANGUAGE !== "en")("English texts", () => {
 	});
 });
 
-test.skipIf(LANGUAGE === "en")("the English texts hold in an English process", () => {
+test.skipIf(language() === "en")("the English texts hold in an English process", () => {
 	const run = Bun.spawnSync(["bun", "test", "test/english.test.ts"], { cwd: `${import.meta.dir}/..`, env: { ...process.env, OMOMP_LANG: "en" }, stdout: "pipe", stderr: "pipe" });
 	expect(run.stderr.toString()).toContain(" 0 fail");
 	expect(run.exitCode).toBe(0);

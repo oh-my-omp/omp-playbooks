@@ -48,18 +48,20 @@ function normalizedCompile(compiled: CompileResult) {
 	return unreachable(compiled);
 }
 
-const questions: ChecksModule["questions"] = [
-	{
-		id: "missing",
-		type: "bool",
-		instructions:
-			tr("`compiled` is the entire prompt a subagent receives; it can see nothing else. Does `compiled` mention material (logs, discussion, files, earlier results) whose content is absent from `compiled`?", "`compiled` 是子代理收到的完整提示；它看不到其他内容。`compiled` 是否提到了日志、讨论、文件或早先结果等材料，而这些材料的内容并不在 `compiled` 中？"),
-		threshold: 0.5,
-	},
-];
+function questions(): ChecksModule["questions"] {
+	return [
+		{
+			id: "missing",
+			type: "bool",
+			instructions:
+				tr("`compiled` is the entire prompt a subagent receives; it can see nothing else. Does `compiled` mention material (logs, discussion, files, earlier results) whose content is absent from `compiled`?", "`compiled` 是子代理收到的完整提示；它看不到其他内容。`compiled` 是否提到了日志、讨论、文件或早先结果等材料，而这些材料的内容并不在 `compiled` 中？"),
+			threshold: 0.5,
+		},
+	];
+}
 
 export const checks: ChecksModule = {
-	questions,
+	get questions() { return questions(); },
 	findings({ compiled, expansions, content, render }) {
 		const common = { compile: compiled.kind === "Err", render_error: render.blockError || render.documentError, render_pending: render.pendingOverdue };
 		// Task bodies and designs are drawn by the same component renderer, so both are checked for its syntax.
@@ -91,9 +93,10 @@ export const checks: ChecksModule = {
 				const answers = result.answers;
 				if (answers === null || typeof answers !== "object" || Array.isArray(answers)) return false;
 				const ids = Object.keys(answers);
+				const table = questions();
 				return (
-					ids.length === questions.length &&
-					questions.every(question => {
+					ids.length === table.length &&
+					table.every(question => {
 						const value = answers[question.id];
 						return ids.includes(question.id) && typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 					})

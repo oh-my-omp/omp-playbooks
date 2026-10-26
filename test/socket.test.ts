@@ -414,10 +414,16 @@ describe("revealService real Unix sockets", () => {
 			conn.close();
 			return { ok: true, result: null };
 		});
-
-		expect(await revealService(path)).toEqual({
-			kind: "failed",
-			message: "connection closed before a reply",
-		});
+		const previous = process.env.OMOMP_LANG;
+		process.env.OMOMP_LANG = "en";
+		try {
+			expect(await revealService(path)).toEqual({
+				kind: "failed",
+				message: "Connection closed before a reply",
+			});
+		} finally {
+			if (previous === undefined) delete process.env.OMOMP_LANG;
+			else process.env.OMOMP_LANG = previous;
+		}
 	});
 });

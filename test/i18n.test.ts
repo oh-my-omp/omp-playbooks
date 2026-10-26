@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { resolveLanguage } from "../src/i18n";
+import { language, resolveLanguage, withLanguage } from "../src/i18n";
 
 describe("process language", () => {
 	test("OMOMP_LANG en or zh wins over the locale", () => {
@@ -15,6 +15,25 @@ describe("process language", () => {
 		expect(resolveLanguage({ LC_ALL: "C.UTF-8", LANG: "zh_CN.UTF-8" })).toBe("en");
 		expect(resolveLanguage({ LANG: "ZH-tw" })).toBe("zh");
 		for (const value of ["en_US.UTF-8", "C", "POSIX", "ja_JP.UTF-8"]) expect(resolveLanguage({ LANG: value })).toBe("en");
+	});
+	test("a configured language sits after explicit OMOMP_LANG and before locale fallback", () => {
+		expect(resolveLanguage({ OMOMP_LANG: "en", LANG: "zh_CN.UTF-8" }, "zh")).toBe("en");
+		expect(resolveLanguage({ LANG: "en_US.UTF-8" }, "zh")).toBe("zh");
+		expect(resolveLanguage({}, null)).toBe("en");
+	});
+	test("language and withLanguage resolve the environment at call time", () => {
+		const previous = process.env.OMOMP_LANG;
+		try {
+			process.env.OMOMP_LANG = "en";
+			expect(language()).toBe("en");
+			expect(withLanguage(["bun", "service.ts"])).toEqual(["env", "OMOMP_LANG=en", "bun", "service.ts"]);
+			process.env.OMOMP_LANG = "zh";
+			expect(language()).toBe("zh");
+			expect(withLanguage(["omp"])).toEqual(["env", "OMOMP_LANG=zh", "omp"]);
+		} finally {
+			if (previous === undefined) delete process.env.OMOMP_LANG;
+			else process.env.OMOMP_LANG = previous;
+		}
 	});
 	test("no setting at all is English", () => {
 		expect(resolveLanguage({})).toBe("en");

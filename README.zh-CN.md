@@ -66,13 +66,21 @@ bun src/service/main.ts /绝对路径/playbook.yaml
 
 ## 语言
 
-面板及其提示和组件诊断、协调者收到的通知和工具错误、subagent 读到的启动 prompt 尾注、Tern 命令，都可以是英文或中文。每个进程在启动时选定语言：
+面板及其提示和组件诊断、协调者收到的通知和工具错误、subagent 读到的启动 prompt 尾注、Tern 命令，都可以是英文或中文。每个进程在使用界面文字时按以下顺序解析语言：
 
 1. `OMOMP_LANG=en` 或 `OMOMP_LANG=zh`（其他值忽略）；
-2. 否则看 `LC_ALL`、`LC_MESSAGES`、`LANG` 中第一个非空的：以 `zh` 开头为中文，其他都是英文；
-3. 都没有时为英文。
+2. 在 OMP 扩展中，若 `OMOMP_LANG` 无效，则检查 agent 目录中是否恰好有一个 `omomp.yml`、`omomp.yaml`、`omomp.json` 或 `omomp.toml`；其中有效的 `omomp-lang: { language: en|zh }` 提供语言，文件缺失、重复、无法读取或无效时不提供值；
+3. 否则看 `LC_ALL`、`LC_MESSAGES`、`LANG` 中第一个非空的：以 `zh` 开头为中文，其他都是英文；
+4. 都没有时为英文。
 
-扩展用自己的语言启动文档服务和新的协调者会话，所以它们和打开它们的 omp 会话一致。手动启动的服务、从面板接入的已有 omp 会话和 Tern 命令，用各自环境里的语言；Tern 命令读的是 Tern 应用的环境，可能不包含 shell profile 里的设置。在启动 omp 的地方设置这个变量（例如 shell profile），再重启 omp 和 Playbook 面板：运行中的进程不会换语言。
+例如，agent 目录下的 `omomp.yml` 可以写：
+
+```yaml
+omomp-lang:
+  language: zh
+```
+
+扩展会用解析出的语言把 `OMOMP_LANG` 传给文档服务和新协调者会话，因此它们与打开它们的 omp 会话一致。文档服务本身不会读取 omomp 文件；手动启动的服务、从面板接入的已有 omp 会话和 Tern 命令，用各自环境里的语言。Tern 命令读的是 Tern 应用的环境，可能不包含 shell profile 里的设置。在启动 omp 的地方设置这个变量（例如 shell profile），再重启 omp 和 Playbook 面板：运行中的进程不会换语言。
 
 Playbook 文件的内容不翻译：文件里写的是什么，显示和编译的就是什么。语言只决定新写的文字用哪种语言。模型读到的工具说明是英文，它们要求协调者把自己新加的标题、正文、设计稿和槽位选项写成会话的语言，`## A Where · …` 面板的角色词保持英文，已有文字不动；启动 prompt 尾注要求 subagent 用这种语言写完成报告。面板自己插入的文字（新流程节点的名字、粘贴图片的说明）跟随面板的语言。
 

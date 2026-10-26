@@ -36,7 +36,9 @@ const ESC = "\x1b";
 const REF: DocRef = { kind: "template" };
 /** A click on a title waits this long for a second click, which edits the title instead of folding the card. */
 const CLICK_DELAY_MS = 250;
-const VIEWS: readonly { readonly view: ChangeView; readonly label: string }[] = [{ view: "changes", label: tr("Changes", "变更") }, { view: "before", label: tr("Before", "之前") }, { view: "after", label: tr("After", "之后") }];
+function viewOptions(): readonly { readonly view: ChangeView; readonly label: string }[] {
+	return [{ view: "changes", label: tr("Changes", "变更") }, { view: "before", label: tr("Before", "之前") }, { view: "after", label: tr("After", "之后") }];
+}
 
 /** TSP sheets reach only descendants of the region root, so every rule targets nodes inside a region. */
 const SURFACE_CSS = [
@@ -483,7 +485,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 			},
 			edit: fieldHost(block, field, source),
 			view: key => views.get(`${block.id}.${key}`) ?? "changes",
-			viewSwitch: (id, key, current) => el(id, "div", "pb-view-switch", VIEWS.map(option => {
+			viewSwitch: (id, key, current) => el(id, "div", "pb-view-switch", viewOptions().map(option => {
 				const optionId = `${id}.${option.view}`;
 				on(optionId, { click: () => { views.set(`${block.id}.${key}`, option.view); } });
 				return el(optionId, "span", `pb-view${current === option.view ? " pb-view-on" : ""}`, [], { text: option.label, actions: { click: "invoke" } });
@@ -586,7 +588,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 		return el(id, "div", "pb-foot", [
 			rule,
 			el(`${id}.grid`, "div", "pb-grid2", [
-				el(`${id}.agent.col`, "div", "", [el(`${id}.agent.label`, "div", "pb-label", [], { text: "SUBAGENT" }), agent]),
+				el(`${id}.agent.col`, "div", "", [el(`${id}.agent.label`, "div", "pb-label", [], { text: tr("SUBAGENT", "子代理") }), agent]),
 				el(`${id}.isolated.col`, "div", "", [el(`${id}.isolated.label`, "div", "pb-label", [], { text: tr("ISOLATED WORKTREE", "独立 WORKTREE") }), el(isolatedId, "div", "pb-val", [], { text: content.isolated ? tr("Yes", "是") : tr("No", "否"), actions: { dblclick: "edit" } })]),
 			]),
 			el(launchId, "div", `pb-launch${running ? " pb-launch-stop" : item.launchPending ? " pb-launch-off" : ""}`, [], { text: running ? tr("Stop", "打断执行") : item.launchPending ? tr("Launch requested", "已请求启动") : tr("Launch", "启动"), ...(item.launchPending && !running ? {} : { actions: { click: "invoke" } }) }),

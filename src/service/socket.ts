@@ -258,11 +258,11 @@ export function revealService(path: string): Promise<RevealOutcome> {
 			const error = object(frame.error, "error");
 			resolve({ kind: "failed", message: `${string(error.code, "code")}: ${string(error.message, "message")}` });
 		} catch (error) {
-			resolve({ kind: "failed", message: error instanceof Error ? error.message : String(error) });
+			resolve({ kind: "failed", message: tr(`Invalid reveal reply: ${error instanceof Error ? error.message : String(error)}`, `显示回复无效：${error instanceof Error ? error.message : String(error)}`) });
 		}
 	});
-	socket.once("error", error => resolve(connected ? { kind: "failed", message: error.message } : { kind: "absent" }));
-	socket.once("close", () => resolve(connected ? { kind: "failed", message: "connection closed before a reply" } : { kind: "absent" }));
+	socket.once("error", error => resolve(connected ? { kind: "failed", message: tr(`Reveal failed: ${error.message}`, `显示失败：${error.message}`) } : { kind: "absent" }));
+	socket.once("close", () => resolve(connected ? { kind: "failed", message: tr("Connection closed before a reply", "连接在收到回复前关闭") } : { kind: "absent" }));
 	return promise;
 }
 
