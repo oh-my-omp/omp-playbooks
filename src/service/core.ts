@@ -115,6 +115,8 @@ interface ConnState {
 const JUDGE_DELAY_MS = 2_000;
 const WRITE_DELAY_MS = 1_000;
 const DISK_POLL_MS = 1_000;
+/** How long a SUBAGENT dropdown waits for the coordinator's list. */
+const AGENTS_WAIT_MS = 5_000;
 
 function keyOf(ref: DocRef): DocKey {
 	return ref.kind === "template" ? "template" : ref.run;
@@ -223,6 +225,8 @@ export class Core implements CoreApi, K1Handler {
 	#maxLaunch = 0;
 	#editSeq = 0;
 	#eventSeq = 0;
+	/** Numbers the SUBAGENT list requests, so only the latest one's wait can end. */
+	#agentsAsked = 0;
 	#conn: ConnState | null = null;
 	#diskTimer: Timer | undefined;
 
@@ -1466,13 +1470,26 @@ export class Core implements CoreApi, K1Handler {
 		return this.#conn?.session != null ? this.#conn.agents : { kind: "offline" };
 	}
 
-	/** Ask the coordinator which subagents its session can launch; the answer arrives as an `agents` request. */
+	/**
+	 * Ask the coordinator which subagents its session can launch; the answer arrives as an `agents` request.
+	 * A coordinator whose omp-playbooks predates this question never answers (an old extension drops the
+	 * frame and reconnects), so the wait for the latest request ends on whichever connection is current.
+	 */
 	requestAgents(): void {
-		if (!this.#conn || this.#conn.session === null) return;
-		this.#conn.agents = { kind: "pending" };
+		const conn = this.#conn;
+		if (!conn || conn.session === null) return;
+		conn.agents = { kind: "pending" };
+		const asked = ++this.#agentsAsked;
 		// A query about the coordinator's session, not a document event: sent without a log entry.
-		this.#conn.conn.send({ event: "agents_requested", data: {} });
+		conn.conn.send({ event: "agents_requested", data: {} });
 		this.#emit(null);
+		setTimeout(() => {
+			const now = this.#conn;
+			if (asked !== this.#agentsAsked || !now || now.session === null) return;
+			if (now.agents.kind !== "pending" && now.agents.kind !== "unasked") return;
+			now.agents = { kind: "unavailable", reason: "协调者没有回答：它加载的 omp-playbooks 早于这个功能，重启协调者会话后再试" };
+			this.#emit(null);
+		}, AGENTS_WAIT_MS);
 	}
 
 	async focusCoordinator(): Promise<string | null> {
