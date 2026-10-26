@@ -9,8 +9,8 @@ describe("Where/What/How outline", () => {
 	test("a lead, panels of no role and a role spanning several panels follow the outline", () => {
 		expect(outlineProblems(`一句话总述。\n\n## X 背景\n来由。\n\n${where}\n\n${what}\n\n${how}\n\n## D How · 验收与回退\n- nc 探测\n\n## E 附图\n![图](a.png)`)).toEqual([]);
 	});
-	test("an empty text is not yet written, not out of outline", () => {
-		expect(outlineProblems(" \n")).toEqual([]);
+	test("an empty text lacks every role", () => {
+		expect(outlineProblems(" \n").map(problem => problem.slice(0, 10))).toEqual(["缺少 Where 面", "缺少 What 面板", "缺少 How 面板："]);
 	});
 	test("each missing role is named once", () => {
 		const problems = outlineProblems(`${where}\n\n## B 决定\n只开 22。`);

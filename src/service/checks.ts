@@ -64,11 +64,12 @@ export const checks: ChecksModule = {
 		const common = { compile: compiled.kind === "Err", render_error: render.blockError || render.documentError, render_pending: render.pendingOverdue };
 		// Task bodies and designs are drawn by the same component renderer, so both are checked for its syntax.
 		const text = content.kind === "task" ? content.body : content.design;
+		const outlined = outlinedText(content);
 		return {
 			...common,
 			empty_expansion: content.kind === "task" && expansions.some(expansion => expansion.kind === "Ok" && expansion.text.trim() === ""),
 			draft: render.draftErrors > 0 || draftDiagnostics(text).some(found => found.severity === "error"),
-			outline: outlineProblems(outlinedText(content) ?? "").length > 0,
+			outline: outlined !== null && outlineProblems(outlined).length > 0,
 		};
 	},
 	version({ closure, results, compiled }) {

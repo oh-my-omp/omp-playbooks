@@ -337,7 +337,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 		if (error) notify(error);
 		else notify(block.content.kind === "task" ? "图片已加到正文末尾" : "图片已加到需求末尾", "success");
 	}
-	/** Ctrl+V, an empty paste, or the menu: the image data on the system clipboard. */
+	/** Ctrl+V, or a paste with no text: the image data on the system clipboard. */
 	function pasteClipboardImage(): void {
 		void clipboardImage().then(image => {
 			if (image) placeImages([image]);
@@ -630,7 +630,8 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 		summaries.set(block.id, { view: { md, images }, draftErrors: drawn.errors });
 		const bottom = isOpen ? foot(item) : null;
 		// The same rule as the `outline` check, said where the text is.
-		const outline = isOpen ? outlineProblems(outlinedText(block.content) ?? "") : [];
+		const outlined = isOpen ? outlinedText(block.content) : null;
+		const outline = outlined === null ? [] : outlineProblems(outlined);
 		const outlineNode: TspNode[] = outline.length === 0 ? [] : [el(`${block.id}.outline`, "div", "pb-errors", outline.map((problem, index) => ({
 			id: `${block.id}.outline${index}`, k: "text", p: { text: `Where/What/How · ${problem}`, tone: "warning" },
 		})))];
@@ -777,12 +778,8 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 		const children: TspNode[] = [];
 		if (menu !== null && view.blocks.some(item => item.block.id === menu)) {
 			const block = menu;
-			on("menu.image", { click: () => { menu = null; pasteClipboardImage(); } });
 			on("menu.delete", { click: () => { menu = null; if (open === block) open = null; outcome(core.deleteBlock(REF, block)); } });
-			children.push({ id: "menu", k: "overlay", p: { anchor: { node: `${block}.more` }, size: "sm" }, c: [
-				el("menu.image", "div", "pb-menu-item", [], { text: "粘贴剪贴板图片（Ctrl+V）", actions: { click: "invoke" } }),
-				el("menu.delete", "div", "pb-menu-item pb-danger", [], { text: "删除此块", actions: { click: "invoke" } }),
-			] });
+			children.push({ id: "menu", k: "overlay", p: { anchor: { node: `${block}.more` }, size: "sm" }, c: [el("menu.delete", "div", "pb-menu-item pb-danger", [], { text: "删除此块", actions: { click: "invoke" } })] });
 		}
 		const agentItem = agentMenu === null ? undefined : view.blocks.find(item => item.block.id === agentMenu);
 		if (agentItem && open === agentItem.block.id && agentItem.block.content.kind === "task" && agentItem.block.progress.kind === "tracked" && agentItem.block.progress.status !== "done") {

@@ -194,7 +194,7 @@ describe("current Playbook user interactions", () => {
 		expect(f.tsp.nodes().some(node => node.k === "image")).toBe(true);
 		// A design card takes it in the person's requirement; the same image is the same file.
 		f.tsp.action("b2.fold");
-		f.tsp.action("b2.more"); f.tsp.action("menu.image");
+		f.tsp.keys("\x16");
 		await settle();
 		expect(f.core.view(template).blocks[1]?.block.content).toMatchObject({ requirement: `Requirement\n\n![图片](${PNG_PATH})\n`, design: "## A Plan\nDesign" });
 	});

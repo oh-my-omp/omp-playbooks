@@ -29,12 +29,11 @@ function readable(segment: Segment): boolean {
 }
 
 /**
- * What keeps `text` from the outline; empty when it follows it. An empty text has none: it is
- * shown as not yet written. A lead and panels of no role may sit anywhere; a role may span
- * several panels (`How · 处置`, `How · 验收与回退`) as long as no panel goes back to an earlier role.
+ * What keeps `text` from the outline; empty when it follows it. A lead and panels of no role may
+ * sit anywhere; a role may span several panels (`How · 处置`, `How · 验收与回退`) as long as no
+ * panel goes back to an earlier role. An empty text lacks every role.
  */
 export function outlineProblems(text: string): readonly string[] {
-	if (!text.trim()) return [];
 	const roles = parseDocument(text).panels.flatMap(panel => {
 		const role = roleOf(panel);
 		return role ? [{ panel, role, rank: ROLES.indexOf(role) }] : [];
