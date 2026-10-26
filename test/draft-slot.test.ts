@@ -29,6 +29,10 @@ describe("slots", () => {
 		expect(parsed.slots.get("mode")?.value).toBe("Fast");
 		expect(parsed.diagnostics.some(item => item.severity === "error")).toBe(true);
 	});
+	test("template braces inside code are not reported as undeclared slots", () => {
+		const text = "Run `docker ps --format '{{.Names}}'` then {{missing}}.\n```sh\necho {{.Image}}\n```\n";
+		expect(parseSlots(text).diagnostics.map(item => item.message)).toEqual(["{{missing}} 没有对应的 slot 声明"]);
+	});
 	test("setting known options round-trips without changing prose or options", () => {
 		const next = setSlotValue(source, "mode", "Safe");
 		expect(next).not.toBeNull();

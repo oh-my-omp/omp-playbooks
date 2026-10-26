@@ -67,16 +67,20 @@ export function parseSlot(input: FenceInput): Parsed<SlotDecl> {
 export function parseSlots(text: string): { readonly slots: ReadonlyMap<string, SlotDecl>; readonly diagnostics: readonly DraftDiagnostic[] } {
 	const slots = new Map<string, SlotDecl>();
 	const diagnostics: DraftDiagnostic[] = [];
+	const code: { start: number; end: number }[] = [];
 	for (const fence of fences(text)) {
-		if (fence.name !== "slot") continue;
+		if (fence.name !== "slot") { code.push(fence.span); continue; }
 		const parsed = parseSlot(fence.input);
 		if (!parsed.ok) continue;
 		if (slots.has(parsed.value.name)) diagnostics.push(diagnostic("slot", fence.line, `槽位 ${parsed.value.name} 重复声明`));
 		else slots.set(parsed.value.name, parsed.value);
 	}
+	for (const match of text.matchAll(/`[^`\n]+`/g)) code.push({ start: match.index, end: match.index + match[0].length });
 	for (const match of text.matchAll(USE)) {
 		const name = match[1]!.trim();
-		if (!slots.has(name)) diagnostics.push(diagnostic("slot", text.slice(0, match.index).split("\n").length, `{{${name}}} 没有对应的 slot 声明`, "warning"));
+		// `{{…}}` in code is the code's own syntax (a Go or Docker template), not a slot left undeclared.
+		if (slots.has(name) || code.some(range => match.index >= range.start && match.index < range.end)) continue;
+		diagnostics.push(diagnostic("slot", text.slice(0, match.index).split("\n").length, `{{${name}}} 没有对应的 slot 声明`, "warning"));
 	}
 	return { slots, diagnostics };
 }
