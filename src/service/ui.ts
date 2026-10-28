@@ -83,7 +83,7 @@ const SURFACE_CSS = [
 	".pb-slot { display: inline; padding: 0 2px; border-bottom: 1.5px dashed var(--t3); font-weight: 600; cursor: pointer; }",
 	".pb-slot-open { border-bottom-color: var(--accent); background: rgb(from var(--accent) r g b / 12%); }",
 	// A reference: a link to the block it names, or to an issue, pull request or file Tern opens.
-	".pb-ref { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }",
+	".pb-ref { color: var(--accent); text-decoration: underline; cursor: pointer; }",
 	".pb-heading { margin: 0; font-weight: 600; }",
 	".pb-opt { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; width: 100%; padding: 6px 10px; border-radius: 6px; text-align: left; cursor: pointer; }",
 	".pb-opt:hover { background: var(--l1); }",
