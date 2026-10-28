@@ -33,9 +33,12 @@ beforeAll(async () => {
 	await ensureTernPlugin();
 });
 afterAll(() => rm(ternConfig, { recursive: true, force: true }));
+/** This test's Tern pane: numeric like the daemon's, unique so each session's pane socket is its own. */
+let pane: string;
 beforeEach(() => {
 	const original = { PATH: process.env.PATH, TERN_PANE: process.env.TERN_PANE };
-	delete process.env.TERN_PANE;
+	pane = String(900_000_000 + Math.floor(Math.random() * 99_999_999));
+	process.env.TERN_PANE = pane;
 	cleanup.push(() => {
 		for (const key of ["PATH", "TERN_PANE"] as const) {
 			const value = original[key];
@@ -195,7 +198,7 @@ function fileAppears(path: string): Promise<void> {
 }
 function parseFrame(value: unknown): ServerFrame { return value as ServerFrame; }
 function client(path: string): K1Client {
-	const value = new K1Client(path, { session: "client-test" }, parseFrame, () => {}, () => {});
+	const value = new K1Client(path, { session: "client-test" }, parseFrame, () => {});
 	cleanup.push(() => value.close()); return value;
 }
 const runId = parseRunId("r1")!;
@@ -376,10 +379,10 @@ test("add writes full text, quote and human origin; cancelling any message/run/k
 });
 
 test("show calls a real tern child with the hello pane unchanged; add offers latest twenty textual user/assistant messages", async () => {
-	const s = await service(); const tern = await fakeTern(); const h = await harness(); process.env.TERN_PANE = "coordinator-pane";
+	const s = await service(); const tern = await fakeTern(); const h = await harness();
 	await h.command("playbook-show", s.doc);
 	expect(h.notices).toEqual([]); expect(await tern.args()).toEqual(["focus", "document-pane", "--json"]);
-	expect(s.frames[0]).toMatchObject({ args: { pane: "coordinator-pane" } });
+	expect(s.frames[0]).toMatchObject({ args: { pane } });
 	h.branch = Array.from({ length: 25 }, (_, i): Entry => ({ type: "message", id: "message-" + i, message: { role: i % 2 ? "user" : "assistant", content: [{ type: "text", text: "text-" + i }] } }));
 	h.branch = [...h.ctx.sessionManager.getBranch() as unknown as Entry[], { type: "custom", id: "custom" }, { type: "message", id: "empty", message: { role: "user", content: "" } }, { type: "message", id: "tool", message: { role: "toolResult", content: "ignore" } }];
 	h.choices.push(null); await h.command("playbook-add");
@@ -389,7 +392,7 @@ test("show calls a real tern child with the hello pane unchanged; add offers lat
 
 test("open starts the document service beside the coordinator pane and returns hello once it listens", async () => {
 	const doc = (await temporaryDirectory()) + "/book.yaml"; await Bun.write(doc, "title: Book\nblocks: []\n");
-	const tern = await fakeTern(0, '{"block": 42}'); process.env.TERN_PANE = "coordinator-pane"; const h = await harness();
+	const tern = await fakeTern(0, '{"block": 42}'); const h = await harness();
 	const split = fileAppears(tern.capture);
 	const opening = h.execute("playbook_open", { doc });
 	await split;
@@ -398,18 +401,15 @@ test("open starts the document service beside the coordinator pane and returns h
 	expect(result.isError).toBe(false);
 	expect(JSON.parse(result.content[0]!.text!)).toMatchObject({ blocks: ["b1"], pane: "document-pane" });
 	const real = await realpath(doc);
-	expect(await tern.args()).toEqual(["split", "coordinator-pane", "right", "--cwd", dirname(real), "--json", "--", "env", `OMOMP_LANG=${language()}`, "bun", resolve(import.meta.dir, "../src/service/main.ts"), real]);
+	expect(await tern.args()).toEqual(["split", pane, "right", "--cwd", dirname(real), "--json", "--", "env", `OMOMP_LANG=${language()}`, "bun", resolve(import.meta.dir, "../src/service/main.ts"), real]);
 	expect(s.frames.map(frame => frame.op)).toEqual(["hello"]);
 });
 
-test("open reuses a running service without tern; with no service and no TERN_PANE it is StartFailed", async () => {
+test("open reuses a running service without tern", async () => {
 	const s = await service(); const tern = await fakeTern(0, '{"block": 42}'); const h = await harness();
 	const running = await h.execute("playbook_open", { doc: s.doc });
 	expect(running.isError).toBe(false); expect(await Bun.file(tern.capture).exists()).toBe(false);
-	const doc = (await temporaryDirectory()) + "/idle.yaml"; await Bun.write(doc, "title: Idle\nblocks: []\n");
-	const idle = await h.execute("playbook_open", { doc });
-	expect(idle.isError).toBe(true); expect(JSON.parse(idle.content[0]!.text!).error.code).toBe("StartFailed");
-	expect(await Bun.file(tern.capture).exists()).toBe(false);
+	expect(s.frames.map(frame => frame.op)).toEqual(["hello"]);
 });
 
 test("a child session registers no tool or command and never connects (R4)", async () => {
@@ -421,28 +421,24 @@ test("a child session registers no tool or command and never connects (R4)", asy
 
 const documentToolNames = ["playbook_read", "playbook_edit", "playbook_compile", "playbook_check", "playbook_run", "playbook_timeline", "playbook_launch"];
 
-test("outside a daemon Tern pane only playbook_open is registered until a connect succeeds; then the document tools follow once", async () => {
-	process.env.TERN_PANE = "coordinator-pane"; const h = await harness(); await h.event("session_start");
-	expect(h.registered.tools).toEqual(["playbook_open"]);
-	const doc = (await temporaryDirectory()) + "/idle.yaml"; await Bun.write(doc, "title: Idle\nblocks: []\n");
-	delete process.env.TERN_PANE;
-	expect((await h.execute("playbook_open", { doc })).isError).toBe(true);
-	expect(h.registered.tools).toEqual(["playbook_open"]);
-	const a = await service(); const b = await service();
-	expect((await h.execute("playbook_open", { doc: a.doc })).isError).toBe(false);
-	expect(h.registered.tools).toEqual(["playbook_open", ...documentToolNames]);
-	const registeredBefore = h.tools.get("playbook_read");
-	await h.command("playbook-show", b.doc);
-	expect(h.tools.get("playbook_read")).toBe(registeredBefore);
-});
+for (const value of [undefined, "coordinator-pane"]) {
+	test(`outside a Tern pane (TERN_PANE ${value ?? "unset"}) the extension adds nothing to the session`, async () => {
+		if (value === undefined) delete process.env.TERN_PANE; else process.env.TERN_PANE = value;
+		const s = await service(); const h = await harness(); await h.event("session_start");
+		expect(h.registered).toEqual({ tools: [], commands: [] });
+		expect(h.warnings).toEqual([]); expect(h.notices).toEqual([]);
+		expect(await h.event("tool_call", { toolName: "eval", input: { language: "js", code: "await playbook.run({})" } })).toBeUndefined();
+		expect(s.frames).toHaveLength(0);
+	});
+}
 
 test("a session in a daemon Tern pane registers all eight tools at session_start", async () => {
-	process.env.TERN_PANE = String(900_000_000 + Math.floor(Math.random() * 99_999_999)); const h = await harness(); await h.event("session_start");
+	const h = await harness(); await h.event("session_start");
 	expect(h.registered.tools).toEqual(["playbook_open", ...documentToolNames]);
 });
 
 test("every tool description fits the 200 characters omp shows of a plugin device", async () => {
-	process.env.TERN_PANE = String(900_000_000 + Math.floor(Math.random() * 99_999_999)); const h = await harness(); await h.event("session_start");
+	const h = await harness(); await h.event("session_start");
 	const long = [...h.tools.values()].filter(tool => tool.description.length > 200).map(tool => `${tool.name}: ${tool.description.length}`);
 	expect(long).toEqual([]);
 });
@@ -476,7 +472,7 @@ for (const command of ["playbook-add", "playbook-show"]) {
 		expect(h.notices).toEqual([{ message: "请指定 Playbook 文件路径", type: "error" }]); expect(h.menus).toEqual([]);
 	});
 	test(`${command}: unique live connection is used; multiple connections prompt and allow cancellation`, async () => {
-		const a = await service("pane-a"); const b = await service("pane-b"); const tern = await fakeTern(); process.env.TERN_PANE = "coordinator-pane"; const h = await harness();
+		const a = await service("pane-a"); const b = await service("pane-b"); const tern = await fakeTern(); const h = await harness();
 		await h.execute("playbook_open", { doc: a.doc });
 		await h.command(command); expect(h.menus.some(menu => menu.title === "选择 Playbook")).toBe(false);
 		await h.execute("playbook_open", { doc: b.doc }); h.choices.push(await realpath(b.doc)); await h.command(command);
@@ -489,15 +485,14 @@ for (const command of ["playbook-add", "playbook-show"]) {
 }
 
 test("show missing remote pane never invokes tern and gives exact daemon-pane notification", async () => {
-	const s = await service(""); const tern = await fakeTern(); const h = await harness(); process.env.TERN_PANE = "coordinator-pane";
+	const s = await service(""); const tern = await fakeTern(); const h = await harness();
 	await h.command("playbook-show", s.doc);
 	expect(h.notices).toEqual([{ message: "文档服务不在 session daemon 托管的 pane 中", type: "error" }]); expect(await Bun.file(tern.capture).exists()).toBe(false);
 });
 
-test("show without local pane never invokes tern; child failures retain exit code and stderr", async () => {
-	const s = await service(); const tern = await fakeTern(9); const h = await harness(); await h.command("playbook-show", s.doc);
-	expect(await Bun.file(tern.capture).exists()).toBe(false); expect(h.notices.at(-1)!.message).toContain("协调者 Tern 面板");
-	process.env.TERN_PANE = "coordinator-pane"; await h.command("playbook-show", s.doc);
+test("show keeps a failing tern child's exit code and stderr", async () => {
+	const s = await service(); const tern = await fakeTern(9); const h = await harness();
+	await h.command("playbook-show", s.doc);
 	expect(h.notices.at(-1)!.message).toContain("tern focus 退出 9：focus failed"); expect(await tern.args()).toEqual(["focus", "document-pane", "--json"]);
 });
 
@@ -550,7 +545,7 @@ test("in-flight disconnect is Disconnected; automatic reconnect sends only hello
 });
 
 test("tool calls require an unambiguous connected document when doc is omitted", async () => {
-	process.env.TERN_PANE = String(900_000_000 + Math.floor(Math.random() * 99_999_999)); const h = await harness();
+	const h = await harness();
 	const none = await h.execute("playbook_read", {});
 	expect(JSON.parse(none.content[0]!.text!).error.code).toBe("NoService");
 	const a = await service(); const b = await service();

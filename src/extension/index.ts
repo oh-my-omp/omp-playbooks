@@ -29,8 +29,23 @@ function ternNotice(state: TernPluginState): { readonly text: string; readonly l
 	}
 }
 
+/**
+ * The Tern pane this omp runs in: the session daemon sets TERN_PANE to the pane's numeric id, which
+ * also names this session's pane socket. Any other value or none is not a Tern pane.
+ */
+function ternPane(): string | null {
+	const pane = process.env.TERN_PANE;
+	return pane !== undefined && /^[0-9]+$/.test(pane) ? pane : null;
+}
+
 export default async function (pi: ExtensionAPI): Promise<void> {
+	// The install links the Tern plugin wherever omp runs it (tern-setup.ts).
 	const ternState = await ensureTernPlugin();
+	// A Playbook lives in a Tern pane beside its coordinator: outside one, this extension adds no
+	// tool, topic, command, notice or eval rewrite to the session.
+	const inTern = ternPane();
+	if (inTern === null) return;
+	const pane: string = inTern;
 	const z = pi.zod;
 	const block = z.string().regex(/^b[1-9][0-9]*$/).transform(value => {
 		const id = parseBlockId(value); if (id === null) throw new Error(tr("Invalid block id", "块 id 无效")); return id;
@@ -194,7 +209,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		session = currentSession;
 		let client = clients.get(absolute);
 		if (!client) {
-			client = new K1Client(socketPath(tmpdir(), absolute), { session: currentSession, ...(process.env.TERN_PANE ? { pane: process.env.TERN_PANE } : {}) }, (input): ServerFrame => frames.parse(input), async (event: EventPayload) => {
+			client = new K1Client(socketPath(tmpdir(), absolute), { session: currentSession, pane }, (input): ServerFrame => frames.parse(input), async (event: EventPayload) => {
 				// A human interrupt only revokes the lock of an in-flight playbook_edit, whose
 				// mutation then fails with NotLocked; nothing else in this session depends on it.
 				if (event.event === "interrupted") return;
@@ -208,7 +223,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					return deliverLaunches(ctx);
 				}
 				pi.sendMessage({ customType: "playbook-event", content: await notice(absolute, event), display: true }, { deliverAs: "aside", triggerTurn: true });
-			}, registerDocumentTools);
+			});
 			clients.set(absolute, client);
 		}
 		return client;
@@ -231,8 +246,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		const client = await clientFor(absolute, ctx);
 		const ready = await client.connect();
 		if (ready.ok || ready.error.code !== "NoService") return ready;
-		const pane = process.env.TERN_PANE;
-		if (!pane) return startFailed(tr(`omp is not running in a Tern pane hosted by the session daemon (no TERN_PANE), so it cannot open the document service beside this session. Start it yourself in a Tern pane with \`bun ${serviceEntry} <playbook.yaml>\`, then call playbook_open again from this session to connect`, `omp 未运行在 session daemon 托管的 Tern 面板中（没有 TERN_PANE），因此无法在本会话旁打开文档服务。请在 Tern 面板中自行运行 \`bun ${serviceEntry} <playbook.yaml>\`，然后从本会话再次调用 playbook_open 进行连接`));
 		const split = await splitPane(pane, dirname(absolute), withLanguage(["bun", serviceEntry, absolute]));
 		if (!split.ok) return startFailed(split.error);
 		const deadline = Date.now() + OPEN_WAIT_MS;
@@ -359,7 +372,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		} satisfies Tool<ReturnType<typeof launchParams.parse>>,
 	] as const;
 	type AnyTool = (typeof tools)[number];
-	const [openTool, ...documentTools] = tools;
 
 	function registerTools(entries: readonly AnyTool[]): void {
 		for (const tool of entries) {
@@ -374,20 +386,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				},
 			});
 		}
-	}
-
-	/**
-	 * The tools that act on a connected document. A session in a daemon Tern pane gets them at
-	 * session_start; any other session gets them when it first connects to a service (playbook_open,
-	 * a command, a pane attach), so they stay out of its prompt until a Playbook is open. Registering
-	 * late, not `defaultInactive` + setActiveTools, keeps them xd:// devices: setActiveTools pins
-	 * names it adds as top-level tools.
-	 */
-	let documentToolsRegistered = false;
-	function registerDocumentTools(): void {
-		if (documentToolsRegistered) return;
-		documentToolsRegistered = true;
-		registerTools(documentTools);
 	}
 
 	const header = tr("This is a Playbook document service notice, not a user message", "这是 Playbook 文档服务的通知，不是用户消息");
@@ -527,19 +525,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
 	pi.on("session_start", async (_event, ctx) => {
 		if (ctx.agent.kind !== "main") return;
-		const pane = process.env.TERN_PANE;
-		// The pane id becomes part of a socket path: only the daemon's numeric form is used.
-		const daemonPane = pane !== undefined && /^[0-9]+$/.test(pane) ? pane : null;
-		registerTools([openTool]);
-		// Every playbook_* tool's topics, also those registered later: the index shows only for tools in the prompt.
+		registerTools(tools);
+		// Every playbook_* tool's topics: the index shows only for tools in the prompt.
 		registerPlaybookTopics(pi);
-		if (daemonPane !== null) registerDocumentTools();
 		registerCommands();
 		const notice = ternNotice(ternState);
 		if (notice) ctx.ui.notify(notice.text, notice.level);
 		paneContext = ctx;
 		busy = !ctx.isIdle();
-		if (daemonPane !== null && paneListener === null) paneListener = await listenPane(paneSocketPath(tmpdir(), daemonPane), request => onPaneRequest(request, paneContext!));
+		if (paneListener === null) paneListener = await listenPane(paneSocketPath(tmpdir(), pane), request => onPaneRequest(request, paneContext!));
 	});
 
 	pi.on("agent_start", (_event, ctx) => {
@@ -621,7 +615,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				const client = await commandClient(args, ctx); if (!client) return;
 				const hello = helloResult.parse(client.hello);
 				if (!hello.pane) { ctx.ui.notify(tr("The document service is not in a pane managed by the session daemon", "文档服务不在 session daemon 托管的 pane 中"), "error"); return; }
-				if (!process.env.TERN_PANE) throw new Error(tr("Playbook focus requires a coordinator Tern pane", "Playbook 聚焦需要协调者 Tern 面板"));
 				const child = Bun.spawn(["tern", "focus", hello.pane, "--json"], { env: process.env, stdout: "pipe", stderr: "pipe" });
 				const [exit, stderr] = await Promise.all([child.exited, new Response(child.stderr).text(), new Response(child.stdout).text()]);
 				if (exit !== 0) throw new Error(tr(`tern focus exited ${exit}: ${stderr.trim()}`, `tern focus 退出 ${exit}：${stderr.trim()}`));

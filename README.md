@@ -61,7 +61,9 @@ The repository is [oh-my-omp/omp-playbooks](https://github.com/oh-my-omp/omp-pla
 omp plugin install 'https://github.com/oh-my-omp/omp-playbooks.git#main'
 ```
 
-When the extension loads it checks for Tern and links the package's `tern-plugin/` into Tern; it skips this when the same directory is already linked. The link points at the omp install directory itself. The Tern daemon reloads plugin files edited in place, but an upgrade replaces the whole install directory, which leaves the daemon on a missing link target or an old version. The extension therefore compares the version in `tern-plugin/plugin.toml` with the version the daemon loaded, runs `tern plugin reload` when they differ, and reports the outcome in the main session. If the versions still differ after the reload it only warns and does not abort the install; the next extension load compares again.
+When the extension loads it checks for Tern and links the package's `tern-plugin/` into Tern; it skips this when the same directory is already linked. The link points at the omp install directory itself. The Tern daemon reloads plugin files edited in place, but an upgrade replaces the whole install directory, which leaves the daemon on a missing link target or an old version. The extension therefore compares the version in `tern-plugin/plugin.toml` with the version the daemon loaded, runs `tern plugin reload` when they differ, and reports the outcome in the next main session that runs in a Tern pane. If the versions still differ after the reload it only warns and does not abort the install; the next extension load compares again.
+
+Beyond that link, the extension acts only when omp runs in a Tern pane managed by the session daemon, which sets `TERN_PANE` to the pane's numeric ID. An omp started anywhere else (a plain terminal, `omp -p`, a missing or non-numeric `TERN_PANE`) gets nothing from it: no `playbook_*` tools or `tool://` topics, no commands, no notices and no eval rewriting.
 
 **Pulling the repository or restarting a session does not update the installed plugin copy.** If an older version is installed, update it first:
 
@@ -80,7 +82,7 @@ tern plugin unlink omp-playbooks
 
 There are three ways to open a file:
 
-- **From the main session:** write the YAML file first, then call `playbook_open {doc: "/absolute/path/playbook.yaml"}`. With no service running, the extension starts one to the right of the current omp pane; this requires omp to run in a Tern pane managed by the session daemon, with `TERN_PANE` in its environment. With a service already running it only connects: it opens no extra pane and does not move focus.
+- **From the main session:** write the YAML file first, then call `playbook_open {doc: "/absolute/path/playbook.yaml"}`. With no service running, the extension starts one to the right of the current omp pane. With a service already running it only connects: it opens no extra pane and does not move focus.
 - **From Tern:** focus a `.yaml` or `.yml` file pane and choose "Playbook: open" in the command palette. It shows the existing service, or starts one beside the pane. This does not start omp or set up a coordinator connection.
 - **Starting the service from source:** install dependencies in the repository, then run the commands below in a Tern pane. The main session still has to call `playbook_open` to receive requests.
 
@@ -89,14 +91,14 @@ bun install
 bun src/service/main.ts /absolute/path/playbook.yaml
 ```
 
-One file has one live service and one coordinator connection. Another main session gets `Busy` while the original coordinator is still connected. When the original session ends, the document pane stays and its status strip shows "Coordinator offline · choose one"; a new session can take over, or the person picks one from the pane (see [Pane layout](#pane-layout)). An omp without `TERN_PANE` can still connect to a service that is **already running**, but cannot create a pane beside itself from there.
+One file has one live service and one coordinator connection. Another main session gets `Busy` while the original coordinator is still connected. When the original session ends, the document pane stays and its status strip shows "Coordinator offline · choose one"; a new session can take over, or the person picks one from the pane (see [Pane layout](#pane-layout)).
 
 Main-session commands:
 
 - `/playbook-show [file path]`: jump to the pane of a connected document.
 - `/playbook-add [file path]`: pick recent session messages, the Playbook itself or a Run, a record kind and optionally a block, and add them to that execution log.
 
-These commands and the `playbook_*` tools are registered only in the main session; subagents do not see them.
+These commands and the `playbook_*` tools are registered only in a main session running in a Tern pane; subagents do not see them.
 
 ## Language
 
