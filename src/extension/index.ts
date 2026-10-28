@@ -206,7 +206,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					return deliverLaunches(ctx);
 				}
 				pi.sendMessage({ customType: "playbook-event", content: await notice(absolute, event), display: true }, { deliverAs: "aside", triggerTurn: true });
-			});
+			}, registerDocumentTools);
 			clients.set(absolute, client);
 		}
 		return client;
@@ -363,9 +363,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			},
 		} satisfies Tool<ReturnType<typeof launchParams.parse>>,
 	] as const;
+	type AnyTool = (typeof tools)[number];
+	const [openTool, ...documentTools] = tools;
 
-	function registerTools(): void {
-		for (const tool of tools) {
+	function registerTools(entries: readonly AnyTool[]): void {
+		for (const tool of entries) {
 			pi.registerTool({
 				name: tool.name, label: tool.label, description: tool.description, parameters: tool.parameters,
 				async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -377,6 +379,20 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				},
 			});
 		}
+	}
+
+	/**
+	 * The tools that act on a connected document. A session in a daemon Tern pane gets them at
+	 * session_start; any other session gets them when it first connects to a service (playbook_open,
+	 * a command, a pane attach), so they stay out of its prompt until a Playbook is open. Registering
+	 * late, not `defaultInactive` + setActiveTools, keeps them xd:// devices: setActiveTools pins
+	 * names it adds as top-level tools.
+	 */
+	let documentToolsRegistered = false;
+	function registerDocumentTools(): void {
+		if (documentToolsRegistered) return;
+		documentToolsRegistered = true;
+		registerTools(documentTools);
 	}
 
 	const header = tr("This is a Playbook document service notice, not a user message", "这是 Playbook 文档服务的通知，不是用户消息");
@@ -516,15 +532,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
 	pi.on("session_start", async (_event, ctx) => {
 		if (ctx.agent.kind !== "main") return;
-		registerTools();
+		const pane = process.env.TERN_PANE;
+		// The pane id becomes part of a socket path: only the daemon's numeric form is used.
+		const daemonPane = pane !== undefined && /^[0-9]+$/.test(pane) ? pane : null;
+		registerTools([openTool]);
+		if (daemonPane !== null) registerDocumentTools();
 		registerCommands();
 		const notice = ternNotice(ternState);
 		if (notice) ctx.ui.notify(notice.text, notice.level);
 		paneContext = ctx;
 		busy = !ctx.isIdle();
-		const pane = process.env.TERN_PANE;
-		// The pane id becomes part of a socket path: only the daemon's numeric form is used.
-		if (pane && /^[0-9]+$/.test(pane) && paneListener === null) paneListener = await listenPane(paneSocketPath(tmpdir(), pane), request => onPaneRequest(request, paneContext!));
+		if (daemonPane !== null && paneListener === null) paneListener = await listenPane(paneSocketPath(tmpdir(), daemonPane), request => onPaneRequest(request, paneContext!));
 	});
 
 	pi.on("agent_start", (_event, ctx) => {

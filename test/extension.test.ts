@@ -191,7 +191,7 @@ function fileAppears(path: string): Promise<void> {
 }
 function parseFrame(value: unknown): ServerFrame { return value as ServerFrame; }
 function client(path: string): K1Client {
-	const value = new K1Client(path, { session: "client-test" }, parseFrame, () => {});
+	const value = new K1Client(path, { session: "client-test" }, parseFrame, () => {}, () => {});
 	cleanup.push(() => value.close()); return value;
 }
 const runId = parseRunId("r1")!;
@@ -211,7 +211,7 @@ for (const [op, fields, mutation, args] of [
 	["isolated", { value: null }, "set", { field: "isolated", value: null }],
 ] as const) {
 	test(`edit ${op} ${JSON.stringify(fields)} locks, changes and releases only its own lock`, async () => {
-		const s = await service(); const h = await harness();
+		const s = await service(); const h = await harness(); await h.execute("playbook_open", { doc: s.doc });
 		const result = await h.execute("playbook_edit", { doc: s.doc, run: "r1", block: "b1", op, ...fields });
 		expect(result.isError).toBe(false);
 		expect(s.frames.map(frame => frame.op)).toEqual(op === "delete" ? ["hello", "lock", mutation] : ["hello", "lock", mutation, "unlock"]);
@@ -225,7 +225,7 @@ for (const [op, fields, mutation, args] of [
 }
 
 test("playbook_edit rejects a blank agent, a design-block contract field and a move without a target before any request", async () => {
-	const s = await service(); const h = await harness();
+	const s = await service(); const h = await harness(); await h.execute("playbook_open", { doc: s.doc });
 	for (const params of [
 		{ op: "agent", block: "b1", value: "   " },
 		{ op: "isolated", block: "b1", value: "yes" },
@@ -236,13 +236,14 @@ test("playbook_edit rejects a blank agent, a design-block contract field and a m
 		const result = await h.execute("playbook_edit", { doc: s.doc, ...params });
 		expect(result.isError).toBe(true);
 	}
-	expect(s.frames).toEqual([]);
+	expect(s.frames.map(frame => frame.op)).toEqual(["hello"]);
 });
 
 test("playbook_read accepts task blocks carrying agent and isolated", async () => {
 	const s = await service(); const h = await harness();
 	const configured = { ...block, agent: "task:mid", isolated: true };
 	s.handler = (frame, socket) => respond(socket, frame, frame.op === "hello" ? { blocks: ["b1"], runs: [] } : { title: "Book", blocks: [configured] });
+	await h.execute("playbook_open", { doc: s.doc });
 	const result = await h.execute("playbook_read", { doc: s.doc });
 	expect(result.isError).toBe(false);
 	expect(JSON.parse(result.content[0]!.text!)).toEqual({ title: "Book", blocks: [configured] });
@@ -271,7 +272,7 @@ test("interruption revokes an in-flight edit without aborting the coordinator; L
 });
 
 test("event aside precedes block_changed ack; unrelated interruption is ignored", async () => {
-	const s = await service(); const h = await harness(); await h.execute("playbook_run", { doc: s.doc, op: "list" });
+	const s = await service(); const h = await harness(); await h.execute("playbook_open", { doc: s.doc });
 	let deliveredBeforeAck = false;
 	s.handler = (frame, socket) => {
 		if (frame.op === "ack") deliveredBeforeAck = h.messages.length === 1;
@@ -414,6 +415,28 @@ test("a child session registers no tool or command and never connects (R4)", asy
 	expect(s.frames).toHaveLength(0);
 });
 
+const documentToolNames = ["playbook_read", "playbook_edit", "playbook_compile", "playbook_check", "playbook_run", "playbook_timeline", "playbook_launch"];
+
+test("outside a daemon Tern pane only playbook_open is registered until a connect succeeds; then the document tools follow once", async () => {
+	process.env.TERN_PANE = "coordinator-pane"; const h = await harness(); await h.event("session_start");
+	expect(h.registered.tools).toEqual(["playbook_open"]);
+	const doc = (await temporaryDirectory()) + "/idle.yaml"; await Bun.write(doc, "title: Idle\nblocks: []\n");
+	delete process.env.TERN_PANE;
+	expect((await h.execute("playbook_open", { doc })).isError).toBe(true);
+	expect(h.registered.tools).toEqual(["playbook_open"]);
+	const a = await service(); const b = await service();
+	expect((await h.execute("playbook_open", { doc: a.doc })).isError).toBe(false);
+	expect(h.registered.tools).toEqual(["playbook_open", ...documentToolNames]);
+	const registeredBefore = h.tools.get("playbook_read");
+	await h.command("playbook-show", b.doc);
+	expect(h.tools.get("playbook_read")).toBe(registeredBefore);
+});
+
+test("a session in a daemon Tern pane registers all eight tools at session_start", async () => {
+	process.env.TERN_PANE = String(900_000_000 + Math.floor(Math.random() * 99_999_999)); const h = await harness(); await h.event("session_start");
+	expect(h.registered.tools).toEqual(["playbook_open", ...documentToolNames]);
+});
+
 for (const command of ["playbook-add", "playbook-show"]) {
 	test(`${command}: absent doc and connections reports exact path prompt`, async () => {
 		const h = await harness(); await h.command(command);
@@ -421,9 +444,9 @@ for (const command of ["playbook-add", "playbook-show"]) {
 	});
 	test(`${command}: unique live connection is used; multiple connections prompt and allow cancellation`, async () => {
 		const a = await service("pane-a"); const b = await service("pane-b"); const tern = await fakeTern(); process.env.TERN_PANE = "coordinator-pane"; const h = await harness();
-		await h.execute("playbook_run", { doc: a.doc, op: "list" });
+		await h.execute("playbook_open", { doc: a.doc });
 		await h.command(command); expect(h.menus.some(menu => menu.title === "选择 Playbook")).toBe(false);
-		await h.execute("playbook_run", { doc: b.doc, op: "list" }); h.choices.push(await realpath(b.doc)); await h.command(command);
+		await h.execute("playbook_open", { doc: b.doc }); h.choices.push(await realpath(b.doc)); await h.command(command);
 		expect(h.menus.find(menu => menu.title === "选择 Playbook")!.options).toEqual([await realpath(a.doc), await realpath(b.doc)]);
 		if (command === "playbook-show") expect(await tern.args()).toEqual(["focus", "pane-a", "--json", "focus", "pane-b", "--json"]);
 		else expect(b.frames.at(-1)!.op).toBe("post");
@@ -494,7 +517,7 @@ test("in-flight disconnect is Disconnected; automatic reconnect sends only hello
 });
 
 test("tool calls require an unambiguous connected document when doc is omitted", async () => {
-	const h = await harness();
+	process.env.TERN_PANE = String(900_000_000 + Math.floor(Math.random() * 99_999_999)); const h = await harness();
 	const none = await h.execute("playbook_read", {});
 	expect(JSON.parse(none.content[0]!.text!).error.code).toBe("NoService");
 	const a = await service(); const b = await service();
@@ -535,7 +558,7 @@ for (const [tool, params, request] of [
 	["playbook_launch", { op: "close", launch: "l1" }, { op: "close", args: { launch: "l1" } }],
 ] as const) {
 	test(`${tool} ${params.op} sends the scoped K1 request without editor-only fields`, async () => {
-		const s = await service(); const h = await harness();
+		const s = await service(); const h = await harness(); await h.execute("playbook_open", { doc: s.doc });
 		const result = await h.execute(tool, { doc: s.doc, ...params });
 		expect(result.isError).toBe(false);
 		expect(s.frames.map(frame => frame.op)).toEqual(["hello", request.op]);
