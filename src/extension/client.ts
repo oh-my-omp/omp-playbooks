@@ -18,6 +18,8 @@ export class K1Client {
 		private readonly helloArgs: Extract<Request, { op: "hello" }>["args"],
 		private readonly parseFrame: (input: unknown) => ServerFrame,
 		private readonly onEvent: (event: EventPayload) => void | Promise<void>,
+		/** Runs each time the service accepts this session's hello. */
+		private readonly onConnected: () => void,
 	) {}
 
 	get connected(): boolean { return this.state.kind === "connected"; }
@@ -39,7 +41,7 @@ export class K1Client {
 		socket.setEncoding("utf8");
 		socket.on("connect", async () => {
 			const reply = await this.sendOn(link, { op: "hello", args: this.helloArgs });
-			if (this.owns(link) && reply.ok) this.state = { kind: "connected", link, hello: reply.result };
+			if (this.owns(link) && reply.ok) { this.state = { kind: "connected", link, hello: reply.result }; this.onConnected(); }
 			else if (this.owns(link)) socket.destroy();
 			ready.resolve(!reply.ok && reply.error.code === "Disconnected" ? this.failure("", "NoService") : reply);
 		});
