@@ -11,15 +11,15 @@ import { renderDraft, type DraftHost } from "./draft/components";
 import { outlineProblems } from "./draft/outline";
 import { imageMime } from "./draft/image";
 import type { ChangeView, EditHost, FileRead, ListItem, Span } from "./draft/contract";
-import { parseSlots, setSlotValue, type SlotDecl } from "./draft/slot";
+import { parseSlots, qualifiedName, setSlotValue, slotTable, type SlotDecl, type SlotTable } from "./draft/slot";
 import type { FrameOp, TspEvent, TspInput, TspNode, TspSession } from "./tsp-types";
 import type { CoordinatorPicker, OmpPane } from "./coordinators";
 import { tr } from "../i18n";
 
 /** The block fields drawn as text: a person writes `body` and `requirement`; `design` is the coordinator's. */
 type DraftField = "body" | "requirement" | "design";
-/** Each block's title by id, as the document view being drawn has it. */
-type BlockTitles = ReadonlyMap<BlockId, string>;
+/** What every card draws from the whole document: titles by block id, which blocks exist, and every block's slots as `bN.name`. */
+type DocFacts = { readonly titles: ReadonlyMap<BlockId, string>; readonly blocks: ReadonlySet<BlockId>; readonly slots: SlotTable };
 
 /** The image on the system clipboard now, as the encoded bytes and their MIME type; null when it holds none. */
 export type ClipboardImageReader = () => Promise<{ readonly data: Uint8Array; readonly mimeType: string } | null>;
@@ -187,6 +187,15 @@ interface Picker {
 	readonly anchor: string;
 	readonly slot: SlotDecl;
 	readonly apply: (value: string) => string | null;
+}
+
+/** A slot as a use reaches it: the block and text that declare it, and its name there. */
+interface SlotAt {
+	readonly owner: BlockId;
+	readonly field: DraftField;
+	readonly source: string;
+	readonly name: string;
+	readonly decl: SlotDecl;
 }
 
 type Handler = { click?: (mods: readonly string[]) => void; dblclick?: () => void };
@@ -384,35 +393,47 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 		return { id, k: "image", p: { blob, alt, ...(size ? { w: size.w, h: size.h } : {}) } };
 	}
 
+	/** Set a slot where it is declared: a person's text is written; a design's goes to the coordinator as a change request. */
+	function setSlot(slot: SlotAt, value: string): string | null {
+		if (value === slot.decl.value) return null;
+		if (slot.field === "design") return core.requestRevision(REF, slot.owner, tr(`Change slot “${slot.name}” to “${value}”`, `把槽位「${slot.name}」改为「${value}」`));
+		const next = setSlotValue(slot.source, slot.name, value);
+		return next === null ? tr(`Slot ${slot.name} does not exist`, `槽位 ${slot.name} 不存在`) : core.edit(REF, slot.owner, slot.field, slot.source, next);
+	}
+
 	/**
 	 * How a person changes one field of a block: a task body and a design's requirement are written
 	 * directly; a design is the coordinator's, so a person's change to it (a slot value) goes as a
 	 * change request.
 	 */
-	function fieldHost(block: Block, field: DraftField, source: string, titles: BlockTitles): EditHost {
+	function fieldHost(block: Block, field: DraftField, source: string, doc: DocFacts): EditHost {
 		const slots = parseSlots(source).slots;
 		const target: HumanField | null = field === "design" ? null : field;
 		const writable = target !== null;
 		const write = (next: string): string | null => next === source || target === null ? null : core.edit(REF, block.id, target, source, next);
 		const replace = (span: Span, text: string): string | null => write(source.slice(0, span.start) + text + source.slice(span.end));
+		/** The slot a `{{name}}` of this text reaches: its own, or as `bN.name` another block's. */
+		const slotOf = (name: string): SlotAt | null => {
+			const local = slots.get(name);
+			if (local) return { owner: block.id, field, source, name, decl: local };
+			const entry = doc.slots.get(name);
+			const qualified = qualifiedName(name);
+			return entry && qualified ? { owner: entry.block, field: entry.field, source: entry.source, name: qualified.slot, decl: entry.decl } : null;
+		};
 		return {
 			text(id, span, multiline, view) {
 				return writable ? editable(id, view, () => source.slice(span.start, span.end), multiline, text => replace(span, text)) : view;
 			},
 			slot(id, name) {
-				const slot = slots.get(name)!;
-				const apply = (value: string): string | null => {
-					if (value === slot.value) return null;
-					if (!writable) return core.requestRevision(REF, block.id, tr(`Change slot “${name}” to “${value}”`, `把槽位「${name}」改为「${value}」`));
-					const next = setSlotValue(source, name, value);
-					return next === null ? tr(`Slot ${name} does not exist`, `槽位 ${name} 不存在`) : write(next);
-				};
+				const slot = slotOf(name);
+				if (slot === null) return el(id, "span", "", [], { text: `{{${name}}}` });
+				const apply = (value: string): string | null => setSlot(slot, value);
 				on(id, { click: () => {
 					if (pickerBefore === id) { picker = null; return; }
-					picker = { anchor: id, slot, apply };
+					picker = { anchor: id, slot: slot.decl, apply };
 					startEdit("picker.custom", "", false, value => value.trim() ? apply(value.trim()) : null, tr("Custom…", "自定义…"));
 				} });
-				return el(id, "span", `pb-slot${picker?.anchor === id ? " pb-slot-open" : ""}`, [], { text: slot.value, actions: { click: "invoke" } });
+				return el(id, "span", `pb-slot${picker?.anchor === id ? " pb-slot-open" : ""}`, [], { text: slot.decl.value, ...(slot.owner === block.id ? {} : { title: tr(`Slot ${slot.name} of ${slot.owner}`, `${slot.owner} 的槽位 ${slot.name}`) }), actions: { click: "invoke" } });
 			},
 			list(id, span, ordered, start, items) {
 				const sortable = ordered && writable && items.length > 1;
@@ -450,18 +471,18 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 					}
 					const nodeId = `${id}.n${index}`;
 					if (editing?.id === nodeId) { parts.push(editor(editing)); return; }
-					const card = el(nodeId, "div", `pb-node pb-node-${item.shape}${chosen === index ? " pb-node-sel" : ""}`, [], { text: item.label, ...(writable ? { actions: { click: "invoke", dblclick: "edit" } } : {}) });
+					// A slot node is set where its slot is declared, so it can change even where the flow cannot.
+					const slot = item.slot === null ? null : slotOf(item.slot);
+					const actions = writable ? { click: "invoke", dblclick: "edit" } : slot ? { dblclick: "edit" } : null;
+					const card = el(nodeId, "div", `pb-node pb-node-${item.shape}${chosen === index ? " pb-node-sel" : ""}`, [], { text: item.label, ...(actions ? { actions } : {}) });
 					parts.push(card);
-					if (!writable) return;
+					if (!actions) return;
 					on(nodeId, {
-						click: () => { node = chosen === index ? null : { chain: id, index }; },
+						...(writable ? { click: () => { node = chosen === index ? null : { chain: id, index }; } } : {}),
 						dblclick: () => {
-							node = { chain: id, index };
+							if (writable) node = { chain: id, index };
 							startEdit(nodeId, item.label, false, text => {
-								if (item.slot !== null) {
-									const next = setSlotValue(source, item.slot, text.trim());
-									return next === null ? tr(`Slot ${item.slot} does not exist`, `槽位 ${item.slot} 不存在`) : write(next);
-								}
+								if (slot) return setSlot(slot, text.trim());
 								const next = chain.rename(index, text);
 								return next === null ? tr("Node names cannot be empty or duplicated", "节点名称不能为空，也不能与其他节点重名") : replace(body, next);
 							});
@@ -482,7 +503,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 			reference(id, text, to, alias) {
 				switch (to.kind) {
 					case "block": case "result": {
-						const title = titles.get(to.block);
+						const title = doc.titles.get(to.block);
 						if (title === undefined) return el(id, "span", "", [], { text, title: tr(`Block ${to.block} does not exist`, `块 ${to.block} 不存在`) });
 						on(id, { click: () => { open = to.block; openChosen = true; menu = null; node = null; picked = null; pendingReveal = to.block; } });
 						const name = title.trim() || tr(`Unnamed block ${to.block}`, `未命名块 ${to.block}`);
@@ -496,7 +517,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 		};
 	}
 
-	function draft(block: Block, field: DraftField, source: string, titles: BlockTitles): { readonly nodes: readonly TspNode[]; readonly errors: number } {
+	function draft(block: Block, field: DraftField, source: string, doc: DocFacts): { readonly nodes: readonly TspNode[]; readonly errors: number } {
 		const host: DraftHost = {
 			id: `${block.id}.${field}`,
 			context: {
@@ -505,7 +526,8 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 				image: (id, bytes, mime, alt) => imageNode(id, bytes, mime, alt),
 				readFile: path => readDraftFile(baseDir, path),
 			},
-			edit: fieldHost(block, field, source, titles),
+			edit: fieldHost(block, field, source, doc),
+			slots: { table: doc.slots, blocks: doc.blocks, self: { block: block.id, field } },
 			view: key => views.get(`${block.id}.${key}`) ?? "changes",
 			viewSwitch: (id, key, current) => el(id, "div", "pb-view-switch", viewOptions().map(option => {
 				const optionId = `${id}.${option.view}`;
@@ -618,16 +640,16 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 	}
 
 	/** A field a person writes (task body, design requirement): drawn like any text, edited part by part, double-click to start when empty. */
-	function personText(block: Block, field: HumanField & DraftField, source: string, placeholder: string, label: string, titles: BlockTitles): { readonly nodes: readonly TspNode[]; readonly errors: number } {
-		if (source.trim()) return draft(block, field, source, titles);
+	function personText(block: Block, field: HumanField & DraftField, source: string, placeholder: string, label: string, doc: DocFacts): { readonly nodes: readonly TspNode[]; readonly errors: number } {
+		if (source.trim()) return draft(block, field, source, doc);
 		const id = `${block.id}.${field}.empty`;
 		return { nodes: [editable(id, el(`${id}.view`, "div", "pb-placeholder", [], { text: placeholder }), () => "", true, text => core.edit(REF, block.id, field, source, text), label)], errors: 0 };
 	}
 
 	/** A design card: the person's requirement, the coordinator's design, and the line that sends a change request. */
-	function designBody(block: Block, content: Extract<Block["content"], { kind: "design" }>, titles: BlockTitles): { nodes: TspNode[]; errors: number } {
-		const requirement = personText(block, "requirement", content.requirement, tr("// Double-click to write the requirement", "// 双击写需求"), tr("Requirement", "需求"), titles);
-		const drawn = content.design.trim() ? draft(block, "design", content.design, titles) : { nodes: [el(`${block.id}.design.empty`, "div", "pb-placeholder", [], { text: tr("// The coordinator has not written a design yet", "// 协调者还没有写设计") })], errors: 0 };
+	function designBody(block: Block, content: Extract<Block["content"], { kind: "design" }>, doc: DocFacts): { nodes: TspNode[]; errors: number } {
+		const requirement = personText(block, "requirement", content.requirement, tr("// Double-click to write the requirement", "// 双击写需求"), tr("Requirement", "需求"), doc);
+		const drawn = content.design.trim() ? draft(block, "design", content.design, doc) : { nodes: [el(`${block.id}.design.empty`, "div", "pb-placeholder", [], { text: tr("// The coordinator has not written a design yet", "// 协调者还没有写设计") })], errors: 0 };
 		const requestId = `${block.id}.request`;
 		const request = editable(requestId, el(`${requestId}.view`, "div", "pb-comment", [el(`${requestId}.slash`, "span", "pb-comment-slash", [], { text: "//" }), el(`${requestId}.text`, "span", "", [], { text: tr("Double-click to write a change request; Enter sends it to the coordinator", "双击写修改要求，回车发给协调者") })]), () => "", true, text => {
 			if (!text.trim()) return null;
@@ -639,12 +661,12 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 	}
 
 	/** Every block is drawn for its render status; only the open card's body is mounted. */
-	function card(item: BlockView, number: string, titles: BlockTitles): TspNode {
+	function card(item: BlockView, number: string, doc: DocFacts): TspNode {
 		const block = item.block;
 		const isOpen = open === block.id;
 		const drawn = block.content.kind === "task"
-			? personText(block, "body", block.content.body, tr("// Double-click to write the body", "// 双击写正文"), tr("Body", "正文"), titles)
-			: designBody(block, block.content, titles);
+			? personText(block, "body", block.content.body, tr("// Double-click to write the body", "// 双击写正文"), tr("Body", "正文"), doc)
+			: designBody(block, block.content, doc);
 		const md: string[] = [], images: string[] = [];
 		const collect = (child: TspNode): void => {
 			if (child.k === "md" && typeof child.p?.text === "string") md.push(child.p.text);
@@ -677,8 +699,9 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 		on(titleId, { dblclick: () => startEdit(titleId, view.title, false, text => core.setTitle(REF, view.title, text)) });
 		const errors = [...core.errors(), ...view.errors, ...(renderError ? [renderError] : [])];
 		let number = 0;
-		const titles = new Map(view.blocks.map(item => [item.block.id, item.block.title]));
-		const cards = view.blocks.map(item => card(item, item.block.progress.kind === "untracked" ? "--" : String(++number).padStart(2, "0"), titles));
+		const contents = view.blocks.map(item => [item.block.id, item.block.content] as const);
+		const doc: DocFacts = { titles: new Map(view.blocks.map(item => [item.block.id, item.block.title])), blocks: new Set(contents.map(([id]) => id)), slots: slotTable(contents) };
+		const cards = view.blocks.map(item => card(item, item.block.progress.kind === "untracked" ? "--" : String(++number).padStart(2, "0"), doc));
 		return { id: "main.view", k: "col", c: [el("app", "div", "pb-app", [
 			el("doc", "div", "pb-doc-title", [el("doc.hash", "span", "pb-hash", [], { text: "##" }), title]),
 			...(errors.length ? [el("errors", "div", "pb-errors", errors.map((error, index) => ({ id: `errors.${index}`, k: "text", p: { text: error, tone: "error" } })))] : []),

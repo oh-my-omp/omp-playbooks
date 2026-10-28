@@ -3,7 +3,7 @@ import type { BlockContent, BlockId, CompileInput, CompileResult, ErrorSite, Ext
 import { tr } from "../i18n";
 import { panelText, replacePanel } from "./draft/document";
 import type { ReferencesModule } from "../domain/ports";
-import { resolveSlots } from "./draft/slot";
+import { qualifiedUses, resolveSlots, slotTable, slotTexts, type SlotTable } from "./draft/slot";
 type Span = { start: number; end: number };
 type Selection = { ok: true; text: string } | { ok: false; reason: string };
 type ParsedExpression = { ok: true; value: ReferenceExpression } | { ok: false; reason: string };
@@ -290,28 +290,51 @@ function selectIssue(issue: IssueValue, selectors: readonly Selector[]): Selecti
 	return { ok: true, text: selected.join("\n\n") };
 }
 
-/** References a block's content takes part in: a task body's; a design is an opaque leaf. */
-function referencesOf(content: BlockContent | undefined): Reference[] {
-	return content?.kind === "task" ? parseReferences(content.body) : [];
+/**
+ * References a block's content takes part in: a task body's, read with its slots as their values as
+ * the compiler reads it (a slot's value may hold a reference); a design is an opaque leaf.
+ */
+function referencesOf(content: BlockContent | undefined, table: SlotTable): Reference[] {
+	if (content?.kind !== "task") return [];
+	const resolved = resolveSlots(content.body, table);
+	return parseReferences(resolved.ok ? resolved.text : content.body);
 }
 
-function closure(roots: readonly BlockId[], contents: ReadonlyMap<BlockId, BlockContent>): Set<BlockId> {
-	const reached = new Set<BlockId>();
+/**
+ * The blocks `roots` compile from. Expanded blocks are the roots and the blocks their task bodies
+ * reference: their references and `{{bN.name}}` uses are followed. A block reached only by a
+ * `{{bN.name}}` is a leaf: only its slot's value is read, so nothing of it is followed. Missing ids
+ * are kept, so a block added later changes the closure.
+ */
+function reach(roots: readonly BlockId[], contents: ReadonlyMap<BlockId, BlockContent>): { readonly table: SlotTable; readonly expanded: Set<BlockId>; readonly leaves: Set<BlockId> } {
+	const table = slotTable(contents);
+	const expanded = new Set<BlockId>();
+	const leaves = new Set<BlockId>();
 	const pending = [...roots].reverse();
 	while (pending.length > 0) {
 		const block = pending.pop()!;
-		if (reached.has(block)) continue;
-		reached.add(block);
-		const children = referencesOf(contents.get(block)).map(reference => parseTarget(reference.targetText)).filter((target): target is Extract<Target, { kind: "block" }> => target?.kind === "block");
+		if (expanded.has(block)) continue;
+		expanded.add(block);
+		leaves.delete(block);
+		const content = contents.get(block);
+		if (content === undefined) continue;
+		for (const { text } of slotTexts(content)) for (const use of qualifiedUses(text)) if (!expanded.has(use.block)) leaves.add(use.block);
+		const children = referencesOf(content, table).map(reference => parseTarget(reference.targetText)).filter((target): target is Extract<Target, { kind: "block" }> => target?.kind === "block");
 		for (let index = children.length - 1; index >= 0; index--) pending.push(children[index]!.block);
 	}
-	return reached;
+	return { table, expanded, leaves };
+}
+
+function closure(roots: readonly BlockId[], contents: ReadonlyMap<BlockId, BlockContent>): Set<BlockId> {
+	const { expanded, leaves } = reach(roots, contents);
+	return new Set([...expanded, ...leaves]);
 }
 
 function externalTargets(roots: readonly BlockId[], contents: ReadonlyMap<BlockId, BlockContent>): ExternalTarget[] {
 	const targets = new Map<string, ExternalTarget>();
-	for (const block of closure(roots, contents)) {
-		for (const reference of referencesOf(contents.get(block))) {
+	const { table, expanded } = reach(roots, contents);
+	for (const block of expanded) {
+		for (const reference of referencesOf(contents.get(block), table)) {
 			const target = parseTarget(reference.targetText);
 			if (target && (target.kind === "file" || target.kind === "issue" || target.kind === "pull")) targets.set(targetKey(target), target);
 		}
@@ -321,8 +344,9 @@ function externalTargets(roots: readonly BlockId[], contents: ReadonlyMap<BlockI
 
 function resultTargets(roots: readonly BlockId[], contents: ReadonlyMap<BlockId, BlockContent>): BlockId[] {
 	const targets = new Set<BlockId>();
-	for (const block of closure(roots, contents)) {
-		for (const reference of referencesOf(contents.get(block))) {
+	const { table, expanded } = reach(roots, contents);
+	for (const block of expanded) {
+		for (const reference of referencesOf(contents.get(block), table)) {
 			const target = parseTarget(reference.targetText);
 			if (target?.kind === "result") targets.add(target.block);
 		}
@@ -330,9 +354,11 @@ function resultTargets(roots: readonly BlockId[], contents: ReadonlyMap<BlockId,
 	return [...targets];
 }
 
-/** A design block as prompt text: both parts by default, or what `selectors` pick (requirement, design, panels). Slots read as their values. */
-function selectDesign(written: Extract<BlockContent, { kind: "design" }>, selectors: readonly Selector[]): Selection {
-	const content = { requirement: resolveSlots(written.requirement), design: resolveSlots(written.design) };
+/** A design's two texts with their slots already read as their values. */
+type DesignText = { readonly requirement: string; readonly design: string };
+
+/** A design block as prompt text: both parts by default, or what `selectors` pick (requirement, design, panels). */
+function selectDesign(content: DesignText, selectors: readonly Selector[]): Selection {
 	// An empty requirement is not a requirement: the agent gets no empty <requirement> element.
 	if (selectors.length === 0) return { ok: true, text: [...(content.requirement.trim() ? [`<requirement>\n${content.requirement}\n</requirement>`] : []), `<design>\n${content.design}\n</design>`].join("\n\n") };
 	const selected: string[] = [];
@@ -359,7 +385,20 @@ function xmlAttribute(value: string): string {
 
 function compiler(input: CompileInput) {
 	const sources: Source[] = [];
+	const table = slotTable(input.blocks);
 	const badExpression = (at: ErrorSite, reason: string): CompileResult => ({ kind: "Err", error: { kind: "BadExpression", reason, at } });
+	type Resolved<T> = ({ ok: true } & T) | { ok: false; error: CompileResult };
+	/** `text` of `block` with its slots read as their values; a `{{bN.name}}` that reaches no slot fails here. */
+	function resolve(block: BlockId, text: string): Resolved<{ text: string }> {
+		const resolved = resolveSlots(text, table);
+		return resolved.ok ? resolved : { ok: false, error: { kind: "Err", error: { kind: "UnknownSlot", block: resolved.block, slot: resolved.slot, at: { block, reference: resolved.use } } } };
+	}
+	function resolveDesign(block: BlockId, written: Extract<BlockContent, { kind: "design" }>): Resolved<{ content: DesignText }> {
+		const requirement = resolve(block, written.requirement);
+		if (!requirement.ok) return requirement;
+		const design = resolve(block, written.design);
+		return design.ok ? { ok: true, content: { requirement: requirement.text, design: design.text } } : design;
+	}
 	function expand(block: BlockId, reference: Reference, path: readonly BlockId[]): CompileResult {
 		const at = { block, reference: reference.text };
 		const target = parseTarget(reference.targetText);
@@ -374,12 +413,16 @@ function compiler(input: CompileInput) {
 				const content = input.blocks.get(target.block);
 				if (content === undefined) return { kind: "Err", error: { kind: "UnknownBlock", block: target.block, at } };
 				if (content.kind === "design") {
-					const selected = selectDesign(content, expression.value.selectors);
+					const resolved = resolveDesign(target.block, content);
+					if (!resolved.ok) return resolved.error;
+					const selected = selectDesign(resolved.content, expression.value.selectors);
 					if (!selected.ok) return badExpression(at, selected.reason);
 					sources.push({ kind: "block", target: key, expression: expression.value.selection });
 					return { kind: "Ok", text: selected.text, sources };
 				}
-				const selected = selectText(resolveSlots(content.body), expression.value.selectors);
+				const resolved = resolve(target.block, content.body);
+				if (!resolved.ok) return resolved.error;
+				const selected = selectText(resolved.text, expression.value.selectors);
 				if (!selected.ok) return badExpression(at, selected.reason);
 				sources.push({ kind: "block", target: key, expression: expression.value.selection });
 				return compileText(target.block, selected.text, [...path, target.block]);
@@ -416,7 +459,7 @@ function compiler(input: CompileInput) {
 		parts.push(body.slice(offset));
 		return { kind: "Ok", text: parts.join(""), sources };
 	}
-	return { sources, expand, compileText };
+	return { sources, expand, compileText, resolve, resolveDesign };
 }
 
 function compile(order: readonly BlockId[], input: CompileInput): CompileResult {
@@ -426,12 +469,16 @@ function compile(order: readonly BlockId[], input: CompileInput): CompileResult 
 		const content = input.blocks.get(block);
 		if (content === undefined) return { kind: "Err", error: { kind: "UnknownBlock", block, at: { block, reference: "" } } };
 		if (content.kind === "design") {
-			const selected = selectDesign(content, []);
+			const resolved = context.resolveDesign(block, content);
+			if (!resolved.ok) return resolved.error;
+			const selected = selectDesign(resolved.content, []);
 			if (!selected.ok) return { kind: "Err", error: { kind: "BadExpression", reason: selected.reason, at: { block, reference: "" } } };
 			parts.push(selected.text);
 			continue;
 		}
-		const compiled = context.compileText(block, resolveSlots(content.body), [block]);
+		const resolved = context.resolve(block, content.body);
+		if (!resolved.ok) return resolved.error;
+		const compiled = context.compileText(block, resolved.text, [block]);
 		if (compiled.kind === "Err") return compiled;
 		parts.push(compiled.text);
 	}

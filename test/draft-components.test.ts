@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { renderDraft, draftDiagnostics, type DraftHost } from "../src/service/draft/components";
 import type { TspNode } from "../src/service/tsp-types";
-import { passiveEdit } from "./draft-helpers";
+import { noSlots, passiveEdit } from "./draft-helpers";
 
 const host: DraftHost = {
-	id: "b1.design", edit: passiveEdit,
+	id: "b1.design", edit: passiveEdit, slots: noSlots,
 	context: { svg: (id, _source, _size, alt) => ({ id, k: "image", p: { alt } }), image: (id, _bytes, _mime, alt) => ({ id, k: "image", p: { alt } }), readFile: () => ({ ok: false, error: "missing" }) },
 	view: () => "changes", viewSwitch: id => ({ id, k: "text", p: { text: "switch" } }),
 };

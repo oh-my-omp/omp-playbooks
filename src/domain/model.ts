@@ -247,7 +247,9 @@ export type CompileError =
 	| { readonly kind: "Cycle"; readonly path: readonly BlockId[]; readonly at: ErrorSite }
 	| { readonly kind: "TooDeep"; readonly at: ErrorSite }
 	| { readonly kind: "NoResult"; readonly block: BlockId; readonly at: ErrorSite }
-	| { readonly kind: "FetchFailed"; readonly target: TargetKey; readonly error: string; readonly at: ErrorSite };
+	| { readonly kind: "FetchFailed"; readonly target: TargetKey; readonly error: string; readonly at: ErrorSite }
+	/** `{{block.slot}}` where `block` does not exist or declares no `slot`; `at.reference` is the use. */
+	| { readonly kind: "UnknownSlot"; readonly block: BlockId; readonly slot: string; readonly at: ErrorSite };
 
 export interface ErrorSite {
 	readonly block: BlockId;

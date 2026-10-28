@@ -125,7 +125,7 @@ export interface RenderContext {
 	image(id: string, bytes: Uint8Array, mime: string, alt: string): TspNode;
 	/** Read a file by a path relative to the Playbook's directory (or absolute); refuses paths outside that directory. */
 	readFile(path: string): FileRead;
-	/** The slots the drawn text declares, by name. */
+	/** The slots the drawn text declares, by name, and every block's as `bN.name`. */
 	readonly slots: ReadonlyMap<string, SlotDecl>;
 	readonly edit: EditHost;
 }

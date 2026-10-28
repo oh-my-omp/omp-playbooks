@@ -43,11 +43,11 @@ export interface ReferencesModule {
 	parseExpression(expression: string | null): { readonly ok: true; readonly value: ReferenceExpression } | { readonly ok: false; readonly reason: string };
 	/** Canonical key of a target; used for fetch tables. */
 	targetKey(target: Target): TargetKey;
-	/** Dependency closure (launch-events.md §3): the roots plus ids reachable through block references of task bodies (design blocks are leaves), including missing ids. */
+	/** Dependency closure (launch-events.md §3): the roots, the ids reachable through block references of task bodies (design blocks are leaves), and the blocks whose slots their `{{bN.name}}` uses read (leaves too), including missing ids. */
 	closure(roots: readonly BlockId[], contents: ReadonlyMap<BlockId, BlockContent>): Set<BlockId>;
-	/** External targets referenced anywhere in the closure of `roots`, deduplicated by key. */
+	/** External targets referenced by the task bodies the closure of `roots` expands (not by blocks reached only for a slot's value), deduplicated by key. */
 	externalTargets(roots: readonly BlockId[], contents: ReadonlyMap<BlockId, BlockContent>): ExternalTarget[];
-	/** Block ids whose `.result` is referenced in the closure of `roots`. */
+	/** Block ids whose `.result` is referenced by the task bodies the closure of `roots` expands. */
 	resultTargets(roots: readonly BlockId[], contents: ReadonlyMap<BlockId, BlockContent>): BlockId[];
 	/** Pure compile (references.md §4). */
 	compile(order: readonly BlockId[], input: CompileInput): CompileResult;

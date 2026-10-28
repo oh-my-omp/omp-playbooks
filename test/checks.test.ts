@@ -16,6 +16,7 @@ const compileErrors: readonly CompileError[] = [
 	{ kind: "TooDeep", at: site },
 	{ kind: "NoResult", block: "b2", at: site },
 	{ kind: "FetchFailed", target: "missing.txt", error: "ENOENT", at: site },
+	{ kind: "UnknownSlot", block: "b2", slot: "mode", at: site },
 ];
 const outlined = "## A Where · Scope\nThe service.\n\n## B What · Goal\nIt answers.\n\n## C How · Steps\nRun it.";
 const input: Parameters<ChecksModule["findings"]>[0] = {

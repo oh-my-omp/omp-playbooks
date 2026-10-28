@@ -1,4 +1,4 @@
-import { fence, passiveEdit, renderDefaults } from "./draft-helpers";
+import { fence, noSlots, passiveEdit, renderDefaults } from "./draft-helpers";
 import { describe, expect, test } from "bun:test";
 import { renderDraft } from "../src/service/draft/components";
 import type { ChangeView, Parsed, RenderContext } from "../src/service/draft/contract";
@@ -19,7 +19,7 @@ function rejected(source: string, line: number, message: string): void {
 	expect(result.ok).toBe(false);
 	expect(result.diagnostics).toContainEqual({ component: "svg", severity: "error", line, message: expect.stringContaining(message) });
 	let svgCalls = 0;
-	const rendered = renderDraft(`\`\`\`svg\n${source}\n\`\`\``, { edit: passiveEdit,
+	const rendered = renderDraft(`\`\`\`svg\n${source}\n\`\`\``, { edit: passiveEdit, slots: noSlots,
 		id: "draft.rejected",
 		context: {
 			svg(id) { svgCalls++; return { id, k: "image" }; },

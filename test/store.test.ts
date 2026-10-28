@@ -323,7 +323,7 @@ describe("append-only facts", () => {
 	test("every persisted compile-error variant is decoded", () => {
 		const { store } = fixture();
 		const at = { block: "b1" as const, reference: "((x))" };
-		const errors: CompileError[] = [{ kind: "UnknownBlock", block: "b2", at }, { kind: "UnknownTarget", at }, { kind: "BadExpression", reason: "invalid", at }, { kind: "Cycle", path: ["b1", "b2", "b1"], at }, { kind: "TooDeep", at }, { kind: "NoResult", block: "b2", at }, { kind: "FetchFailed", target: "file:a", error: "missing", at }];
+		const errors: CompileError[] = [{ kind: "UnknownBlock", block: "b2", at }, { kind: "UnknownTarget", at }, { kind: "BadExpression", reason: "invalid", at }, { kind: "Cycle", path: ["b1", "b2", "b1"], at }, { kind: "TooDeep", at }, { kind: "NoResult", block: "b2", at }, { kind: "FetchFailed", target: "file:a", error: "missing", at }, { kind: "UnknownSlot", block: "b2", slot: "mode", at }];
 		for (const error of errors) {
 			const updated = { ...launch, notified: { kind: "Err" as const, error } };
 			store.appendLaunch({ kind: "run", run: "r1" }, updated);

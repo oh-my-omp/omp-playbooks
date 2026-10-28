@@ -34,6 +34,8 @@ function normalizedError(error: CompileError) {
 			return [error.kind, site, error.path];
 		case "FetchFailed":
 			return [error.kind, site, error.target, error.error];
+		case "UnknownSlot":
+			return [error.kind, site, error.block, error.slot];
 	}
 	return unreachable(error);
 }

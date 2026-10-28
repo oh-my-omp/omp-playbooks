@@ -1,5 +1,6 @@
 import { tr } from "../../i18n";
 import { diagnostic, type DraftDiagnostic, type FenceInput, type Parsed, type RenderContext, type Rendered } from "./contract";
+import { slotParts } from "./slot";
 import { inlineSpans, type Span } from "./text";
 
 type TableAlignment = "start" | "center" | "end";
@@ -88,7 +89,9 @@ export function renderTable(spec: TableSpec, ctx: RenderContext): Rendered {
 	}));
 	const rows = spec.rows.map((row, index) => {
 		const cells: Record<string, readonly Span[]> = {};
-		for (let column = 0; column < cols.length; column++) cells[cols[column]!.id] = cellSpans(row[column]!);
+		// A cell is text, not a control: a slot shows its current value, switched where it is used in prose.
+		const shown = (cell: string): string => slotParts(cell, ctx.slots).map(part => part.kind === "slot" ? ctx.slots.get(part.name)!.value : part.text).join("");
+		for (let column = 0; column < cols.length; column++) cells[cols[column]!.id] = cellSpans(shown(row[column]!));
 		return { id: `${ctx.id}.row.${index}`, cells };
 	});
 	return { nodes: [{ id: `${ctx.id}.table`, k: "table", p: { cols, rows } }], diagnostics: [] };

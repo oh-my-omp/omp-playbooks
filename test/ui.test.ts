@@ -95,6 +95,22 @@ describe("current Playbook user interactions", () => {
 		expect(f.core.view(template).blocks[1]?.block.content).toMatchObject({ design: source });
 		expect(f.store.readRevisions(template)).toContainEqual(expect.objectContaining({ block: "b2" }));
 	});
+	test("a {{bN.name}} shows bN's value and a pick changes it where it is declared: a body directly, a design by change request", async () => {
+		const declared = "```slot mode\n= Fast\n* Fast\n- Safe\n```\n";
+		const body = "Use {{b2.mode}} and {{b3.mode}}.\n\n| Mode |\n|---|\n| {{b2.mode}} |";
+		const f = await fixture([task("b1", body), task("b2", declared), design("b3", declared)]); await f.connect();
+		const cell = (): string => JSON.stringify(f.tsp.nodes().find(node => node.k === "table")?.p?.rows);
+		expect(cell()).toContain('"Fast"');
+		const slots = f.tsp.nodes().filter(node => node.p?.class?.toString().startsWith("pb-slot"));
+		expect(slots.map(node => [node.p?.text, node.p?.title])).toEqual([["Fast", "b2 的槽位 mode"], ["Fast", "b3 的槽位 mode"]]);
+		f.tsp.action(slots[0]!.id); f.tsp.action("picker.o1");
+		expect(f.core.view(template).blocks[1]?.block.content).toMatchObject({ body: declared.replace("= Fast", "= Safe") });
+		expect(f.core.view(template).blocks[0]?.block.content).toMatchObject({ body });
+		expect(cell()).toContain('"Safe"');
+		f.tsp.action(slots[1]!.id); f.tsp.action("picker.o1");
+		expect(f.core.view(template).blocks[2]?.block.content).toMatchObject({ design: declared });
+		expect(f.store.readRevisions(template)).toContainEqual(expect.objectContaining({ block: "b3" }));
+	});
 	test("ordered list pick-and-place rewrites and renumbers the actual body", async () => {
 		const f = await fixture([task("b1", "3. One\n4. Two\n5. Three")]);
 		const grip = f.tsp.nodes().find(node => node.k === "icon" && node.p?.name === "grip")!;

@@ -316,13 +316,14 @@ function decodeCompileError(value: unknown): CompileError {
 	const site = fields(v.at);
 	keys(site, ["block", "reference"]);
 	const at = { block: blockId(site.block), reference: string(site.reference) };
-	const kind = choice(v.kind, ["UnknownBlock", "UnknownTarget", "BadExpression", "Cycle", "TooDeep", "NoResult", "FetchFailed"]);
+	const kind = choice(v.kind, ["UnknownBlock", "UnknownTarget", "BadExpression", "Cycle", "TooDeep", "NoResult", "FetchFailed", "UnknownSlot"]);
 	switch (kind) {
 		case "UnknownBlock": case "NoResult": keys(v, ["kind", "block", "at"]); return { kind, block: blockId(v.block), at };
 		case "UnknownTarget": case "TooDeep": keys(v, ["kind", "at"]); return { kind, at };
 		case "BadExpression": keys(v, ["kind", "reason", "at"]); return { kind, reason: string(v.reason), at };
 		case "Cycle": keys(v, ["kind", "path", "at"]); return { kind, path: list(v.path, blockId), at };
 		case "FetchFailed": keys(v, ["kind", "target", "error", "at"]); return { kind, target: string(v.target), error: string(v.error), at };
+		case "UnknownSlot": keys(v, ["kind", "block", "slot", "at"]); return { kind, block: blockId(v.block), slot: string(v.slot), at };
 	}
 }
 function decodeCompile(value: unknown): CompileResult {

@@ -1,4 +1,5 @@
 import type { EditHost, FenceInput, RenderContext } from "../src/service/draft/contract";
+import type { SlotScope } from "../src/service/draft/slot";
 
 export function fence(input: Pick<FenceInput, "args" | "line" | "lines">): FenceInput {
 	let offset = 0;
@@ -15,3 +16,5 @@ export const passiveEdit: EditHost = {
 	reference: (id, text, _target, alias) => ({ id, k: "text", p: { text: alias ?? text } }),
 };
 export const renderDefaults: Pick<RenderContext, "slots" | "edit"> = { slots: new Map(), edit: passiveEdit };
+/** A document with no other block's slots. */
+export const noSlots: SlotScope = { table: new Map(), blocks: new Set() };

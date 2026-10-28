@@ -17,7 +17,7 @@ import { parseKv, renderKv } from "./kv";
 import { parseLimits, renderLimits } from "./limits";
 import { linkedHeading, renderMarkdown } from "./markdown";
 import { parseSequence, renderSequence } from "./sequence";
-import { parseSlot, parseSlots } from "./slot";
+import { parseSlot, parseSlots, type SlotScope } from "./slot";
 import { parseSvg, renderSvg } from "./svg";
 import { parseTable, renderTable } from "./table";
 import { parseTimeline, renderTimeline } from "./timeline";
@@ -97,6 +97,8 @@ export interface DraftHost {
 	readonly id: string;
 	readonly context: Pick<RenderContext, "svg" | "image" | "readFile">;
 	readonly edit: EditHost;
+	/** The document's slots, for `{{bN.name}}` uses and their diagnostics. */
+	readonly slots: SlotScope;
 	view(key: string): ChangeView;
 	/** A control switching the view of `key` (the UI owns the state and the event). */
 	viewSwitch(id: string, key: string, current: ChangeView): TspNode;
@@ -111,7 +113,9 @@ export interface DraftRender {
 /** Draw a whole text: header, lead and panels, one column of headed sections. */
 export function renderDraft(text: string, host: DraftHost): DraftRender {
 	const document = parseDocument(text);
-	const { slots, diagnostics: slotDiagnostics } = parseSlots(text);
+	const { slots: local, diagnostics: slotDiagnostics } = parseSlots(text, host.slots);
+	// A text draws its own slots and, as `{{bN.name}}`, every block's.
+	const slots = new Map([...local, ...[...host.slots.table].map(([name, entry]) => [name, entry.decl] as const)]);
 	const diagnostics: DraftDiagnostic[] = [...document.diagnostics, ...slotDiagnostics];
 	const segmentNodes = (prefix: string, segments: readonly Segment[]): TspNode[] => segments.flatMap((segment, index) => {
 		const item = build(segment);

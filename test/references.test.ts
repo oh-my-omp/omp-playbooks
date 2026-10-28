@@ -185,6 +185,27 @@ describe("dependency discovery", () => {
 		expect(references.externalTargets(["b1"], contents).map(references.targetKey)).toEqual(["file:notes.md", issueUrl]);
 		expect(references.resultTargets(["b1"], contents)).toEqual(["b7", "b8"]);
 	});
+	test("a {{bN.name}} makes bN a leaf of the closure: a design it reaches through a reference counts, nothing of the leaf is followed", () => {
+		const owner: BlockContent = { kind: "task", body: "```slot policy\n= Manual\n```\n((file:owner.md)) ((b8.result)) ((b9))" };
+		const contents = new Map<BlockId, BlockContent>([["b1", task("((b3))")], ["b2", owner], ["b3", { kind: "design", requirement: "", design: "Approval: {{b2.policy}}" }]]);
+		expect([...references.closure(["b1"], contents)]).toEqual(["b1", "b3", "b2"]);
+		expect(references.externalTargets(["b1"], contents)).toEqual([]);
+		expect(references.resultTargets(["b1"], contents)).toEqual([]);
+		// Reached also as a root, the block is expanded and its references are followed.
+		expect([...references.closure(["b1", "b2"], contents)]).toEqual(["b1", "b3", "b2", "b9"]);
+		expect(references.externalTargets(["b1", "b2"], contents).map(references.targetKey)).toEqual(["file:owner.md"]);
+	});
+	test("a slot's value is read where the compiler reads it, so a reference it holds is discovered", () => {
+		const contents = new Map<BlockId, BlockContent>([["b1", task("```slot source\n= ((file:notes.md))\n```\nRead {{source}}.")]]);
+		expect(references.externalTargets(["b1"], contents).map(references.targetKey)).toEqual(["file:notes.md"]);
+	});
+	test("{{bN.name}} compiles to bN's current value in task bodies and designs; one that reaches no slot fails the compile", () => {
+		const owner: BlockContent = { kind: "design", requirement: "", design: "```slot policy\n= Manual\n```\n" };
+		const data = input([["b1", task("Policy {{b2.policy}}.\n((b3))")], ["b2", owner], ["b3", { kind: "design", requirement: "", design: "Design {{b2.policy}}" }]]);
+		expect(ok(references.compile(["b1"], data)).text).toBe("Policy Manual.\n<design>\nDesign Manual\n</design>");
+		expect(references.compile(["b1"], input([["b1", task("Policy {{b2.missing}}.")], ["b2", owner]]))).toEqual({ kind: "Err", error: { kind: "UnknownSlot", block: "b2", slot: "missing", at: { block: "b1", reference: "{{b2.missing}}" } } });
+		expect(references.compile(["b1"], input([["b1", task("((b3))")], ["b3", { kind: "design", requirement: "", design: "{{b9.x}}" }]]))).toEqual({ kind: "Err", error: { kind: "UnknownSlot", block: "b9", slot: "x", at: { block: "b3", reference: "{{b9.x}}" } } });
+	});
 });
 
 describe("design block references", () => {
