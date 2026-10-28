@@ -105,7 +105,7 @@ function inlineNodes(id: string, text: string): TspNode[] {
 type Piece =
 	| { readonly kind: "text"; readonly text: string }
 	| { readonly kind: "slot"; readonly name: string }
-	| { readonly kind: "reference"; readonly text: string; readonly target: Target };
+	| { readonly kind: "reference"; readonly text: string; readonly target: Target; readonly alias: string | null };
 
 /**
  * `text` around its references to known target kinds (code spans hold none, references.md §1), the
@@ -117,7 +117,9 @@ function referencePieces(text: string, plain: (text: string) => readonly Piece[]
 	for (const reference of references.parseReferences(text)) {
 		const target = references.parseTarget(reference.targetText);
 		if (target === null) continue;
-		pieces.push(...plain(text.slice(offset, reference.offset)), { kind: "reference", text: reference.text, target });
+		// An invalid expression is the compiler's to report; the link still draws, by its default name.
+		const expression = references.parseExpression(reference.expressionText);
+		pieces.push(...plain(text.slice(offset, reference.offset)), { kind: "reference", text: reference.text, target, alias: expression.ok ? expression.value.alias : null });
 		offset = reference.offset + reference.text.length;
 	}
 	pieces.push(...plain(text.slice(offset)));
@@ -132,7 +134,7 @@ function run(ctx: Pick<RenderContext, "edit">, id: string, tag: string, classNam
 			switch (piece.kind) {
 				case "text": return inlineNodes(`${id}.t${index}`, piece.text);
 				case "slot": return [ctx.edit.slot(`${id}.s${index}`, piece.name)];
-				case "reference": return [ctx.edit.reference(`${id}.r${index}`, piece.text, piece.target)];
+				case "reference": return [ctx.edit.reference(`${id}.r${index}`, piece.text, piece.target, piece.alias)];
 			}
 		}),
 	};

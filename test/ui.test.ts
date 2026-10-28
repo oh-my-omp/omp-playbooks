@@ -220,9 +220,9 @@ describe("current Playbook user interactions", () => {
 		expect(f.calls).toEqual(["list", "choose 11", "list", "new"]);
 	});
 	test("a block reference opens its card and scrolls to it once; code spans and missing blocks stay text", async () => {
-		const f = await fixture([task("b1", "See ((b2)), `((b2))` and ((b9))."), task("b2", "Target")]);
+		const f = await fixture([task("b1", "See ((b2)), `((b2))` and ((b9))."), { ...task("b2", "Target"), title: "Rollout" }]);
 		const links = f.tsp.nodes().filter(node => node.p?.class === "pb-ref");
-		expect(links.map(node => node.p?.text)).toEqual(["((b2))"]);
+		expect(links.map(node => node.p?.text)).toEqual(["Rollout"]);
 		expect(f.tsp.nodes().find(node => node.p?.text === "((b9))")?.p?.actions).toBeUndefined();
 		f.tsp.action(links[0]!.id);
 		expect(f.tsp.nodes().some(node => node.id === "b2.body")).toBe(true);
@@ -232,13 +232,25 @@ describe("current Playbook user interactions", () => {
 		await settle();
 		expect(f.tsp.frames.slice(followed).flatMap(frame => frame.ops).some(op => op[0] === "reveal")).toBe(false);
 	});
+	test("a link shows its alias, else the target's name, and keeps its source on hover", async () => {
+		const f = await fixture([
+			task("b1", 'One ((b2)), two ((b2 | as("the plan"), lines(1..1))), three ((b3.result)).'),
+			{ ...task("b2"), title: "Rollout" }, { ...task("b3"), title: " " },
+		]);
+		const links = f.tsp.nodes().filter(node => node.p?.class === "pb-ref").map(node => ({ text: node.p?.text, title: node.p?.title }));
+		expect(links).toEqual([
+			{ text: "Rollout", title: "((b2))" },
+			{ text: "the plan", title: '((b2 | as("the plan"), lines(1..1)))' },
+			{ text: "未命名块 b3 · 结果", title: "((b3.result))" },
+		]);
+	});
 	test("references in panel headings and prose are links, external ones opened by Tern; component values stay text", async () => {
 		const f = await fixture([design("b1", "## A Plan ((b2))\nUse ((file:docs/a b.md)).\n```kv\nKey: ((b2))\n```", "Fix ((https://github.com/Owner/Repo/pull/7))"), task("b2")]);
 		const links = f.tsp.nodes().filter(node => node.p?.class === "pb-ref").map(node => ({ text: node.p?.text, href: node.p?.href, actions: node.p?.actions }));
 		expect(links).toEqual([
-			{ text: "((https://github.com/Owner/Repo/pull/7))", href: "https://github.com/owner/repo/pull/7", actions: undefined },
-			{ text: "((b2))", href: undefined, actions: { click: "invoke" } },
-			{ text: "((file:docs/a b.md))", href: `${f.directory}/docs/a%20b.md`, actions: undefined },
+			{ text: "owner/repo#7", href: "https://github.com/owner/repo/pull/7", actions: undefined },
+			{ text: "b2", href: undefined, actions: { click: "invoke" } },
+			{ text: "docs/a b.md", href: `${f.directory}/docs/a%20b.md`, actions: undefined },
 		]);
 	});
 });

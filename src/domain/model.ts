@@ -198,6 +198,17 @@ export interface Reference {
 	readonly offset: number;
 }
 
+/**
+ * A reference's expression split at its boundary: `as("…")` names the link the pane draws and never
+ * reaches compilation; the selectors pick content, and `selection` is their source text (the
+ * expression without `as(…)`), null when there is none.
+ */
+export interface ReferenceExpression {
+	readonly alias: string | null;
+	readonly selectors: readonly Selector[];
+	readonly selection: string | null;
+}
+
 export interface IssueComment {
 	readonly author: string;
 	readonly createdAt: string;

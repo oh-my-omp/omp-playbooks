@@ -104,8 +104,8 @@ export interface EditHost {
 	list(id: string, span: Span, ordered: boolean, start: number, items: readonly ListItem[]): TspNode;
 	/** A flow drawn as a chain of cards; `body` is the fence body its operations replace. */
 	chain(id: string, body: Span, chain: FlowChain): TspNode;
-	/** A `((target))` reference written in prose (`text` is its source), drawn as a link to `target`. */
-	reference(id: string, text: string, target: Target): TspNode;
+	/** A `((target))` reference written in prose (`text` is its source), drawn as a link to `target` named by `alias`, else by the target. */
+	reference(id: string, text: string, target: Target, alias: string | null): TspNode;
 }
 
 /**

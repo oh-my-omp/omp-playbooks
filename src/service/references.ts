@@ -1,12 +1,12 @@
 import { parseBlockId } from "../domain/model";
-import type { BlockContent, BlockId, CompileInput, CompileResult, ErrorSite, ExternalTarget, IssueValue, Reference, Selector, Source, Target } from "../domain/model";
+import type { BlockContent, BlockId, CompileInput, CompileResult, ErrorSite, ExternalTarget, IssueValue, Reference, ReferenceExpression, Selector, Source, Target } from "../domain/model";
 import { tr } from "../i18n";
 import { panelText, replacePanel } from "./draft/document";
 import type { ReferencesModule } from "../domain/ports";
 import { resolveSlots } from "./draft/slot";
 type Span = { start: number; end: number };
 type Selection = { ok: true; text: string } | { ok: false; reason: string };
-type ParsedExpression = { ok: true; selectors: readonly Selector[] } | { ok: false; reason: string };
+type ParsedExpression = { ok: true; value: ReferenceExpression } | { ok: false; reason: string };
 
 /** Fence spans include their delimiter lines, and an unclosed fence extends to EOF. */
 function fenceSpans(body: string): Span[] {
@@ -153,7 +153,7 @@ function targetKey(target: Target): string {
 }
 
 function parseExpression(expression: string | null): ParsedExpression {
-	if (expression === null) return { ok: true, selectors: [] };
+	if (expression === null) return { ok: true, value: { alias: null, selectors: [], selection: null } };
 	const tokens: string[] = [];
 	let start = 0;
 	let quoted = false;
@@ -167,10 +167,22 @@ function parseExpression(expression: string | null): ParsedExpression {
 		} else if (character === '"') quoted = true;
 		else if (character === ",") { tokens.push(expression.slice(start, index).trim()); start = index + 1; }
 	}
-	if (quoted) return { ok: false, reason: tr("Unclosed section title", "未闭合的章节标题") };
+	if (quoted) return { ok: false, reason: tr("Unclosed quoted string", "未闭合的引号字符串") };
 	tokens.push(expression.slice(start).trim());
+	let alias: string | null = null;
 	const selectors: Selector[] = [];
+	const picks: string[] = [];
 	for (const token of tokens) {
+		const named = /^as\(\s*("(?:[^"\\]|\\.)*")\s*\)$/.exec(token);
+		if (named) {
+			if (alias !== null) return { ok: false, reason: tr(`Only one as(…) is allowed: ${token}`, `只能写一个 as(…)：${token}`) };
+			let value: unknown;
+			try { value = JSON.parse(named[1]!); } catch { return { ok: false, reason: tr(`Invalid alias: ${token}`, `别名无效：${token}`) }; }
+			if (typeof value !== "string" || !value.trim()) return { ok: false, reason: tr(`An alias cannot be blank: ${token}`, `别名不能为空：${token}`) };
+			alias = value.trim();
+			continue;
+		}
+		picks.push(token);
 		if (token === "title" || token === "body" || token === "comments" || token === "requirement" || token === "design") { selectors.push({ kind: token }); continue; }
 		const panel = /^panel\(\s*"?([A-Z][0-9]*)"?\s*\)$/.exec(token);
 		if (panel) { selectors.push({ kind: "panel", id: panel[1]! }); continue; }
@@ -198,7 +210,9 @@ function parseExpression(expression: string | null): ParsedExpression {
 		}
 		return { ok: false, reason: tr(`Unknown selector: ${token}`, `未知选择器：${token}`) };
 	}
-	return { ok: true, selectors };
+	// Without an alias the selection is the expression as written, so existing sources keep their text.
+	const selection = alias === null ? expression : picks.length > 0 ? picks.join(", ") : null;
+	return { ok: true, value: { alias, selectors, selection } };
 }
 
 function sectionText(text: string, heading: string): Selection {
@@ -360,31 +374,31 @@ function compiler(input: CompileInput) {
 				const content = input.blocks.get(target.block);
 				if (content === undefined) return { kind: "Err", error: { kind: "UnknownBlock", block: target.block, at } };
 				if (content.kind === "design") {
-					const selected = selectDesign(content, expression.selectors);
+					const selected = selectDesign(content, expression.value.selectors);
 					if (!selected.ok) return badExpression(at, selected.reason);
-					sources.push({ kind: "block", target: key, expression: reference.expressionText });
+					sources.push({ kind: "block", target: key, expression: expression.value.selection });
 					return { kind: "Ok", text: selected.text, sources };
 				}
-				const selected = selectText(resolveSlots(content.body), expression.selectors);
+				const selected = selectText(resolveSlots(content.body), expression.value.selectors);
 				if (!selected.ok) return badExpression(at, selected.reason);
-				sources.push({ kind: "block", target: key, expression: reference.expressionText });
+				sources.push({ kind: "block", target: key, expression: expression.value.selection });
 				return compileText(target.block, selected.text, [...path, target.block]);
 			}
 			case "result": {
 				const result = input.results.get(target.block);
 				if (!result) return { kind: "Err", error: { kind: "NoResult", block: target.block, at } };
-				const selected = selectText(result.text, expression.selectors);
+				const selected = selectText(result.text, expression.value.selectors);
 				if (!selected.ok) return badExpression(at, selected.reason);
-				sources.push({ kind: "result", target: key, expression: reference.expressionText, seq: result.seq, origin: result.origin, launch: result.launch });
+				sources.push({ kind: "result", target: key, expression: expression.value.selection, seq: result.seq, origin: result.origin, launch: result.launch });
 				return { kind: "Ok", text: selected.text, sources };
 			}
 			case "file": case "issue": case "pull": {
 				const fetched = input.fetches.get(key);
 				if (!fetched || !fetched.ok) return { kind: "Err", error: { kind: "FetchFailed", target: key, error: fetched?.error ?? tr("Target is absent from the fetch table", "目标不在 fetch 表中"), at } };
 				if ((target.kind === "file") !== (fetched.value.kind === "file")) return { kind: "Err", error: { kind: "FetchFailed", target: key, error: tr("Fetched value does not match target kind", "获取的值与目标类型不匹配"), at } };
-				const selected = fetched.value.kind === "file" ? selectText(fetched.value.text, expression.selectors) : selectIssue(fetched.value.issue, expression.selectors);
+				const selected = fetched.value.kind === "file" ? selectText(fetched.value.text, expression.value.selectors) : selectIssue(fetched.value.issue, expression.value.selectors);
 				if (!selected.ok) return badExpression(at, selected.reason);
-				sources.push({ kind: "external", target: key, expression: reference.expressionText, fetchedAt: fetched.at });
+				sources.push({ kind: "external", target: key, expression: expression.value.selection, fetchedAt: fetched.at });
 				return { kind: "Ok", text: `<external source="${xmlAttribute(key)}" fetched="${new Date(fetched.at).toISOString()}">\n${selected.text}\n</external>`, sources };
 			}
 		}
@@ -516,4 +530,4 @@ function unifiedDiff(before: string, after: string): string {
 	return `${output.join("\n")}\n`;
 }
 
-export const references: ReferencesModule = { parseReferences, parseTarget, targetKey, closure, externalTargets, resultTargets, compile, expandOne, unifiedDiff, replacePanel };
+export const references: ReferencesModule = { parseReferences, parseTarget, parseExpression, targetKey, closure, externalTargets, resultTargets, compile, expandOne, unifiedDiff, replacePanel };

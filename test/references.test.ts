@@ -111,6 +111,15 @@ describe("selectors", () => {
 			if (result.kind === "Err") expect(result.error.kind).toBe("BadExpression");
 		});
 	}
+	test("an as() alias changes neither the prompt nor its sources, and must be one non-blank string", () => {
+		const plain = ok(expansion("b2", "lines(1..1)"));
+		for (const expression of ['as("Plan"), lines(1..1)', 'lines(1..1), as("a, \\"b\\"")']) expect(ok(expansion("b2", expression))).toEqual(plain);
+		expect(ok(expansion("b2", 'as("Plan")'))).toEqual(ok(expansion("b2", null)));
+		for (const expression of ['as("")', 'as("  ")', 'as("a"), as("b")', "as(Plan)", 'as("a", "b")']) {
+			const result = expansion("b2", expression);
+			expect(result.kind === "Err" && result.error.kind).toBe("BadExpression");
+		}
+	});
 });
 
 describe("pure compile and expansion", () => {

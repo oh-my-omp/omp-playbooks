@@ -28,6 +28,7 @@ import type {
 	TargetKey,
 	TimelineEntry,
 	Block,
+	ReferenceExpression,
 } from "./model";
 import type { EventPayload, Outcome, Request } from "./protocol";
 
@@ -38,6 +39,8 @@ export interface ReferencesModule {
 	parseReferences(body: string): Reference[];
 	/** Classify a target text (references.md §2); null = UnknownTarget. */
 	parseTarget(text: string): Target | null;
+	/** Parse a reference's expression (references.md §3): its `as("…")` alias, selectors and selection text, or why it is invalid. */
+	parseExpression(expression: string | null): { readonly ok: true; readonly value: ReferenceExpression } | { readonly ok: false; readonly reason: string };
 	/** Canonical key of a target; used for fetch tables. */
 	targetKey(target: Target): TargetKey;
 	/** Dependency closure (launch-events.md §3): the roots plus ids reachable through block references of task bodies (design blocks are leaves), including missing ids. */

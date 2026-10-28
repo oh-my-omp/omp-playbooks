@@ -478,17 +478,19 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 				});
 				return el(id, "div", "pb-flow", parts);
 			},
-			reference(id, text, to) {
+			// A link is named by its alias, else by what it points to; its source shows on hover and in the editor.
+			reference(id, text, to, alias) {
 				switch (to.kind) {
 					case "block": case "result": {
 						const title = titles.get(to.block);
 						if (title === undefined) return el(id, "span", "", [], { text, title: tr(`Block ${to.block} does not exist`, `块 ${to.block} 不存在`) });
 						on(id, { click: () => { open = to.block; openChosen = true; menu = null; node = null; picked = null; pendingReveal = to.block; } });
-						return el(id, "span", "pb-ref", [], { text, title: title.trim() || tr("Unnamed block", "未命名块"), actions: { click: "invoke" } });
+						const name = title.trim() || tr(`Unnamed block ${to.block}`, `未命名块 ${to.block}`);
+						return el(id, "span", "pb-ref", [], { text: alias ?? (to.kind === "block" ? name : tr(`${name} · result`, `${name} · 结果`)), title: text, actions: { click: "invoke" } });
 					}
-					case "issue": case "pull": return el(id, "span", "pb-ref", [], { text, href: to.url });
+					case "issue": case "pull": return el(id, "span", "pb-ref", [], { text: alias ?? `${to.owner}/${to.repo}#${to.number}`, title: text, href: to.url });
 					// Tern percent-decodes a link without a scheme, so each path segment is encoded.
-					case "file": return el(id, "span", "pb-ref", [], { text, href: resolve(baseDir, to.path).split("/").map(encodeURIComponent).join("/") });
+					case "file": return el(id, "span", "pb-ref", [], { text: alias ?? to.path, title: text, href: resolve(baseDir, to.path).split("/").map(encodeURIComponent).join("/") });
 				}
 			},
 		};
