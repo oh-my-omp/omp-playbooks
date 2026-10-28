@@ -1,5 +1,7 @@
 // Markdown runs of a drawn text, split into the units a person edits one at a time: paragraphs,
 // headings, `//` comment lines and list items, each with the range of text it came from.
+import type { Target } from "../../domain/model";
+import { references } from "../references";
 import type { TspNode } from "../tsp-types";
 import type { ListItem, RenderContext, SourceLine, Span } from "./contract";
 import { slotParts } from "./slot";
@@ -20,7 +22,7 @@ type Block =
 	  };
 
 const ITEM = /^( {0,3})([-*+]|(\d{1,9})[.)])([ \t]+|$)/;
-const HEADING = /^ {0,3}#{1,6}([ \t]|$)/;
+const HEADING = /^ {0,3}(#{1,6})([ \t]|$)/;
 const COMMENT = /^[ \t]*\/\/ ?/;
 
 function end(line: SourceLine): number {
@@ -99,18 +101,67 @@ function inlineNodes(id: string, text: string): TspNode[] {
 	return nodes;
 }
 
+/** A piece of drawn inline text: Markdown, a slot's control, or a reference drawn as a link. */
+type Piece =
+	| { readonly kind: "text"; readonly text: string }
+	| { readonly kind: "slot"; readonly name: string }
+	| { readonly kind: "reference"; readonly text: string; readonly target: Target };
+
 /**
- * Text drawn as Markdown. A block (`div`) without slots is a `md` node; inline text (`span`, such as a
- * kv value) and text with slots become inline runs, each slot's control in its place (a `md` node is a
- * block and cannot hold controls).
+ * `text` around its references to known target kinds (code spans hold none, references.md §1), the
+ * rest split by `plain`. References are found first, so a slot written inside one stays part of it.
  */
-export function inlineText(ctx: RenderContext, id: string, text: string, tag: "div" | "span" = "div"): TspNode {
-	const parts = slotParts(text, ctx.slots);
-	if (tag === "div" && !parts.some(part => part.kind === "slot")) return { id, k: "md", p: { text } };
+function referencePieces(text: string, plain: (text: string) => readonly Piece[]): Piece[] {
+	const pieces: Piece[] = [];
+	let offset = 0;
+	for (const reference of references.parseReferences(text)) {
+		const target = references.parseTarget(reference.targetText);
+		if (target === null) continue;
+		pieces.push(...plain(text.slice(offset, reference.offset)), { kind: "reference", text: reference.text, target });
+		offset = reference.offset + reference.text.length;
+	}
+	pieces.push(...plain(text.slice(offset)));
+	return pieces;
+}
+
+/** An inline run: each piece in its place, Markdown pieces as `inlineNodes`. */
+function run(ctx: Pick<RenderContext, "edit">, id: string, tag: string, className: string, pieces: readonly Piece[]): TspNode {
 	return {
-		id, k: "el", p: { tag, class: "pb-inline" },
-		c: parts.flatMap((part, index): TspNode[] => part.kind === "slot" ? [ctx.edit.slot(`${id}.s${index}`, part.name)] : inlineNodes(`${id}.t${index}`, part.text)),
+		id, k: "el", p: { tag, class: className ? `pb-inline ${className}` : "pb-inline" },
+		c: pieces.flatMap((piece, index): TspNode[] => {
+			switch (piece.kind) {
+				case "text": return inlineNodes(`${id}.t${index}`, piece.text);
+				case "slot": return [ctx.edit.slot(`${id}.s${index}`, piece.name)];
+				case "reference": return [ctx.edit.reference(`${id}.r${index}`, piece.text, piece.target)];
+			}
+		}),
 	};
+}
+
+/**
+ * Text drawn as Markdown. A block (`div`) of plain Markdown is a `md` node; inline text (`span`, such as
+ * a kv value) and text with controls become inline runs, each control in its place (a `md` node is a
+ * block and cannot hold controls, and Tern opens its links without telling the pane).
+ */
+function drawText(ctx: RenderContext, id: string, text: string, tag: "div" | "span", pieces: readonly Piece[]): TspNode {
+	if (tag === "div" && pieces.every(piece => piece.kind === "text")) return { id, k: "md", p: { text } };
+	return run(ctx, id, tag, "", pieces);
+}
+
+/** Text with slot controls and no reference links: a value inside a component such as kv. */
+export function inlineText(ctx: RenderContext, id: string, text: string, tag: "div" | "span" = "div"): TspNode {
+	return drawText(ctx, id, text, tag, slotParts(text, ctx.slots));
+}
+
+/** Prose of a Markdown run: slot controls and reference links. */
+function proseText(ctx: RenderContext, id: string, text: string): TspNode {
+	return drawText(ctx, id, text, "div", referencePieces(text, plain => slotParts(plain, ctx.slots)));
+}
+
+/** A heading's text with its references as links, as `tag` of class `className`; null when it has none. */
+export function linkedHeading(ctx: Pick<RenderContext, "edit">, id: string, text: string, tag: string, className: string): TspNode | null {
+	const pieces = referencePieces(text, plain => plain ? [{ kind: "text", text: plain }] : []);
+	return pieces.some(piece => piece.kind === "reference") ? run(ctx, id, tag, className, pieces) : null;
 }
 
 /** A Markdown run as its editable units. */
@@ -118,16 +169,20 @@ export function renderMarkdown(ctx: RenderContext, lines: readonly SourceLine[])
 	return markdownBlocks(lines).map((block, index): TspNode => {
 		const id = `${ctx.id}.b${index}`;
 		switch (block.kind) {
-			case "paragraph": return ctx.edit.text(id, block.span, true, inlineText(ctx, `${id}.view`, block.text));
-			case "heading": return ctx.edit.text(id, block.span, false, { id: `${id}.view`, k: "md", p: { text: block.text } });
+			case "paragraph": return ctx.edit.text(id, block.span, true, proseText(ctx, `${id}.view`, block.text));
+			case "heading": {
+				const marker = HEADING.exec(block.text)!;
+				const view = linkedHeading(ctx, `${id}.view`, block.text.slice(marker[0].length), `h${Math.min(marker[1]!.length, 4)}`, "pb-heading");
+				return ctx.edit.text(id, block.span, false, view ?? { id: `${id}.view`, k: "md", p: { text: block.text } });
+			}
 			case "comment": return {
 				id, k: "el", p: { tag: "div", class: "pb-comment" },
-				c: [{ id: `${id}.slash`, k: "el", p: { tag: "span", class: "pb-comment-slash", text: "//" } }, ctx.edit.text(`${id}.text`, block.span, true, inlineText(ctx, `${id}.view`, block.text))],
+				c: [{ id: `${id}.slash`, k: "el", p: { tag: "span", class: "pb-comment-slash", text: "//" } }, ctx.edit.text(`${id}.text`, block.span, true, proseText(ctx, `${id}.view`, block.text))],
 			};
 			case "list": {
 				const items: ListItem[] = block.items.map((item, position) => ({
 					span: item.span,
-					node: ctx.edit.text(`${id}.i${position}`, item.content, true, inlineText(ctx, `${id}.i${position}.view`, item.text)),
+					node: ctx.edit.text(`${id}.i${position}`, item.content, true, proseText(ctx, `${id}.i${position}.view`, item.text)),
 				}));
 				return ctx.edit.list(id, block.span, block.ordered, block.start, items);
 			}

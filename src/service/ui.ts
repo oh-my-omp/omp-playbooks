@@ -18,6 +18,8 @@ import { tr } from "../i18n";
 
 /** The block fields drawn as text: a person writes `body` and `requirement`; `design` is the coordinator's. */
 type DraftField = "body" | "requirement" | "design";
+/** Each block's title by id, as the document view being drawn has it. */
+type BlockTitles = ReadonlyMap<BlockId, string>;
 
 /** The image on the system clipboard now, as the encoded bytes and their MIME type; null when it holds none. */
 export type ClipboardImageReader = () => Promise<{ readonly data: Uint8Array; readonly mimeType: string } | null>;
@@ -80,6 +82,9 @@ const SURFACE_CSS = [
 	// Slot: the current value, underlined, opening its options.
 	".pb-slot { display: inline; padding: 0 2px; border-bottom: 1.5px dashed var(--t3); font-weight: 600; cursor: pointer; }",
 	".pb-slot-open { border-bottom-color: var(--accent); background: rgb(from var(--accent) r g b / 12%); }",
+	// A reference: a link to the block it names, or to an issue, pull request or file Tern opens.
+	".pb-ref { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }",
+	".pb-heading { margin: 0; font-weight: 600; }",
 	".pb-opt { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; width: 100%; padding: 6px 10px; border-radius: 6px; text-align: left; cursor: pointer; }",
 	".pb-opt:hover { background: var(--l1); }",
 	".pb-opt-on { background: rgb(from var(--accent) r g b / 12%); }",
@@ -254,6 +259,8 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 	let picker: Picker | null = null;
 	/** An ordered list item picked up to be placed elsewhere. */
 	let picked: { readonly list: string; readonly from: number } | null = null;
+	/** The card a followed reference opened, scrolled into view by the next frame and then dropped. */
+	let pendingReveal: BlockId | null = null;
 	/** The selected node of a chain flow, which shows its tools. */
 	let node: { readonly chain: string; readonly index: number } | null = null;
 	/** A notice shown once: it is added to the layer by itself and replaced by the next one. */
@@ -382,7 +389,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 	 * directly; a design is the coordinator's, so a person's change to it (a slot value) goes as a
 	 * change request.
 	 */
-	function fieldHost(block: Block, field: DraftField, source: string): EditHost {
+	function fieldHost(block: Block, field: DraftField, source: string, titles: BlockTitles): EditHost {
 		const slots = parseSlots(source).slots;
 		const target: HumanField | null = field === "design" ? null : field;
 		const writable = target !== null;
@@ -471,10 +478,23 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 				});
 				return el(id, "div", "pb-flow", parts);
 			},
+			reference(id, text, to) {
+				switch (to.kind) {
+					case "block": case "result": {
+						const title = titles.get(to.block);
+						if (title === undefined) return el(id, "span", "", [], { text, title: tr(`Block ${to.block} does not exist`, `块 ${to.block} 不存在`) });
+						on(id, { click: () => { open = to.block; openChosen = true; menu = null; node = null; picked = null; pendingReveal = to.block; } });
+						return el(id, "span", "pb-ref", [], { text, title: title.trim() || tr("Unnamed block", "未命名块"), actions: { click: "invoke" } });
+					}
+					case "issue": case "pull": return el(id, "span", "pb-ref", [], { text, href: to.url });
+					// Tern percent-decodes a link without a scheme, so each path segment is encoded.
+					case "file": return el(id, "span", "pb-ref", [], { text, href: resolve(baseDir, to.path).split("/").map(encodeURIComponent).join("/") });
+				}
+			},
 		};
 	}
 
-	function draft(block: Block, field: DraftField, source: string): { readonly nodes: readonly TspNode[]; readonly errors: number } {
+	function draft(block: Block, field: DraftField, source: string, titles: BlockTitles): { readonly nodes: readonly TspNode[]; readonly errors: number } {
 		const host: DraftHost = {
 			id: `${block.id}.${field}`,
 			context: {
@@ -483,7 +503,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 				image: (id, bytes, mime, alt) => imageNode(id, bytes, mime, alt),
 				readFile: path => readDraftFile(baseDir, path),
 			},
-			edit: fieldHost(block, field, source),
+			edit: fieldHost(block, field, source, titles),
 			view: key => views.get(`${block.id}.${key}`) ?? "changes",
 			viewSwitch: (id, key, current) => el(id, "div", "pb-view-switch", viewOptions().map(option => {
 				const optionId = `${id}.${option.view}`;
@@ -596,16 +616,16 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 	}
 
 	/** A field a person writes (task body, design requirement): drawn like any text, edited part by part, double-click to start when empty. */
-	function personText(block: Block, field: HumanField & DraftField, source: string, placeholder: string, label: string): { readonly nodes: readonly TspNode[]; readonly errors: number } {
-		if (source.trim()) return draft(block, field, source);
+	function personText(block: Block, field: HumanField & DraftField, source: string, placeholder: string, label: string, titles: BlockTitles): { readonly nodes: readonly TspNode[]; readonly errors: number } {
+		if (source.trim()) return draft(block, field, source, titles);
 		const id = `${block.id}.${field}.empty`;
 		return { nodes: [editable(id, el(`${id}.view`, "div", "pb-placeholder", [], { text: placeholder }), () => "", true, text => core.edit(REF, block.id, field, source, text), label)], errors: 0 };
 	}
 
 	/** A design card: the person's requirement, the coordinator's design, and the line that sends a change request. */
-	function designBody(block: Block, content: Extract<Block["content"], { kind: "design" }>): { nodes: TspNode[]; errors: number } {
-		const requirement = personText(block, "requirement", content.requirement, tr("// Double-click to write the requirement", "// 双击写需求"), tr("Requirement", "需求"));
-		const drawn = content.design.trim() ? draft(block, "design", content.design) : { nodes: [el(`${block.id}.design.empty`, "div", "pb-placeholder", [], { text: tr("// The coordinator has not written a design yet", "// 协调者还没有写设计") })], errors: 0 };
+	function designBody(block: Block, content: Extract<Block["content"], { kind: "design" }>, titles: BlockTitles): { nodes: TspNode[]; errors: number } {
+		const requirement = personText(block, "requirement", content.requirement, tr("// Double-click to write the requirement", "// 双击写需求"), tr("Requirement", "需求"), titles);
+		const drawn = content.design.trim() ? draft(block, "design", content.design, titles) : { nodes: [el(`${block.id}.design.empty`, "div", "pb-placeholder", [], { text: tr("// The coordinator has not written a design yet", "// 协调者还没有写设计") })], errors: 0 };
 		const requestId = `${block.id}.request`;
 		const request = editable(requestId, el(`${requestId}.view`, "div", "pb-comment", [el(`${requestId}.slash`, "span", "pb-comment-slash", [], { text: "//" }), el(`${requestId}.text`, "span", "", [], { text: tr("Double-click to write a change request; Enter sends it to the coordinator", "双击写修改要求，回车发给协调者") })]), () => "", true, text => {
 			if (!text.trim()) return null;
@@ -617,12 +637,12 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 	}
 
 	/** Every block is drawn for its render status; only the open card's body is mounted. */
-	function card(item: BlockView, number: string): TspNode {
+	function card(item: BlockView, number: string, titles: BlockTitles): TspNode {
 		const block = item.block;
 		const isOpen = open === block.id;
 		const drawn = block.content.kind === "task"
-			? personText(block, "body", block.content.body, tr("// Double-click to write the body", "// 双击写正文"), tr("Body", "正文"))
-			: designBody(block, block.content);
+			? personText(block, "body", block.content.body, tr("// Double-click to write the body", "// 双击写正文"), tr("Body", "正文"), titles)
+			: designBody(block, block.content, titles);
 		const md: string[] = [], images: string[] = [];
 		const collect = (child: TspNode): void => {
 			if (child.k === "md" && typeof child.p?.text === "string") md.push(child.p.text);
@@ -655,7 +675,8 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 		on(titleId, { dblclick: () => startEdit(titleId, view.title, false, text => core.setTitle(REF, view.title, text)) });
 		const errors = [...core.errors(), ...view.errors, ...(renderError ? [renderError] : [])];
 		let number = 0;
-		const cards = view.blocks.map(item => card(item, item.block.progress.kind === "untracked" ? "--" : String(++number).padStart(2, "0")));
+		const titles = new Map(view.blocks.map(item => [item.block.id, item.block.title]));
+		const cards = view.blocks.map(item => card(item, item.block.progress.kind === "untracked" ? "--" : String(++number).padStart(2, "0"), titles));
 		return { id: "main.view", k: "col", c: [el("app", "div", "pb-app", [
 			el("doc", "div", "pb-doc-title", [el("doc.hash", "span", "pb-hash", [], { text: "##" }), title]),
 			...(errors.length ? [el("errors", "div", "pb-errors", errors.map((error, index) => ({ id: `errors.${index}`, k: "text", p: { text: error, tone: "error" } })))] : []),
@@ -849,6 +870,9 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 			shownToast = toast.n;
 		}
 		ops.push(["focus", field]);
+		// A followed reference scrolls to the card it opened, once: later redraws leave the scroll alone.
+		if (pendingReveal !== null && present.has(pendingReveal)) ops.push(["reveal", `${pendingReveal}.card`, "start"]);
+		pendingReveal = null;
 		const s = tsp.frame(ops, open !== null ? [open] : []);
 		mounted = true;
 		tsp.fullRedraw(s);

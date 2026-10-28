@@ -302,6 +302,8 @@ Rules and limits:
 - `file:` allows `../` and has **no** directory sandbox or secret scanning like the design images/`src=` have; reference only files you are willing to hand to a subagent.
 - A missing block, panel, result or section, out-of-range lines, a failed fetch or a reference cycle fails compilation. A block reference chain is at most 8 levels deep, root included.
 
+The pane draws each reference written in prose, a Markdown heading or a panel heading as a link, in requirements and designs too (they are still not expanded there). A click on a block or result reference opens that block's card and scrolls to it; GitHub and `file:` references open through Tern's own link handling, with the gesture set by Tern's "Open links with". References to a missing block or an unknown target, inside code, or inside a component fence such as `kv` stay text. A paragraph holding a link keeps only the pane's inline formatting: `**strong**`, `*em*` and `` `code` ``.
+
 `playbook_compile` only shows the compiled result; it starts no work.
 
 ## Bodies, designs and components

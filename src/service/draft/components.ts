@@ -15,7 +15,7 @@ import { parseHtml, renderHtml } from "./html";
 import { parseImage, renderImage } from "./image";
 import { parseKv, renderKv } from "./kv";
 import { parseLimits, renderLimits } from "./limits";
-import { renderMarkdown } from "./markdown";
+import { linkedHeading, renderMarkdown } from "./markdown";
 import { parseSequence, renderSequence } from "./sequence";
 import { parseSlot, parseSlots } from "./slot";
 import { parseSvg, renderSvg } from "./svg";
@@ -145,7 +145,7 @@ export function renderDraft(text: string, host: DraftHost): DraftRender {
 		const id = `${host.id}.p${index}`;
 		const head: TspNode[] = item.bare ? [] : [{ id: `${id}.head`, k: "el", p: { tag: "div", class: "pb-ph" }, c: [
 			...(item.explicit ? [{ id: `${id}.letter`, k: "el", p: { tag: "span", class: "pb-ph-id", text: item.id } }] : []),
-			host.edit.text(`${id}.heading`, item.titleSpan, false, { id: `${id}.heading.view`, k: "el", p: { tag: "span", class: "pb-ph-title", text: item.title } }),
+			host.edit.text(`${id}.heading`, item.titleSpan, false, linkedHeading(host, `${id}.heading.view`, item.title, "span", "pb-ph-title") ?? { id: `${id}.heading.view`, k: "el", p: { tag: "span", class: "pb-ph-title", text: item.title } }),
 			...(item.meta ? [{ id: `${id}.meta`, k: "el", p: { tag: "span", class: "pb-ph-meta", text: item.meta } }] : []),
 		] }];
 		return { id, k: "el", p: { tag: "section", class: "pb-section" }, c: [...head, ...segmentNodes(`${id}.s`, item.segments)] };

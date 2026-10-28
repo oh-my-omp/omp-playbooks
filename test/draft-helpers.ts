@@ -12,5 +12,6 @@ export const passiveEdit: EditHost = {
 	slot: (id, name) => ({ id, k: "text", p: { text: name } }),
 	list: (id, _span, _ordered, _start, items) => ({ id, k: "col", c: items.map(item => item.node) }),
 	chain: (id, _body, chain) => ({ id, k: "col", c: chain.nodes.map((node, i) => ({ id: `${id}.${i}`, k: "text", p: { text: node.label } })) }),
+	reference: (id, text) => ({ id, k: "text", p: { text } }),
 };
 export const renderDefaults: Pick<RenderContext, "slots" | "edit"> = { slots: new Map(), edit: passiveEdit };

@@ -1,6 +1,7 @@
 // Contract between the design-draft document parser (src/service/draft/document.ts), the
 // component modules (src/service/draft/<component>.ts) and the TSP renderer.
 // Draft syntax follows answer-me-with-html's draft format (`am help <component>`).
+import type { Target } from "../../domain/model";
 import type { TspNode } from "../tsp-types";
 import type { SlotDecl } from "./slot";
 
@@ -103,6 +104,8 @@ export interface EditHost {
 	list(id: string, span: Span, ordered: boolean, start: number, items: readonly ListItem[]): TspNode;
 	/** A flow drawn as a chain of cards; `body` is the fence body its operations replace. */
 	chain(id: string, body: Span, chain: FlowChain): TspNode;
+	/** A `((target))` reference written in prose (`text` is its source), drawn as a link to `target`. */
+	reference(id: string, text: string, target: Target): TspNode;
 }
 
 /**

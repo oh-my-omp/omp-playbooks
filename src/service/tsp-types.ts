@@ -8,7 +8,9 @@ export type FrameOp =
 	| readonly ["add", string, string, string | null, TspNode]
 	| readonly ["del", string]
 	| readonly ["set", string, Record<string, unknown>]
-	| readonly ["focus", string | null];
+	| readonly ["focus", string | null]
+	/** Scroll a node into view; Tern reads every position but `start` as `nearest`. */
+	| readonly ["reveal", string, "start" | "nearest"];
 
 export type TspEvent =
 	| { readonly ev: "ack"; readonly s: number }
