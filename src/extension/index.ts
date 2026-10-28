@@ -22,6 +22,7 @@ const ORCHESTRATION = /^\s*```(js|py)\s*\n([\s\S]*)\n```\s*$/;
 /** The main session's notice for what Tern setup did; nothing when the daemon already ran this version. */
 function ternNotice(state: TernPluginState): { readonly text: string; readonly level: "info" | "warning" } | null {
 	switch (state.kind) {
+		case "absent": return { text: tr("omp-playbooks: no `tern` command on this omp's PATH, so the Tern plugin is not linked and Playbook panes cannot open. Put Tern's `tern` on PATH and restart omp.", "omp-playbooks: 这个 omp 的 PATH 中没有 `tern` 命令，Tern 插件未链接，Playbook 面板无法打开。把 Tern 的 `tern` 加入 PATH 后重启 omp。"), level: "warning" };
 		case "current": return null;
 		case "reloaded": return { text: tr(`omp-playbooks: Tern plugin reloaded from ${state.from ?? "not loaded"} to ${state.to}`, `omp-playbooks: Tern 插件已从 ${state.from ?? "未加载"} 重新加载为 ${state.to}`), level: "info" };
 		case "stale": return { text: tr(`omp-playbooks: Tern is still running plugin ${state.loaded ?? "not loaded"}; the disk has ${state.wanted}; run \`tern plugin reload\` manually to see why.\n${state.detail}`, `omp-playbooks: Tern 仍在运行插件 ${state.loaded ?? "未加载"}，磁盘上是 ${state.wanted}；手动执行 \`tern plugin reload\` 查看原因。\n${state.detail}`), level: "warning" };
@@ -39,7 +40,7 @@ function ternPane(): string | null {
 }
 
 export default async function (pi: ExtensionAPI): Promise<void> {
-	// The install links the Tern plugin wherever omp runs it (tern-setup.ts).
+	// Wherever omp runs it with `tern` on PATH, the factory links the Tern plugin (tern-setup.ts).
 	const ternState = await ensureTernPlugin();
 	// A Playbook lives in a Tern pane beside its coordinator: outside one, this extension adds no
 	// tool, topic, command, notice or eval rewrite to the session.

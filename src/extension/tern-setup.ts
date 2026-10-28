@@ -1,6 +1,7 @@
 // The Tern side of an `omp plugin install` (contracts.md K6 安装). omp runs the extension
-// factory once while installing and rolls the install back when it throws, so this is
-// where a missing Tern refuses the install and where the Tern plugin gets linked.
+// factory once while installing and rolls the install back when it throws, so this never
+// throws for a missing Tern: with no `tern` on PATH it links nothing and the install goes
+// through; the next extension load that finds `tern` links the Tern plugin.
 //
 // The link points Tern at this package's own `tern-plugin/`. The daemon reloads files
 // edited in place, but an upgrade replaces the whole package directory, which leaves the
@@ -16,8 +17,9 @@ import { tr } from "../i18n";
 const TERN_PLUGIN_DIR = resolve(import.meta.dir, "../../tern-plugin");
 const TERN_PLUGIN_ID = "omp-playbooks";
 
-/** What the Tern side looked like after setup; only the last two need the operator's attention. */
+/** What the Tern side looked like after setup; `current` needs no notice. */
 export type TernPluginState =
+	| { readonly kind: "absent" }
 	| { readonly kind: "current"; readonly version: string }
 	| { readonly kind: "reloaded"; readonly from: string | null; readonly to: string }
 	| { readonly kind: "stale"; readonly loaded: string | null; readonly wanted: string; readonly detail: string };
@@ -71,9 +73,7 @@ async function loadedVersion(): Promise<{ readonly ok: true; readonly version: s
 }
 
 async function setup(): Promise<TernPluginState> {
-	if (Bun.which("tern") === null) {
-		throw new Error(tr("omp-playbooks needs Tern: no `tern` command on PATH. Install Tern (https://docs.stencil.so/tern/) and run the install again.", "omp-playbooks 需要 Tern：PATH 中没有 `tern` 命令。请安装 Tern（https://docs.stencil.so/tern/）后再次运行安装。"));
-	}
+	if (Bun.which("tern") === null) return { kind: "absent" };
 	const wanted = await realpath(TERN_PLUGIN_DIR);
 	const pluginsDir = (await tern(["plugin", "dir"])).trim();
 	if ((await linkedDir(pluginsDir)) !== wanted) await tern(["plugin", "link", wanted, "--json"]);

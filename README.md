@@ -53,7 +53,7 @@ https://github.com/user-attachments/assets/cbe541a9-7bba-4ec2-aea8-fc61feed6559
 
 ## Install and open
 
-You need [Bun](https://bun.sh), omp and Tern. The process that loads the extension must find `tern` on `PATH`; the environment that starts the document service must be able to run `bun`. GitHub issue/PR references also need an authenticated `gh`.
+You need [Bun](https://bun.sh), omp and Tern. The process that loads the extension must find `tern` on `PATH` for the Tern plugin to be linked; the environment that starts the document service must be able to run `bun`. GitHub issue/PR references also need an authenticated `gh`.
 
 The repository is [oh-my-omp/omp-playbooks](https://github.com/oh-my-omp/omp-playbooks); the installed omp package name and the Tern plugin ID are both `omp-playbooks`, which the upgrade and uninstall commands below use.
 
@@ -61,7 +61,7 @@ The repository is [oh-my-omp/omp-playbooks](https://github.com/oh-my-omp/omp-pla
 omp plugin install 'https://github.com/oh-my-omp/omp-playbooks.git#main'
 ```
 
-When the extension loads it checks for Tern and links the package's `tern-plugin/` into Tern; it skips this when the same directory is already linked. The link points at the omp install directory itself. The Tern daemon reloads plugin files edited in place, but an upgrade replaces the whole install directory, which leaves the daemon on a missing link target or an old version. The extension therefore compares the version in `tern-plugin/plugin.toml` with the version the daemon loaded, runs `tern plugin reload` when they differ, and reports the outcome in the next main session that runs in a Tern pane. If the versions still differ after the reload it only warns and does not abort the install; the next extension load compares again.
+When the extension loads and finds `tern` on `PATH`, it links the package's `tern-plugin/` into Tern; it skips this when the same directory is already linked. Without `tern` it links nothing and the install still succeeds, so a machine without Tern can carry the plugin; a main session in a Tern pane whose omp has no `tern` on `PATH` gets a warning, and the next extension load that finds `tern` links the plugin. The link points at the omp install directory itself. The Tern daemon reloads plugin files edited in place, but an upgrade replaces the whole install directory, which leaves the daemon on a missing link target or an old version. The extension therefore compares the version in `tern-plugin/plugin.toml` with the version the daemon loaded, runs `tern plugin reload` when they differ, and reports the outcome in the next main session that runs in a Tern pane. If the versions still differ after the reload it only warns and does not abort the install; the next extension load compares again.
 
 Beyond that link, the extension acts only when omp runs in a Tern pane managed by the session daemon, which sets `TERN_PANE` to the pane's numeric ID. An omp started anywhere else (a plain terminal, `omp -p`, a missing or non-numeric `TERN_PANE`) gets nothing from it: no `playbook_*` tools or `tool://` topics, no commands, no notices and no eval rewriting.
 

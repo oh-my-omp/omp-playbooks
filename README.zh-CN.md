@@ -53,7 +53,7 @@ https://github.com/user-attachments/assets/ce277db5-505a-42c0-9ea1-23aa870b757f
 
 ## 安装与打开
 
-需要 [Bun](https://bun.sh)、omp 和 Tern。加载扩展的进程必须能从 `PATH` 找到 `tern`；启动文档服务的环境必须能执行 `bun`。使用 GitHub issue/PR 引用时还需要已认证的 `gh`。
+需要 [Bun](https://bun.sh)、omp 和 Tern。加载扩展的进程须能从 `PATH` 找到 `tern`，Tern 插件才会被链接；启动文档服务的环境必须能执行 `bun`。使用 GitHub issue/PR 引用时还需要已认证的 `gh`。
 
 仓库是 [oh-my-omp/omp-playbooks](https://github.com/oh-my-omp/omp-playbooks)；安装后的 omp 包名和 Tern 插件 ID 都是 `omp-playbooks`，下文的升级、卸载命令都用这个名字。
 
@@ -61,7 +61,7 @@ https://github.com/user-attachments/assets/ce277db5-505a-42c0-9ea1-23aa870b757f
 omp plugin install 'https://github.com/oh-my-omp/omp-playbooks.git#main'
 ```
 
-扩展加载时检查 Tern，并把包内的 `tern-plugin/` 链接到 Tern；已链接到同一目录时跳过。链接的就是 omp 安装目录本身。Tern 守护进程会自己重新加载原地修改的插件文件，但升级会整个替换安装目录，守护进程会停在“链接目标不存在”或旧版本上。所以扩展随后比较 `tern-plugin/plugin.toml` 的版本和守护进程已加载的版本，不同时执行 `tern plugin reload`，并在下一个运行于 Tern pane 的主会话提示结果。重新加载后版本仍不一致时只警告、不中断安装，下次加载扩展会再比较。
+扩展加载时若在 `PATH` 找到 `tern`，就把包内的 `tern-plugin/` 链接到 Tern；已链接到同一目录时跳过。找不到 `tern` 时不链接，安装照样成功，因此没装 Tern 的机器也能装上插件；运行于 Tern pane、但 omp 的 `PATH` 里没有 `tern` 的主会话会收到警告，之后找到 `tern` 的那次扩展加载会补上链接。链接的就是 omp 安装目录本身。Tern 守护进程会自己重新加载原地修改的插件文件，但升级会整个替换安装目录，守护进程会停在“链接目标不存在”或旧版本上。所以扩展随后比较 `tern-plugin/plugin.toml` 的版本和守护进程已加载的版本，不同时执行 `tern plugin reload`，并在下一个运行于 Tern pane 的主会话提示结果。重新加载后版本仍不一致时只警告、不中断安装，下次加载扩展会再比较。
 
 除这一链接外，扩展只在 omp 运行于 session daemon 托管的 Tern pane 时起作用；daemon 把 `TERN_PANE` 设为该 pane 的数字 ID。在别处启动的 omp（普通终端、`omp -p`、没有或不是数字的 `TERN_PANE`）不会从扩展得到任何内容：没有 `playbook_*` 工具和 `tool://` 主题，没有命令、通知，也不改写 eval。
 
