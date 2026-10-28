@@ -116,7 +116,7 @@ omomp-lang:
 
 The extension starts the document service and new coordinator sessions with `OMOMP_LANG` from its resolved language, so they match the omp session that opened them. The document service does not read the omomp file itself; a service started by hand, an omp session attached from the pane and the Tern command use the language of their own environment. The Tern command reads the Tern app's environment, which may not include your shell profile. Set the variable where omp is started (for example in the shell profile), then restart omp and the Playbook pane: a running process keeps its language.
 
-The Playbook file's content is never translated: what the file says is shown and compiled as written. The language only decides what new text is written in. The tool descriptions the model reads are English, and they tell the coordinator to write the titles, bodies, designs and slot options it adds in the session's language, keeping the English role words of `## A Where · …` panels and leaving existing text untouched; the launch-prompt footer asks the subagent for its completion report in that language. Texts the pane itself inserts (a new flow node's name, a pasted image's caption) follow the pane's language.
+The Playbook file's content is never translated: what the file says is shown and compiled as written. The language only decides what new text is written in. The tool descriptions and topics the model reads are English; the `tool://playbook_open/language` topic tells the coordinator to write the titles, bodies, designs and slot options it adds in the session's language, keeping the English role words of `## A Where · …` panels and leaving existing text untouched; the launch-prompt footer asks the subagent for its completion report in that language. Texts the pane itself inserts (a new flow node's name, a pasted image's caption) follow the pane's language.
 
 ## The file and its blocks
 
@@ -354,6 +354,10 @@ Execution bodies and designs are drawn with the same component parser. The compo
 ## Coordinator tools
 
 These are tool arguments, not shell commands. `doc` can be omitted only when exactly one document is connected; `run` is omitted to act on the Playbook file itself. All input is strictly validated and extra fields are rejected. A plain `playbook_read` **has no `op: "read"`**.
+
+What the model reads of these tools comes in two layers. omp shows a plugin tool's description up to 200 characters, so each tool's own description is a short surface that fits: what the tool is for and the semantics its schema cannot carry. The call instructions are `tool://` topics read on demand: `playbook_open` has `format`, `outline`, `slots`, `references`, `execution`, `runs` and `language`; `playbook_edit` has `text`, `blocks` and `state`; `playbook_read` has `revisions`, `playbook_launch` `lifecycle`, `playbook_timeline` `records` and `playbook_check` `judge`. `read tool://playbook_open` lists a tool's topics with when to read each; `read tool://playbook_open/format` reads one. The topics live in `src/extension/topics/`; `language` is written when read, in the session's language.
+
+The topics are published to the `tool://` registry of [omp-config](https://github.com/oh-my-omp/omp-config)'s `tool-topics` extension, which also lists each tool's topics under its description in the prompt. Without omp-config there is no registry: the tools work with their short descriptions only, and the session log says so once per session.
 
 | Tool | Arguments |
 |---|---|

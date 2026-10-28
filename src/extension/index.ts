@@ -9,9 +9,10 @@ import { K1Client, type Reply } from "./client";
 import { splitPane } from "../service/panes";
 import { ensureTernPlugin, type TernPluginState } from "./tern-setup";
 import { availableAgents } from "./agents";
-import { language, tr, withLanguage } from "../i18n";
+import { tr, withLanguage } from "../i18n";
 import { configureExtensionLanguage } from "./language";
 import { listenPane, type PaneListener } from "./pane-listener";
+import { registerPlaybookTopics } from "./topics";
 
 configureExtensionLanguage();
 
@@ -268,32 +269,25 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		return reply({ id: "", ok: false, error: { code, message } });
 	};
 
-	// Model-facing text: what the Playbook is, then the one working order across the tools.
-	// New Playbook text is written in this session's language; text already in a file stays as it is.
-	const writeIn = language() === "zh" ? "Chinese" : "English";
-	const languageInstruction = `Write the text you add to a Playbook (titles, task bodies, designs, panel titles after the role word, slot options) in ${writeIn}. That language is set by OMOMP_LANG (else the locale) of this omp process, and it holds whatever language the user writes to you in and whatever language the file already uses. Text already in the file stays exactly as written: never translate it, also when you edit around it.`;
-	const overview = `omp-playbooks: a Playbook is a YAML prompt document the user and you edit together; a document service shows it in a Tern pane beside this session, one card per block. Use the playbook_* tools when the user wants to write, review or run multi-step agent work as a Playbook, or points at a Playbook .yaml file. ${languageInstruction}`;
-	const format = "File format: `title: <text>` and `blocks:` a list of blocks of two kinds, each written as YAML block scalars (`|`). A task block `{id: b<n>, title, body, status: todo}` is a prompt that runs: `body` is Markdown and may reference `((b2))` (another block), `((file:path | lines(1..40)))` (path relative to the Playbook) or `((https://github.com/o/r/issues/1))`; a body that is exactly one ```js or ```py fenced block is an orchestration block. `status` is todo, running or done; the subagent that runs a block writes `status: running` when it starts and `status: done` with a `report: |` completion report when it finishes (its launch prompt tells it how), so you never write them for it. Write `task: false` instead of `status` on a task block that is not a piece of work (an overview, shared rules others reference): it has no status or report, cannot be launched and is left out of the done count. A design block `{id: b<n>, title, requirement, design, status: todo}` is one design or business unit (status todo or done): `requirement` is the person's, written only by them; `design` is yours, written in answer-me-with-html draft format (optional `---` frontmatter with template sheet|doc, title, subtitle, cols; a lead; `## A Panel title {span=2 meta=\"…\"}` panels; Markdown with tables (status words ok/no/warn), `$…$`/`$$` math and `![alt](path)` images; fences flow, er, sequence, tree, timeline, limits, annot, kv, callout, slot, diff, html, svg, and code blocks with src=/lines=/hl=; flow/er/tree lines may start with `+ ` `- ` `~ ` change markers) and drawn in the pane; it never expands `((…))`. Task bodies use the same panels and fences and are drawn the same way. Every card's text is written for the person as Where/What/How: each task body (tracked or `task: false`; not an orchestration block, which is code) and each design has panels whose titles start with the role word, which stays English whatever language the rest is in — `## A Where · <title>` (object, location, scope, current state, evidence), `## B What · <title>` (goal, decision, expected result, boundaries), `## C How · <title>` (steps, verification, failure handling, rollback). Every role has content and they come in that order; a role may span several panels (`## D How · <title>`), and a lead or panels of no role may sit anywhere. playbook_check reports a text that breaks this as `outline`, and the pane lists what is missing; the person's `requirement` and completion reports are free-form. A slot is a value the person picks: a ```slot <name> fence declares it with `= <current value>`, then options `* <recommended> | note`, `- <option> | note` and `~ <option offered earlier> | note`; write `{{<name>}}` in the same text (prose, list items, kv values, flow node labels) where the value goes. The pane draws `{{<name>}}` as the current value the person can switch; compiling replaces it with the value and drops the fence. In any other block write `{{b<n>.<name>}}` for slot <name> declared in block b<n>: declare a choice once and use it everywhere this way. It shows and switches b<n>'s value, compiles to it, and compiling fails when b<n> declares no such slot; a slot's own name never starts with `b<n>.`. Task blocks pull designs in by reference: `((b3))` (requirement and design), `((b3 | requirement))`, `((b3 | design))` or `((b3 | panel(A)))`, where A is a letter ID written in that panel's heading (write IDs on every panel a task may reference). The pane draws every reference as a link named by its target (a block's title, an issue as owner/repo#N, a file by its path); `as(\"<name>\")` in the expression names the link instead, as in `((b3 | as(\"<name>\"), panel(A)))`, and never changes the compiled prompt. Design blocks cannot be launched themselves.";
-	const order = "Order: write the YAML, playbook_open it, playbook_read/playbook_edit blocks, then run blocks of the Playbook from eval: a prompt block with `var worker = await playbook.agent({ blocks: [\"b2\"] })` (returns once the subagent is started and bound) and, after it finishes, `await playbook.result(worker)` in a later eval (records its final message on the block and closes the Launch), or in one blocking call `await playbook.run({ blocks: [\"b2\"] })`; an orchestration block with playbook_launch {op:\"launch\"} and then an eval whose whole code is `await playbook.exec(\"l<n>\")`. To run the same Playbook again from a clean state, playbook_run {op:\"start\"} copies it into a Run (r<n>) with every status back to todo and no reports; pass `run: \"r1\"` to the same calls to work in that Run. `doc` may be omitted while exactly one Playbook is open.";
-	const evalHelp = "In eval, `playbook` is provided automatically: the extension adds the `var playbook = …` first line to any JS cell that uses it, so do not write that line yourself. playbook.agent({run?, blocks, agent?, isolated?, label?, schema?}) → {launch, blocks, id, handle} without waiting: keep it in a top-level `var` and wait with the top-level `wait` tool, so panel notices (stop requests, revision requests, block changes) still reach you while the subagent works; launch requests the person makes while you are in a turn (waiting included) are held and reach you together as one notice when the turn ends. Then `await playbook.result(worker, {block?, close?})` in a later eval records the subagent's final message (or failure) on the given block, by default the Launch's only block, and closes the Launch that playbook.agent created. Options left out come from the block's preset `agent`/`isolated`; pass agent: \"<name>\" (for example \"task:mid\") when the default subagent is disabled and the block sets none. playbook.run({...}) = agent + result in one blocking call. playbook.spawn(launch, {...}) adds a subagent to an open prompt Launch using its current baseline (after rebase, the rebased text); its result does not close the shared Launch unless {close: true}. playbook.stop(launch) cancels every subagent this session started for that Launch and sets the Launch's running blocks back to todo; the pending playbook.result then records the failure and closes the Launch. playbook.post({run?, kind, text, block?, launch?}); playbook.timeline({run?, after?}); playbook.read({run?, block?}); inside an orchestration Launch, playbook.context is {doc, run, launch}.";
-
+	// Model-facing text: each tool's own description stays within the 200 characters omp shows of a
+	// plugin device; the call instructions are its tool:// topics (./topics.ts).
 	type Tool<T> = { readonly name: string; readonly label: string; readonly description: string; readonly parameters: { parse(value: unknown): T }; run(params: T, ctx: ExtensionContext): Promise<Reply> };
 	const tools = [
 		{
 			name: "playbook_open", label: tr("Playbook: open", "Playbook: 打开"), parameters: openParams,
-			description: `${overview} ${format} ${order} ${evalHelp} playbook_open {doc} connects this session to the Playbook file, opening its document service in a new Tern pane beside this session when none runs; this session then is the Playbook's coordinator. Result: the template's block ids and the Runs.`,
+			description: "Connect this session to a Playbook YAML as its coordinator, opening its Tern pane when none runs. Use to write, review or run multi-step agent work. {doc} → block ids, Runs.",
 			run: (params, ctx) => open(params.doc, ctx),
 		} satisfies Tool<{ doc: string }>,
 		{
 			name: "playbook_read", label: tr("Playbook: read", "Playbook: 读取"), parameters: readParams,
-			description: "Read a Playbook's committed blocks: all blocks `{title, blocks}` (with the Run's state when `run` is given) or one `block`; each block has `kind` task (body) or design (requirement, design). Omit `run` for the template. No lock needed. op revisions {block?, after?} returns the person's change requests for design blocks `{revisions: [{seq, at, block, prompt}]}` — they are not part of a normal read; query them when a revision_requested notice arrives or you need the history.",
+			description: "Read committed blocks of the Playbook (or Run `run`): all, or one `block`. op revisions {block?, after?} lists the person's design change requests, not part of a read.",
 			run: (params, ctx) => "op" in params
 				? request(params.doc, ctx, { op: "revisions", args: { ...scoped(params.run), ...(params.block ? { block: params.block } : {}), ...(params.after !== undefined ? { after: params.after } : {}) } })
 				: request(params.doc, ctx, { op: "read", args: { ...scoped(params.run), ...(params.block ? { block: params.block } : {}) } }),
 		} satisfies Tool<ReturnType<typeof readParams.parse>>,
 		{
 			name: "playbook_edit", label: tr("Playbook: edit", "Playbook: 编辑"), parameters: editParams,
-			description: `Change one block of the template (or of Run \`run\`); write new text in ${writeIn} (set by OMOMP_LANG, not by the chat or the file), Where/What/How outline; never translate existing text. op title {block, value}; status {block, value: todo|running|done} (the subagent that runs a block writes its own status; set it yourself only to correct one); task {block, value: false} declares a task block untracked (no status, not launchable, not counted), true tracks it again from todo; replace {block, find, replace} where find occurs exactly once in your field (a task's body, a design's draft); write {block, text} replaces your field whole; panel {block, panel, text} replaces one panel addressed by the letter ID its heading writes, \`text\` being that whole panel starting with \`## <ID> Title\`; insert {after?, title, body, agent?, isolated?} adds a task block, insert_design {after?, title, design} adds a design block whose requirement starts empty (the person writes it) → {block}; delete {block}; move {block, after: <block> or null for the top} reorders; agent {block, value: <agent name> or null} and isolated {block, value: boolean or null} set or clear a task block's execution contract, the defaults playbook.agent/playbook.run use for its subagent (design blocks have none). The outline: panels \`## A Where · <title>\`, \`## B What · <title>\`, \`## C How · <title>\` (the role words stay English), each with content and in that order, more panels of a role allowed; an orchestration block, being code, is exempt; playbook_check reports a text that breaks it as \`outline\`. ${language} A design's requirement is never yours to change. Each call locks the block, applies the change and unlocks it; when the person changes the block meanwhile, the call fails with NotLocked and nothing is applied.`,
+			description: "Change one block of the Playbook (or Run `run`) by `op`. Each call locks the block; NotLocked means nothing was applied, so read it again. A design's requirement is the person's.",
 			run: (params, ctx) => {
 				switch (params.op) {
 					case "insert": return request(params.doc, ctx, { op: "insert", args: { ...scoped(params.run), ...(params.after ? { after: params.after } : {}), title: params.title, content: { kind: "task", body: params.body, ...(params.agent !== undefined ? { agent: params.agent } : {}), ...(params.isolated !== undefined ? { isolated: params.isolated } : {}) } } });
@@ -320,14 +314,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		} satisfies Tool<ReturnType<typeof compileParams.parse>>,
 		{
 			name: "playbook_check", label: tr("Playbook: check", "Playbook: 检查"), parameters: checkParams,
-			description: "inspect {blocks} returns the blocks' deterministic findings, the judge questions and a `version`; answer the questions with `judge` in eval, then report {blocks, version, result: {kind: \"answers\", answers: {<question id>: P(yes)}} or {kind: \"judge_unavailable\"}}.",
+			description: "inspect {blocks} → deterministic findings, judge questions and a `version`; answer with `judge` in eval, then report {blocks, version, result}. Checks never gate a launch.",
 			run: (params, ctx) => params.op === "inspect"
 				? request(params.doc, ctx, { op: "inspect", args: { ...scoped(params.run), blocks: params.blocks } })
 				: request(params.doc, ctx, { op: "report", args: { ...scoped(params.run), blocks: params.blocks, version: params.version, result: params.result } }),
 		} satisfies Tool<ReturnType<typeof checkParams.parse>>,
 		{
 			name: "playbook_run", label: tr("Playbook: Run", "Playbook: 运行"), parameters: runParams,
-			description: "start {name, update_every?} copies the Playbook into a new Run (every status back to todo, no reports) for another execution and returns its id; finish {run} ends it; list returns the Run summaries.",
+			description: "start {name, update_every?} copies the Playbook into a new Run (all todo, no reports; starts no agent) → its id; finish {run} ends the Run; list → Run summaries.",
 			run: (params, ctx) => {
 				switch (params.op) {
 					case "start": return request(params.doc, ctx, { op: "start_run", args: { name: params.name, ...(params.update_every !== undefined ? { update_every: params.update_every } : {}) } });
@@ -338,7 +332,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		} satisfies Tool<ReturnType<typeof runParams.parse>>,
 		{
 			name: "playbook_timeline", label: tr("Playbook: timeline", "Playbook: 时间线"), parameters: timelineParams,
-			description: "The execution log of the Playbook, or of Run `run`. read {run?, after?} returns entries after a sequence number; post {run?, kind: update|result|failure|retrospective, text, block?, launch?, next?, quote?} writes a record (`next`: seconds until the next update, only for a Run's update; retrospective only in a finished Run); snooze {run, after} postpones a Run's update reminder by `after` seconds.",
+			description: "Execution log of the Playbook (or Run `run`): read {after?} entries; post {kind, text, …} a record, which closes no Launch; snooze {run, after} a Run's update reminder.",
 			run: (params, ctx) => {
 				switch (params.op) {
 					case "read": return request(params.doc, ctx, { op: "timeline", args: { ...scoped(params.run), ...(params.after !== undefined ? { after: params.after } : {}) } });
@@ -352,7 +346,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		} satisfies Tool<ReturnType<typeof timelineParams.parse>>,
 		{
 			name: "playbook_launch", label: tr("Playbook: Launch", "Playbook: 启动"), parameters: launchParams,
-			description: "A Launch is the frozen prompt of blocks of the Playbook (or of Run `run`) that subagents work from; the person's later edits to those blocks arrive here as block_changed notices. A prompt Launch's text ends with the instructions for its subagent to write the blocks' status and report into the file. launch {run?, blocks} → {launch, kind, text, agent?, isolated?} (agent/isolated: the execution contract every block presets; prefer `playbook.agent`/`playbook.run` in eval, which also start and bind the subagent and apply that contract); bind {launch, agent}; info {launch} → the full record; rebase {launch} accepts the current text as the new baseline, which playbook.spawn and playbook.exec then use; close {launch} ends it (playbook.result closes the Launch playbook.agent created).",
+			description: "A Launch freezes blocks' prompt for subagents: launch {blocks} → {launch, text}; bind, info, rebase, close. It starts no subagent; prefer playbook.agent/playbook.run in eval.",
 			run: (params, ctx) => {
 				switch (params.op) {
 					case "launch": return request(params.doc, ctx, { op: "launch", args: { ...scoped(params.run), blocks: params.blocks } });
@@ -537,6 +531,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		// The pane id becomes part of a socket path: only the daemon's numeric form is used.
 		const daemonPane = pane !== undefined && /^[0-9]+$/.test(pane) ? pane : null;
 		registerTools([openTool]);
+		// Every playbook_* tool's topics, also those registered later: the index shows only for tools in the prompt.
+		registerPlaybookTopics(pi);
 		if (daemonPane !== null) registerDocumentTools();
 		registerCommands();
 		const notice = ternNotice(ternState);

@@ -7,6 +7,8 @@ import { dirname, resolve } from "node:path";
 import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import type { ProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/types";
 import { z as zod } from "@oh-my-pi/omptype/zod";
 import { language } from "../src/i18n";
 import { parseRunId } from "../src/domain/model";
@@ -111,7 +113,7 @@ async function service(pane: string | undefined = "document-pane", existingDoc?:
 type TextPart = { type: "text"; text: string } | { type: "thinking"; thinking: string };
 type Entry = { type: "message"; id: string; message: { role: "user" | "assistant" | "toolResult"; content: string | TextPart[] } } | { type: "custom"; id: string };
 type ToolResult = { content: { type: string; text?: string }[]; isError?: boolean };
-type Tool = { name: string; parameters: { parse(value: unknown): unknown }; execute(id: string, params: unknown, signal: undefined, update: undefined, ctx: ExtensionContext): Promise<ToolResult> };
+type Tool = { name: string; description: string; parameters: { parse(value: unknown): unknown }; execute(id: string, params: unknown, signal: undefined, update: undefined, ctx: ExtensionContext): Promise<ToolResult> };
 type ToolCallResult = { input: { language: "js" | "py"; code: string; title?: string; timeout?: number; reset?: boolean } } | { block: true; reason: string } | undefined;
 type Handler = (event: unknown, ctx: ExtensionContext) => unknown | Promise<unknown>;
 async function harness(kind: "main" | "sub" = "main") {
@@ -145,11 +147,13 @@ async function harness(kind: "main" | "sub" = "main") {
 	} as unknown as ExtensionCommandContext;
 	// Only the host surfaces this extension consumes are supplied; production types remain unchanged.
 	const waiting: (() => void)[] = [];
+	const warnings: string[] = [];
 	const api = {
 		zod, registerTool: (value: Tool) => { tools.set(value.name, value); },
 		on: (event: string, handler: Handler) => { handlers.set(event, handler); },
 		registerCommand: (name: string, value: { handler(args: string, ctx: ExtensionCommandContext): Promise<void> }) => { commands.set(name, value); },
 		sendMessage: (message: { customType: string; content: string; display: boolean }, options: unknown) => { messages.push({ message, options }); sent.resolve(); for (const resolve of waiting.splice(0)) resolve(); },
+		logger: { warn: (message: string) => { warnings.push(message); } },
 	} as unknown as ExtensionAPI;
 	await extension(api);
 	let started = false;
@@ -163,7 +167,7 @@ async function harness(kind: "main" | "sub" = "main") {
 	}
 	cleanup.push(async () => { await event("session_shutdown"); });
 	return {
-		ctx, messages, notices, menus, choices, event, tools, messageSent: sent.promise,
+		ctx, messages, notices, menus, choices, event, tools, warnings, messageSent: sent.promise,
 		get aborted() { return aborted; }, get registered() { return { tools: [...tools.keys()], commands: [...commands.keys()] }; },
 		set idle(value: boolean) { idle = value; },
 		nextMessage: (): Promise<void> => { const next = Promise.withResolvers<void>(); waiting.push(next.resolve); return next.promise; },
@@ -435,6 +439,35 @@ test("outside a daemon Tern pane only playbook_open is registered until a connec
 test("a session in a daemon Tern pane registers all eight tools at session_start", async () => {
 	process.env.TERN_PANE = String(900_000_000 + Math.floor(Math.random() * 99_999_999)); const h = await harness(); await h.event("session_start");
 	expect(h.registered.tools).toEqual(["playbook_open", ...documentToolNames]);
+});
+
+test("every tool description fits the 200 characters omp shows of a plugin device", async () => {
+	process.env.TERN_PANE = String(900_000_000 + Math.floor(Math.random() * 99_999_999)); const h = await harness(); await h.event("session_start");
+	const long = [...h.tools.values()].filter(tool => tool.description.length > 200).map(tool => `${tool.name}: ${tool.description.length}`);
+	expect(long).toEqual([]);
+});
+
+test("session start publishes every tool's topics to the tool:// registry, the language rule in the current language; without one it only warns", async () => {
+	const h = await harness(); await h.event("session_start");
+	expect(h.warnings).toEqual([expect.stringContaining("no tool:// topics registry")]);
+	const registered = new Map<string, { owner: string; topics: { name: string; when?: string; read: () => string }[] }>();
+	const router = InternalUrlRouter.instance();
+	router.register({
+		scheme: "tool", spec: { backing: "virtual", selectors: "lines", immutable: true },
+		[Symbol.for("omp-config.tool-topics.registration.v1")]: true,
+		registerTopics: (registration: { tool: string; owner: string; topics: { name: string; when?: string; read: () => string }[] }) => { registered.set(registration.tool, registration); return { kind: "registered" }; },
+		resolve: async () => { throw new Error("unused"); },
+	} as unknown as ProtocolHandler);
+	cleanup.push(() => { router.unregister("tool"); });
+	const second = await harness(); await second.event("session_start");
+	expect(second.warnings).toEqual([]);
+	expect([...registered.keys()].sort()).toEqual(["playbook_check", "playbook_edit", "playbook_launch", "playbook_open", "playbook_read", "playbook_timeline"]);
+	for (const { owner, topics } of registered.values()) {
+		expect(owner).toBe("omp-playbooks");
+		for (const topic of topics) { expect(topic.when).toBeTruthy(); expect(topic.read().trim()).not.toBe(""); }
+	}
+	const rule = registered.get("playbook_open")!.topics.find(topic => topic.name === "language")!;
+	expect(rule.read()).toContain(language() === "zh" ? "in Chinese" : "in English");
 });
 
 for (const command of ["playbook-add", "playbook-show"]) {
