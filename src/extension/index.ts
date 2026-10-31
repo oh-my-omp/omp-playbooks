@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import { parseBlockId, parseLaunchId, parseRunId, type BlockId, type LaunchId, type RunId } from "../domain/model";
 import { paneSocketPath, socketPath, type EventPayload, type PaneReply, type PaneRequest, type Request, type ServerFrame } from "../domain/protocol";
 import { K1Client, type Reply } from "./client";
@@ -12,7 +12,7 @@ import { availableAgents } from "./agents";
 import { tr, withLanguage } from "../i18n";
 import { configureExtensionLanguage } from "./language";
 import { listenPane, type PaneListener } from "./pane-listener";
-import { registerPlaybookTopics } from "./topics";
+import { playbookTopics } from "./topics";
 
 configureExtensionLanguage();
 
@@ -283,8 +283,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		return reply({ id: "", ok: false, error: { code, message } });
 	};
 
-	// Model-facing text: each tool's own description stays within the 200 characters omp shows of a
-	// plugin device; the call instructions are its tool:// topics (./topics.ts).
+	// Model-facing text starts with the short purpose omp shows of a plugin device;
+	// full descriptions end with pointers to the tool's own xd:// topics (./topics.ts).
 	type Tool<T> = { readonly name: string; readonly label: string; readonly description: string; readonly parameters: { parse(value: unknown): T }; run(params: T, ctx: ExtensionContext): Promise<Reply> };
 	const tools = [
 		{
@@ -375,9 +375,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	type AnyTool = (typeof tools)[number];
 
 	function registerTools(entries: readonly AnyTool[]): void {
+		const topics = playbookTopics();
 		for (const tool of entries) {
-			pi.registerTool({
-				name: tool.name, label: tool.label, description: tool.description, parameters: tool.parameters,
+			const ownTopics = topics.get(tool.name) ?? [];
+			const pointers = ownTopics.map(topic => `- \`xd://${tool.name}/${topic.name}\` — ${topic.when}`);
+			const definition = {
+				name: tool.name, label: tool.label, parameters: tool.parameters,
+				description: tool.description + (pointers.length ? `\n\nTopics — read the one a call needs before making it:\n${pointers.join("\n")}` : ""),
+				docTopics: () => Object.fromEntries(ownTopics.map(topic => [topic.name, topic.read()])),
 				async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 					try {
 						// Each entry pairs its own schema with its own runner.
@@ -385,7 +390,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 						return reply(await run(tool.parameters.parse(params), ctx));
 					} catch (thrown) { return failure(thrown); }
 				},
-			});
+			} satisfies ToolDefinition<typeof tool.parameters> & { docTopics(): Readonly<Record<string, string>> };
+			pi.registerTool(definition);
 		}
 	}
 
@@ -527,8 +533,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	pi.on("session_start", async (_event, ctx) => {
 		if (ctx.agent.kind !== "main") return;
 		registerTools(tools);
-		// Every playbook_* tool's topics: the index shows only for tools in the prompt.
-		registerPlaybookTopics(pi);
 		registerCommands();
 		const notice = ternNotice(ternState);
 		if (notice) ctx.ui.notify(notice.text, notice.level);

@@ -7,8 +7,6 @@ import { dirname, resolve } from "node:path";
 import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import type { ProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/types";
 import { z as zod } from "@oh-my-pi/omptype/zod";
 import { language } from "../src/i18n";
 import { parseRunId } from "../src/domain/model";
@@ -16,6 +14,7 @@ import { socketPath, type EventPayload, type Request, type ServerFrame } from ".
 import extension from "../src/extension/index";
 import { K1Client } from "../src/extension/client";
 import { ensureTernPlugin } from "../src/extension/tern-setup";
+import { playbookTopics } from "../src/extension/topics";
 
 const summary = { id: "r1", name: "Run", status: "running", started_at: 1, finished_at: null, done: 0, total: 1, update_due: null, update_overdue: false, retrospective: false };
 const block = { id: "b1", kind: "task", title: "Block", body: "Body", status: "todo" };
@@ -116,7 +115,7 @@ async function service(pane: string | undefined = "document-pane", existingDoc?:
 type TextPart = { type: "text"; text: string } | { type: "thinking"; thinking: string };
 type Entry = { type: "message"; id: string; message: { role: "user" | "assistant" | "toolResult"; content: string | TextPart[] } } | { type: "custom"; id: string };
 type ToolResult = { content: { type: string; text?: string }[]; isError?: boolean };
-type Tool = { name: string; description: string; parameters: { parse(value: unknown): unknown }; execute(id: string, params: unknown, signal: undefined, update: undefined, ctx: ExtensionContext): Promise<ToolResult> };
+type Tool = { name: string; description: string; docTopics(): Readonly<Record<string, string>>; parameters: { parse(value: unknown): unknown }; execute(id: string, params: unknown, signal: undefined, update: undefined, ctx: ExtensionContext): Promise<ToolResult> };
 type ToolCallResult = { input: { language: "js" | "py"; code: string; title?: string; timeout?: number; reset?: boolean } } | { block: true; reason: string } | undefined;
 type Handler = (event: unknown, ctx: ExtensionContext) => unknown | Promise<unknown>;
 async function harness(kind: "main" | "sub" = "main") {
@@ -437,33 +436,52 @@ test("a session in a daemon Tern pane registers all eight tools at session_start
 	expect(h.registered.tools).toEqual(["playbook_open", ...documentToolNames]);
 });
 
-test("every tool description fits the 200 characters omp shows of a plugin device", async () => {
+test("every tool keeps its short purpose before any topic pointers", async () => {
 	const h = await harness(); await h.event("session_start");
-	const long = [...h.tools.values()].filter(tool => tool.description.length > 200).map(tool => `${tool.name}: ${tool.description.length}`);
-	expect(long).toEqual([]);
+	for (const tool of h.tools.values()) {
+		const purpose = tool.description.split("\n\n")[0]!;
+		expect(purpose.length).toBeLessThanOrEqual(200);
+		expect(purpose).not.toBe("");
+	}
 });
 
-test("session start publishes every tool's topics to the tool:// registry, the language rule in the current language; without one it only warns", async () => {
+test("each registered tool serves body-only topics and its own xd pointers without a registry", async () => {
 	const h = await harness(); await h.event("session_start");
-	expect(h.warnings).toEqual([expect.stringContaining("no tool:// topics registry")]);
-	const registered = new Map<string, { owner: string; topics: { name: string; when?: string; read: () => string }[] }>();
-	const router = InternalUrlRouter.instance();
-	router.register({
-		scheme: "tool", spec: { backing: "virtual", selectors: "lines", immutable: true },
-		[Symbol.for("omp-config.tool-topics.registration.v1")]: true,
-		registerTopics: (registration: { tool: string; owner: string; topics: { name: string; when?: string; read: () => string }[] }) => { registered.set(registration.tool, registration); return { kind: "registered" }; },
-		resolve: async () => { throw new Error("unused"); },
-	} as unknown as ProtocolHandler);
-	cleanup.push(() => { router.unregister("tool"); });
-	const second = await harness(); await second.event("session_start");
-	expect(second.warnings).toEqual([]);
-	expect([...registered.keys()].sort()).toEqual(["playbook_check", "playbook_edit", "playbook_launch", "playbook_open", "playbook_read", "playbook_timeline"]);
-	for (const { owner, topics } of registered.values()) {
-		expect(owner).toBe("omp-playbooks");
-		for (const topic of topics) { expect(topic.when).toBeTruthy(); expect(topic.read().trim()).not.toBe(""); }
+	expect(h.warnings).toEqual([]);
+	const topics = playbookTopics();
+	expect([...topics.keys()].sort()).toEqual(["playbook_check", "playbook_edit", "playbook_launch", "playbook_open", "playbook_read", "playbook_timeline"]);
+	for (const tool of h.tools.values()) {
+		const ownTopics = topics.get(tool.name) ?? [];
+		const bodies = tool.docTopics();
+		expect(Object.keys(bodies)).toEqual(ownTopics.map(topic => topic.name));
+		for (const topic of ownTopics) {
+			expect(bodies[topic.name]).toBe(topic.read());
+			expect(bodies[topic.name]!.trim()).not.toBe("");
+			expect(bodies[topic.name]).not.toStartWith("---");
+			expect(tool.description).toContain(`- \`xd://${tool.name}/${topic.name}\` — ${topic.when}`);
+		}
+		if (ownTopics.length) {
+			expect(tool.description).toEndWith(`Topics — read the one a call needs before making it:\n${ownTopics.map(topic => `- \`xd://${tool.name}/${topic.name}\` — ${topic.when}`).join("\n")}`);
+		} else {
+			expect(bodies).toEqual({});
+			expect(tool.description).not.toContain("Topics");
+		}
 	}
-	const rule = registered.get("playbook_open")!.topics.find(topic => topic.name === "language")!;
-	expect(rule.read()).toContain(language() === "zh" ? "in Chinese" : "in English");
+	expect(h.tools.get("playbook_open")!.docTopics().format).toStartWith("# Playbook file format\n");
+	expect(h.tools.get("playbook_open")!.docTopics().format).toContain("xd://playbook_open/references");
+});
+
+test("a registered tool generates its language topic afresh on every read", async () => {
+	const original = process.env.OMOMP_LANG;
+	cleanup.push(() => { if (original === undefined) delete process.env.OMOMP_LANG; else process.env.OMOMP_LANG = original; });
+	const h = await harness(); await h.event("session_start");
+	const tool = h.tools.get("playbook_open")!;
+	process.env.OMOMP_LANG = "en";
+	expect(tool.docTopics().language).toContain("in English");
+	process.env.OMOMP_LANG = "zh";
+	expect(tool.docTopics().language).toContain("in Chinese");
+	process.env.OMOMP_LANG = "en";
+	expect(tool.docTopics().language).toContain("in English");
 });
 
 for (const command of ["playbook-add", "playbook-show"]) {

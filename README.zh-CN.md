@@ -63,7 +63,7 @@ omp plugin install 'https://github.com/oh-my-omp/omp-playbooks.git#main'
 
 扩展加载时若在 `PATH` 找到 `tern`，就把包内的 `tern-plugin/` 链接到 Tern；已链接到同一目录时跳过。找不到 `tern` 时不链接，安装照样成功，因此没装 Tern 的机器也能装上插件；运行于 Tern pane、但 omp 的 `PATH` 里没有 `tern` 的主会话会收到警告，之后找到 `tern` 的那次扩展加载会补上链接。链接的就是 omp 安装目录本身。Tern 守护进程会自己重新加载原地修改的插件文件，但升级会整个替换安装目录，守护进程会停在“链接目标不存在”或旧版本上。所以扩展随后比较 `tern-plugin/plugin.toml` 的版本和守护进程已加载的版本，不同时执行 `tern plugin reload`，并在下一个运行于 Tern pane 的主会话提示结果。重新加载后版本仍不一致时只警告、不中断安装，下次加载扩展会再比较。
 
-除这一链接外，扩展只在 omp 运行于 session daemon 托管的 Tern pane 时起作用；daemon 把 `TERN_PANE` 设为该 pane 的数字 ID。在别处启动的 omp（普通终端、`omp -p`、没有或不是数字的 `TERN_PANE`）不会从扩展得到任何内容：没有 `playbook_*` 工具和 `tool://` 主题，没有命令、通知，也不改写 eval。
+除这一链接外，扩展只在 omp 运行于 session daemon 托管的 Tern pane 时起作用；daemon 把 `TERN_PANE` 设为该 pane 的数字 ID。在别处启动的 omp（普通终端、`omp -p`、没有或不是数字的 `TERN_PANE`）不会从扩展得到任何内容：没有 `playbook_*` 工具和 `xd://` 主题，没有命令、通知，也不改写 eval。
 
 **拉取仓库或重启会话不会更新已安装的插件副本。** 已安装过旧实现时先更新：
 
@@ -118,7 +118,7 @@ omomp-lang:
 
 扩展会用解析出的语言把 `OMOMP_LANG` 传给文档服务和新协调者会话，因此它们与打开它们的 omp 会话一致。文档服务本身不会读取 omomp 文件；手动启动的服务、从面板接入的已有 omp 会话和 Tern 命令，用各自环境里的语言。Tern 命令读的是 Tern 应用的环境，可能不包含 shell profile 里的设置。在启动 omp 的地方设置这个变量（例如 shell profile），再重启 omp 和 Playbook 面板：运行中的进程不会换语言。
 
-Playbook 文件的内容不翻译：文件里写的是什么，显示和编译的就是什么。语言只决定新写的文字用哪种语言。模型读到的工具说明和 topics 是英文；`tool://playbook_open/language` 这个 topic 要求协调者把自己新加的标题、正文、设计稿和槽位选项写成会话的语言，`## A Where · …` 面板的角色词保持英文，已有文字不动；启动 prompt 尾注要求 subagent 用这种语言写完成报告。面板自己插入的文字（新流程节点的名字、粘贴图片的说明）跟随面板的语言。
+Playbook 文件的内容不翻译：文件里写的是什么，显示和编译的就是什么。语言只决定新写的文字用哪种语言。模型读到的工具说明和 topics 是英文；`xd://playbook_open/language` 这个 topic 要求协调者把自己新加的标题、正文、设计稿和槽位选项写成会话的语言，`## A Where · …` 面板的角色词保持英文，已有文字不动；启动 prompt 尾注要求 subagent 用这种语言写完成报告。面板自己插入的文字（新流程节点的名字、粘贴图片的说明）跟随面板的语言。
 
 ## 文件与块
 
@@ -357,9 +357,9 @@ subagent 收到的是冻结文本，不是 UI、实时设计页或隐式 Playboo
 
 下面是工具参数，不是 shell 命令。只有恰好连接了一份文档时才能省略 `doc`；省略 `run` 即作用于 Playbook 文件本身。所有输入严格校验，不接受额外字段。普通 `playbook_read` **不写 `op: "read"`**。
 
-模型读到的工具说明分两层。omp 只在提示词里显示插件工具说明的前 200 个字符，所以每个工具自己的说明都是放得下的简短说明：这个工具做什么，以及参数结构表达不了的语义。调用细节写成按需读取的 `tool://` topics：`playbook_open` 有 `format`、`outline`、`slots`、`references`、`execution`、`runs`、`language`；`playbook_edit` 有 `text`、`blocks`、`state`；`playbook_read` 有 `revisions`，`playbook_launch` 有 `lifecycle`，`playbook_timeline` 有 `records`，`playbook_check` 有 `judge`。`read tool://playbook_open` 列出一个工具的 topics 及各自什么时候读；`read tool://playbook_open/format` 读其中一个。topics 写在 `src/extension/topics/`；`language` 在读取时按会话语言生成。
+模型读到的工具说明分两层。omp 只在提示词里显示插件工具说明的前 200 个字符，所以说明先用简短文字交代用途和参数结构表达不了的语义，完整说明末尾逐行列出 `xd://` topic 指针及什么时候读。调用细节按需读取：`playbook_open` 有 `format`、`outline`、`slots`、`references`、`execution`、`runs`、`language`；`playbook_edit` 有 `text`、`blocks`、`state`；`playbook_read` 有 `revisions`，`playbook_launch` 有 `lifecycle`，`playbook_timeline` 有 `records`，`playbook_check` 有 `judge`。`read xd://playbook_open` 读取完整说明和指针；`read xd://playbook_open/format` 返回该 topic 的 Markdown 正文，不含文件头。topics 写在 `src/extension/topics/`；`language` 在每次读取时按会话当前语言生成。
 
-topics 发布到 [omp-config](https://github.com/oh-my-omp/omp-config) 的 `tool-topics` 扩展持有的 `tool://` 注册表，该扩展同时在提示词里每个工具说明下面列出它的 topics。没有 omp-config 时就没有注册表：工具照常可用，只有简短说明，会话日志里每个会话记一条。
+每个工具在自己的工具定义上通过 `docTopics()` 提供 topics，由 omp 原生的 `xd://` 协议读取，不依赖 omp-config 扩展或共享 topic 注册表。
 
 | 工具 | 参数 |
 |---|---|
