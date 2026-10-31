@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@oh-my-pi/pi-coding-agent";
-import { configureLanguageReader, parseLanguage, type Language } from "../i18n";
+import { configureLanguageReader, type Language } from "../i18n";
 
 type ConfigExtension = "yml" | "yaml" | "json" | "toml";
 type Mapping = Readonly<Record<string, unknown>>;
@@ -40,8 +40,8 @@ function readConfiguredLanguage(): Language | null {
 			const root: unknown = parseConfig(readFileSync(candidate.path, "utf8"), candidate.extension);
 			if (isMapping(root)) {
 				const section: unknown = root["omomp-lang"];
-				if (isMapping(section) && Object.keys(section).length === 1 && "language" in section && typeof section.language === "string") {
-					value = parseLanguage(section.language);
+				if (isMapping(section) && Object.keys(section).length === 1 && (section.language === "en" || section.language === "zh")) {
+					value = section.language;
 				}
 			}
 		}

@@ -104,9 +104,9 @@ These commands and the `playbook_*` tools are registered only in a main session 
 
 The pane, its notices and component diagnostics, the coordinator's notices and tool errors, the launch-prompt footer a subagent reads and the Tern command are English or Chinese. Each process resolves its language when it uses UI text:
 
-1. `OMOMP_LANG=en` or `OMOMP_LANG=zh` (any other value is ignored);
-2. in the OMP extension, when `OMOMP_LANG` is not valid, the agent directory is checked for exactly one of `omomp.yml`, `omomp.yaml`, `omomp.json` or `omomp.toml`; a valid `omomp-lang: { language: en|zh }` section supplies the language, while a missing, ambiguous, unreadable or invalid file supplies no value;
-3. otherwise the first non-empty of `LC_ALL`, `LC_MESSAGES` and `LANG`: Chinese when it starts with `zh`, English for anything else;
+1. `OMOMP_LANG`, trimmed and lowercased, when it is `en` or `zh` (any other value is ignored);
+2. in the OMP extension, when `OMOMP_LANG` is not valid, only the agent directory is checked for exactly one of `omomp.yml`, `omomp.yaml`, `omomp.json` or `omomp.toml`; an `omomp-lang` mapping with only `language: en` or `language: zh` supplies the language. Config values must match exactly: uppercase, surrounding whitespace and extra fields are invalid. A missing, ambiguous, unreadable or invalid file supplies no value; project-local `.omp/` files are not read;
+3. otherwise the first non-empty, trimmed value of `LC_ALL`, `LC_MESSAGES` and `LANG`: Chinese when it starts with `zh` (case-insensitive), English for anything else;
 4. otherwise English.
 
 For example, an agent-directory `omomp.yml` can contain:
@@ -116,7 +116,7 @@ omomp-lang:
   language: zh
 ```
 
-The extension starts the document service and new coordinator sessions with `OMOMP_LANG` from its resolved language, so they match the omp session that opened them. The document service does not read the omomp file itself; a service started by hand, an omp session attached from the pane and the Tern command use the language of their own environment. The Tern command reads the Tern app's environment, which may not include your shell profile. Set the variable where omp is started (for example in the shell profile), then restart omp and the Playbook pane: a running process keeps its language.
+The extension starts the document service and new coordinator sessions with `OMOMP_LANG` from its resolved language, so they match the omp session that opened them. The document service does not read the omomp file itself; a service started by hand, an omp session attached from the pane and the Tern command use the language of their own environment. The Tern command reads the Tern app's environment, which may not include your shell profile. Each process rereads its environment whenever it resolves a language; only the extension's omomp config is read once and cached until the next omp start. Changing a shell profile does not change an already-running process's environment: set the variable where omp is started, then restart omp and the Playbook pane.
 
 The Playbook file's content is never translated: what the file says is shown and compiled as written. The language only decides what new text is written in. The tool descriptions and topics the model reads are English; the `xd://playbook_open/language` topic tells the coordinator to write the titles, bodies, designs and slot options it adds in the session's language, keeping the English role words of `## A Where · …` panels and leaving existing text untouched; the launch-prompt footer asks the subagent for its completion report in that language. Texts the pane itself inserts (a new flow node's name, a pasted image's caption) follow the pane's language.
 
