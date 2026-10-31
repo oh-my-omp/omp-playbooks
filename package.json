@@ -15,7 +15,8 @@
 	},
 	"dependencies": {
 		"@oh-my-pi/pi-natives": "latest",
-		"@oh-my-pi/pi-tui": "latest"
+		"@oh-my-pi/pi-tui": "latest",
+		"@oh-my-pi/pi-utils": "latest"
 	},
 	"devDependencies": {
 		"@oh-my-pi/pi-coding-agent": "latest",

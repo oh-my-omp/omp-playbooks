@@ -102,7 +102,7 @@ These commands and the `playbook_*` tools are registered only in a main session 
 
 ## Language
 
-The pane, its notices and component diagnostics, the coordinator's notices and tool errors, the launch-prompt footer a subagent reads and the Tern command are English or Chinese. Each process resolves its language when it uses UI text:
+The pane, its notices and component diagnostics, the coordinator's notices and tool errors, the launch-prompt footer a subagent reads and the Tern command are English or Chinese. Each process resolves its language when it uses UI text; string-only registration metadata (the Tern palette title) resolves when the plugin loads:
 
 1. `OMOMP_LANG`, trimmed and lowercased, when it is `en` or `zh` (any other value is ignored);
 2. in the OMP extension, when `OMOMP_LANG` is not valid, only the agent directory is checked for exactly one of `omomp.yml`, `omomp.yaml`, `omomp.json` or `omomp.toml`; an `omomp-lang` mapping with only `language: en` or `language: zh` supplies the language. Config values must match exactly: uppercase, surrounding whitespace and extra fields are invalid. A missing, ambiguous, unreadable or invalid file supplies no value; project-local `.omp/` files are not read;

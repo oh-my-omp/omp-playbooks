@@ -109,16 +109,16 @@ export interface CoordinatorPicker {
 }
 
 export function coordinatorPicker(doc: string, cwd: string, own: string | null): CoordinatorPicker {
-	const error = tr("This Playbook pane is not running in a Tern pane (TERN_PANE is missing), so panes cannot be listed or arranged", "这个 Playbook 面板不在 Tern 的面板里运行（没有 TERN_PANE），无法列出或排列面板");
+	const missingPane = () => tr("This Playbook pane is not running in a Tern pane (TERN_PANE is missing), so panes cannot be listed or arranged", "这个 Playbook 面板不在 Tern 的面板里运行（没有 TERN_PANE），无法列出或排列面板");
 	return {
-		list: () => own === null ? Promise.resolve({ ok: false, error }) : ompPanes(own),
+		list: () => own === null ? Promise.resolve({ ok: false, error: missingPane() }) : ompPanes(own),
 		async choose(pane) {
-			if (own === null) return { kind: "attachFailed", error };
+			if (own === null) return { kind: "attachFailed", error: missingPane() };
 			const attached = await attach(pane, doc);
 			if (!attached.ok) return { kind: "attachFailed", error: attached.error };
 			const moved = await pairBeside(own, pane);
 			return moved.ok ? { kind: "paired" } : { kind: "moveFailed", error: moved.error };
 		},
-		newSession: () => own === null ? Promise.resolve({ ok: false, error }) : newSession(own, doc, cwd),
+		newSession: () => own === null ? Promise.resolve({ ok: false, error: missingPane() }) : newSession(own, doc, cwd),
 	};
 }

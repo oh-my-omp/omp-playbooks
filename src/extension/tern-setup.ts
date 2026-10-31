@@ -11,6 +11,7 @@
 // the failure may belong to another plugin, and the next extension load compares again.
 import { realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { ptree } from "@oh-my-pi/pi-utils";
 import { tr } from "../i18n";
 
 /** The Tern plugin directory shipped inside this package. */
@@ -24,17 +25,13 @@ export type TernPluginState =
 	| { readonly kind: "reloaded"; readonly from: string | null; readonly to: string }
 	| { readonly kind: "stale"; readonly loaded: string | null; readonly wanted: string; readonly detail: string };
 
-type Exec = { readonly exit: number; readonly stdout: string; readonly stderr: string };
-
-async function exec(args: readonly string[]): Promise<Exec> {
-	const child = Bun.spawn(["tern", ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-	const [stdout, stderr, exit] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
-	return { exit, stdout, stderr };
+function exec(args: readonly string[]): Promise<ptree.ExecResult> {
+	return ptree.exec(["tern", ...args], { allowNonZero: true, stderr: "full" });
 }
 
 async function tern(args: readonly string[]): Promise<string> {
 	const result = await exec(args);
-	if (result.exit !== 0) throw new Error(tr(`tern ${args.join(" ")} exited ${result.exit}: ${result.stderr.trim()}`, `tern ${args.join(" ")} 已退出 ${result.exit}：${result.stderr.trim()}`));
+	if (result.exitCode !== 0) throw new Error(tr(`tern ${args.join(" ")} exited ${result.exitCode}: ${result.stderr.trim()}`, `tern ${args.join(" ")} 已退出 ${result.exitCode}：${result.stderr.trim()}`));
 	return result.stdout;
 }
 
@@ -61,7 +58,7 @@ async function loadedVersion(): Promise<{ readonly ok: true; readonly version: s
 	try {
 		listing = JSON.parse(result.stdout);
 	} catch {
-		return { ok: false, detail: tr(`tern plugin list exited ${result.exit}: ${result.stderr.trim() || result.stdout.trim()}`, `tern plugin list 已退出 ${result.exit}：${result.stderr.trim() || result.stdout.trim()}`) };
+		return { ok: false, detail: tr(`tern plugin list exited ${result.exitCode}: ${result.stderr.trim() || result.stdout.trim()}`, `tern plugin list 已退出 ${result.exitCode}：${result.stderr.trim() || result.stdout.trim()}`) };
 	}
 	const plugins = typeof listing === "object" && listing !== null && "plugins" in listing ? listing.plugins : undefined;
 	if (!Array.isArray(plugins)) return { ok: false, detail: tr("tern plugin list --json has no plugins array", "tern plugin list --json 没有 plugins 数组") };
@@ -86,7 +83,7 @@ async function setup(): Promise<TernPluginState> {
 	const reload = await exec(["plugin", "reload", "--json"]);
 	const after = await loadedVersion();
 	if (after.ok && after.version === version) return { kind: "reloaded", from: before.version, to: version };
-	const detail = [after.ok ? "" : after.detail, tr(`tern plugin reload exited ${reload.exit}: ${reload.stderr.trim() || reload.stdout.trim()}`, `tern plugin reload 已退出 ${reload.exit}：${reload.stderr.trim() || reload.stdout.trim()}`)].filter(Boolean).join("\n");
+	const detail = [after.ok ? "" : after.detail, tr(`tern plugin reload exited ${reload.exitCode}: ${reload.stderr.trim() || reload.stdout.trim()}`, `tern plugin reload 已退出 ${reload.exitCode}：${reload.stderr.trim() || reload.stdout.trim()}`)].filter(Boolean).join("\n");
 	return { kind: "stale", loaded: after.ok ? after.version : before.version, wanted: version, detail };
 }
 

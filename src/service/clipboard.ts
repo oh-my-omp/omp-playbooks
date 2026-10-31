@@ -1,11 +1,11 @@
 import { readImageFromClipboard } from "@oh-my-pi/pi-natives/clipboard";
+import { ptree } from "@oh-my-pi/pi-utils";
 import type { ClipboardImageReader } from "./ui";
 
 /** The PNG data on the macOS pasteboard, as AppleScript reads it: `«data PNGf<hex>»`; null when there is none. */
 async function pasteboardPng(): Promise<Uint8Array | null> {
-	const child = Bun.spawn(["osascript", "-e", "the clipboard as «class PNGf»"], { stdout: "pipe", stderr: "ignore" });
-	const [text, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
-	const hex = code === 0 ? /«data PNGf([0-9A-Fa-f]+)»/.exec(text)?.[1] : undefined;
+	const { stdout: text, exitCode } = await ptree.exec(["osascript", "-e", "the clipboard as «class PNGf»"], { allowNonZero: true });
+	const hex = exitCode === 0 ? /«data PNGf([0-9A-Fa-f]+)»/.exec(text)?.[1] : undefined;
 	return hex ? new Uint8Array(Buffer.from(hex, "hex")) : null;
 }
 

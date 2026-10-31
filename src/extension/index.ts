@@ -3,7 +3,8 @@ import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
-import { parseBlockId, parseLaunchId, parseRunId, type BlockId, type LaunchId, type RunId } from "../domain/model";
+import { ptree } from "@oh-my-pi/pi-utils";
+import { parseBlockId, parseLaunchId, parseRunId, type BlockId, type LaunchId, type RunId, type RecordKind } from "../domain/model";
 import { paneSocketPath, socketPath, type EventPayload, type PaneReply, type PaneRequest, type Request, type ServerFrame } from "../domain/protocol";
 import { K1Client, type Reply } from "./client";
 import { splitPane } from "../service/panes";
@@ -518,10 +519,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	async function onPaneRequest(request: PaneRequest, ctx: ExtensionContext): Promise<PaneReply> {
 		const here = { ok: true as const, session: ctx.sessionManager.getSessionId(), cwd: ctx.cwd };
 		if (request.op === "ping") return here;
-		if (stopped) return { ok: false, error: { code: "Disconnected", message: "coordinator session has ended" } };
+		if (stopped) return { ok: false, error: { code: "Disconnected", message: tr("coordinator session has ended", "协调者会话已结束") } };
 		let absolute: string;
 		try { absolute = await realpath(request.doc); }
-		catch { return { ok: false, error: { code: "NoService", message: `cannot resolve Playbook ${request.doc}` } }; }
+		catch { return { ok: false, error: { code: "NoService", message: tr(`cannot resolve Playbook ${request.doc}`, `无法解析 Playbook ${request.doc}`) } }; }
 		const ready = await (await clientFor(absolute, ctx)).connect();
 		if (!ready.ok) return { ok: false, error: { code: ready.error.code, message: ready.error.message } };
 		pi.sendMessage({ customType: "playbook-event", content: tr(`This is a Playbook document service notice, not a user message\nA person designated this session as the coordinator for ${absolute} in the Playbook pane; the extension is connected (equivalent to playbook_open). Use playbook_read {doc: ${JSON.stringify(absolute)}} to learn it; then follow the next step in each Playbook notice.`, `这是 Playbook 文档服务的通知，不是用户消息\n人在 Playbook 面板里指定本会话为 ${absolute} 的协调者，扩展已经连接（等同 playbook_open）。用 playbook_read {doc: ${JSON.stringify(absolute)}} 了解它；之后每收到 Playbook 通知，按通知里的下一步做。`), display: true });
@@ -597,11 +598,19 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				const messageLabel = await ctx.ui.select(tr("Choose session message", "选择会话消息"), messages.map(message => message.label)); if (messageLabel === undefined) return;
 				const message = messages.find(item => item.label === messageLabel); if (!message) throw new Error(tr("Unknown message selection", "消息选择无效"));
 				const runs = runsResult.parse(await result(client, { op: "runs", args: {} })).runs;
-				const targetChoices = [{ id: undefined, label: tr("Playbook itself", "Playbook 本身") }, ...runs.map(item => ({ id: item.id, label: `${item.id}: ${item.name} (${item.status})` }))];
+				const statusLabels = { running: tr("Running", "运行中"), finished: tr("Finished", "已结束") };
+				const targetChoices = [{ id: undefined, label: tr("Playbook itself", "Playbook 本身") }, ...runs.map(item => ({ id: item.id, label: `${item.id}: ${item.name} (${statusLabels[item.status]})` }))];
 				const targetLabel = await ctx.ui.select(tr("Choose log", "选择日志"), targetChoices.map(item => item.label)); if (targetLabel === undefined) return;
 				const target = targetChoices.find(item => item.label === targetLabel); if (!target) throw new Error(tr("Unknown log selection", "日志选择无效"));
-				const kindLabel = await ctx.ui.select(tr("Choose record kind", "选择记录类型"), ["update", "result", "failure", "retrospective"]); if (kindLabel === undefined) return;
-				const chosenKind = kind.parse(kindLabel);
+				const kindChoices: readonly { value: RecordKind; label: string }[] = [
+					{ value: "update", label: tr("Update", "进展") },
+					{ value: "result", label: tr("Result", "结果") },
+					{ value: "failure", label: tr("Failure", "失败") },
+					{ value: "retrospective", label: tr("Retrospective", "复盘") },
+				];
+				const kindLabel = await ctx.ui.select(tr("Choose record kind", "选择记录类型"), kindChoices.map(item => item.label)); if (kindLabel === undefined) return;
+				const chosenKind = kindChoices.find(item => item.label === kindLabel)?.value;
+				if (chosenKind === undefined) throw new Error(tr("Unknown record kind selection", "记录类型选择无效"));
 				const document = readResult.parse(await result(client, { op: "read", args: scoped(target.id) }));
 				const blockChoices = document.blocks.map(item => ({ id: item.id, label: `${item.id}: ${item.title}` }));
 				const noBlock = tr("Not about a block", "不关于块");
@@ -620,9 +629,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				const client = await commandClient(args, ctx); if (!client) return;
 				const hello = helloResult.parse(client.hello);
 				if (!hello.pane) { ctx.ui.notify(tr("The document service is not in a pane managed by the session daemon", "文档服务不在 session daemon 托管的 pane 中"), "error"); return; }
-				const child = Bun.spawn(["tern", "focus", hello.pane, "--json"], { env: process.env, stdout: "pipe", stderr: "pipe" });
-				const [exit, stderr] = await Promise.all([child.exited, new Response(child.stderr).text(), new Response(child.stdout).text()]);
-				if (exit !== 0) throw new Error(tr(`tern focus exited ${exit}: ${stderr.trim()}`, `tern focus 退出 ${exit}：${stderr.trim()}`));
+				const { exitCode, stderr } = await ptree.exec(["tern", "focus", hello.pane, "--json"], { env: process.env, allowNonZero: true, stderr: "full" });
+				if (exitCode !== 0) throw new Error(tr(`tern focus exited ${exitCode}: ${stderr.trim()}`, `tern focus 退出 ${exitCode}：${stderr.trim()}`));
 			} catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); }
 		},
 	});

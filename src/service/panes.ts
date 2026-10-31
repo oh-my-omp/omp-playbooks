@@ -1,5 +1,6 @@
 // Tern panes through the `tern` CLI: the daemon owns panes, their programs and the layout; this module
 // only asks it and reports its answer.
+import { ptree } from "@oh-my-pi/pi-utils";
 import { tr } from "../i18n";
 type TernResult = { ok: true; json: unknown } | { ok: false; error: string };
 type PaneResult = { ok: true; pane: string } | { ok: false; error: string };
@@ -11,8 +12,7 @@ export function ownPane(): string | null {
 
 async function tern(args: readonly string[]): Promise<TernResult> {
 	try {
-		const child = Bun.spawn(["tern", ...args], { env: process.env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-		const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+		const { stdout, stderr, exitCode } = await ptree.exec(["tern", ...args], { env: process.env, allowNonZero: true, stderr: "full" });
 		if (exitCode !== 0) return { ok: false, error: tr(`tern ${args[0]} exited with code ${exitCode}: ${stderr.trim() || stdout.trim()}`, `tern 以退出码 ${exitCode} 退出：${stderr.trim() || stdout.trim()}`) };
 		return { ok: true, json: stdout.trim() ? JSON.parse(stdout) : null };
 	} catch (error: unknown) {

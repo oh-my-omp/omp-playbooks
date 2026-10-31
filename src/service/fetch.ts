@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { ptree } from "@oh-my-pi/pi-utils";
 import type { ExternalTarget, FetchOutcome, IssueComment, IssueValue } from "../domain/model";
 import { tr } from "../i18n";
 import type { Fetcher } from "../domain/ports";
@@ -9,34 +10,16 @@ const TIMEOUT_MS = 30_000;
 type GhResult = { readonly ok: true; readonly text: string } | { readonly ok: false; readonly error: string };
 
 async function gh(args: readonly string[]): Promise<GhResult> {
-	const process = Bun.spawn(["gh", "api", ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-	let timedOut = false;
-	const timer = setTimeout(() => {
-		timedOut = true;
-		process.kill("SIGKILL");
-	}, TIMEOUT_MS);
-	try {
-		// Drain both pipes while the child is running, including on failure.
-		const [text, stderr, code] = await Promise.all([
-			new Response(process.stdout).text(),
-			new Response(process.stderr).text(),
-			process.exited,
-		]);
-		if (timedOut || code !== 0) {
-			return {
-				ok: false,
-				error: tr(`gh api ${args.join(" ")}: ${timedOut ? "timed out after 30 s; " : ""}exit code ${code}${process.signalCode ? `; signal ${process.signalCode}` : ""}; stderr: ${stderr}`, `gh api ${args.join(" ")}：${timedOut ? "30 秒后超时；" : ""}退出码 ${code}${process.signalCode ? `；信号 ${process.signalCode}` : ""}；标准错误：${stderr}`),
-			};
-		}
-		return { ok: true, text };
-	} catch (error: unknown) {
-		// Do not leave a child running if consuming its output fails.
-		process.kill("SIGKILL");
-		await process.exited;
-		throw error;
-	} finally {
-		clearTimeout(timer);
+	using child = ptree.spawn(["gh", "api", ...args], { timeout: TIMEOUT_MS, stderr: "full" });
+	const { stdout: text, stderr, exitCode: code, exitError } = await child.wait({ allowNonZero: true, allowAbort: true, stderr: "full" });
+	const timedOut = exitError instanceof ptree.TimeoutError;
+	if (timedOut || code !== 0) {
+		return {
+			ok: false,
+			error: tr(`gh api ${args.join(" ")}: ${timedOut ? "timed out after 30 s; " : ""}exit code ${code}${child.proc.signalCode ? `; signal ${child.proc.signalCode}` : ""}; stderr: ${stderr}`, `gh api ${args.join(" ")}：${timedOut ? "30 秒后超时；" : ""}退出码 ${code}${child.proc.signalCode ? `；信号 ${child.proc.signalCode}` : ""}；标准错误：${stderr}`),
+		};
 	}
+	return { ok: true, text };
 }
 
 function stringField(value: unknown, field: string): string {

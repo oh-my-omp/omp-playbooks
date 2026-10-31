@@ -102,7 +102,7 @@ bun src/service/main.ts /绝对路径/playbook.yaml
 
 ## 语言
 
-面板及其提示和组件诊断、协调者收到的通知和工具错误、subagent 读到的启动 prompt 尾注、Tern 命令，都可以是英文或中文。每个进程在使用界面文字时按以下顺序解析语言：
+面板及其提示和组件诊断、协调者收到的通知和工具错误、subagent 读到的启动 prompt 尾注、Tern 命令，都可以是英文或中文。每个进程在使用界面文字时解析语言；只接受字符串的注册元数据（Tern 命令面板标题）在插件加载时解析：
 
 1. `OMOMP_LANG` 去掉首尾空白并转小写后为 `en` 或 `zh`（其他值忽略）；
 2. 在 OMP 扩展中，若 `OMOMP_LANG` 无效，则只检查 agent 目录中是否恰好有一个 `omomp.yml`、`omomp.yaml`、`omomp.json` 或 `omomp.toml`；其中 `omomp-lang` mapping 必须只有 `language: en` 或 `language: zh` 才提供语言。配置值必须精确匹配，大小写不同、首尾有空白或额外字段都无效；文件缺失、重复、无法读取或无效时不提供值，不读取项目里的 `.omp/` 文件；

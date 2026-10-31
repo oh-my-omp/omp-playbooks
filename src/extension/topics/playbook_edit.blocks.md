@@ -12,4 +12,4 @@ when: before op insert, insert_design, delete, move or title
 | `move` | `{block, after}` | reorders; `after` is a block id, or `null` for the top |
 | `title` | `{block, value}` | renames a block |
 
-New blocks start `todo`. Write their text in the session's language with the Where/What/How outline.
+New blocks start `todo`. Write their text in the session's language with the Where/What/How outline in `xd://playbook_open/outline`.

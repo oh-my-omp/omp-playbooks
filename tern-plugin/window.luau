@@ -29,10 +29,9 @@ local function chinese(): boolean
 	end
 	return false
 end
-local ZH = chinese()
 
 local function tr(en: string, zh: string): string
-	return if ZH then zh else en
+	return if chinese() then zh else en
 end
 
 local function quote(text: string): string
@@ -85,6 +84,7 @@ local function focused_yaml(cx): string?
 	return path
 end
 
+-- Tern's CommandDef.title accepts only a string, so the palette title resolves at registration.
 tern.command({
 	id = "open",
 	title = tr("Playbook: open", "Playbook: 打开"),

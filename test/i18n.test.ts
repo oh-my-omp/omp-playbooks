@@ -2,6 +2,17 @@ import { describe, expect, test } from "bun:test";
 import { language, resolveLanguage, withLanguage } from "../src/i18n";
 
 describe("process language", () => {
+	test("the eight shared-rule language vectors", () => {
+		expect(resolveLanguage({ OMOMP_LANG: " ZH " })).toBe("zh");
+		expect(resolveLanguage({ OMOMP_LANG: "zh-CN", LANG: "en_US.UTF-8" })).toBe("en");
+		expect(resolveLanguage({ LC_ALL: "", LC_MESSAGES: "zh_CN.UTF-8" })).toBe("zh");
+		expect(resolveLanguage({ LC_ALL: "C", LANG: "zh_CN.UTF-8" })).toBe("en");
+		expect(resolveLanguage({})).toBe("en");
+		expect(resolveLanguage({ LANG: "en_US.UTF-8" }, "zh")).toBe("zh");
+		expect(resolveLanguage({ OMOMP_LANG: "en" }, "zh")).toBe("en");
+		// The strict config boundary rejects uppercase ZH and supplies no configured language.
+		expect(resolveLanguage({ LANG: "zh_CN.UTF-8" }, null)).toBe("zh");
+	});
 	test("OMOMP_LANG en or zh wins over the locale", () => {
 		expect(resolveLanguage({ OMOMP_LANG: "zh", LANG: "en_US.UTF-8" })).toBe("zh");
 		expect(resolveLanguage({ OMOMP_LANG: " EN ", LC_ALL: "zh_CN.UTF-8" })).toBe("en");

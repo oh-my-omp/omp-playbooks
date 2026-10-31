@@ -377,6 +377,21 @@ test("add writes full text, quote and human origin; cancelling any message/run/k
 	expect(() => h.tools.get("playbook_timeline")!.parameters.parse({ doc: s.doc, op: "post", run: "r1", kind: "result", text: "x", origin: "human" })).toThrow();
 });
 
+for (const lang of ["en", "zh"] as const) {
+	test(`add renders ${lang} labels while posting the stable record kind`, async () => {
+		const previous = process.env.OMOMP_LANG;
+		process.env.OMOMP_LANG = lang;
+		cleanup.push(() => { if (previous === undefined) delete process.env.OMOMP_LANG; else process.env.OMOMP_LANG = previous; });
+		const s = await service(); const h = await harness();
+		const label = lang === "zh" ? "结果" : "Result";
+		h.choices.push(undefined, undefined, label);
+		await h.command("playbook-add", s.doc);
+		expect(h.menus[1]!.options).toContain(`r1: Run (${lang === "zh" ? "运行中" : "Running"})`);
+		expect(h.menus[2]!.options).toEqual(lang === "zh" ? ["进展", "结果", "失败", "复盘"] : ["Update", "Result", "Failure", "Retrospective"]);
+		expect(s.frames.at(-1)).toMatchObject({ op: "post", args: { kind: "result", origin: "human" } });
+	});
+}
+
 test("show calls a real tern child with the hello pane unchanged; add offers latest twenty textual user/assistant messages", async () => {
 	const s = await service(); const tern = await fakeTern(); const h = await harness();
 	await h.command("playbook-show", s.doc);
