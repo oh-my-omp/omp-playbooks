@@ -1,9 +1,11 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 /**
- * Activates exactly `names` in a canonical order that depends only on the set of names and on the
- * registry's builtin tools, never on the order in which tools were registered. Builtins come first in
- * `pi.getAllTools()` order; every other requested name follows, sorted by code point and deduplicated.
+ * Activates exactly `names` via `pi.setActiveTools`, in a canonical order. Requested builtin tools
+ * (`sourceInfo.source === "builtin"`) come first, in `pi.getAllTools()` order. Every other requested
+ * name (extension tools and names unknown to the registry) follows, sorted with JavaScript string
+ * comparison (`a < b`, code-point order) and deduplicated. Extension registration order therefore
+ * cannot change the array.
  */
 export async function applyActiveTools(pi: ExtensionAPI, names: Iterable<string>): Promise<void> {
 	const requested = new Set(names);
