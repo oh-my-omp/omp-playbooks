@@ -11,11 +11,8 @@ import { splitPane } from "../service/panes";
 import { ensureTernPlugin, type TernPluginState } from "./tern-setup";
 import { availableAgents } from "./agents";
 import { tr, withLanguage } from "../i18n";
-import { configureExtensionLanguage } from "./language";
 import { listenPane, type PaneListener } from "./pane-listener";
 import { playbookTopics } from "./topics";
-
-configureExtensionLanguage();
 
 /** A block body that is one fenced js/py code block is an orchestration block (launch-events.md §1). */
 const ORCHESTRATION = /^\s*```(js|py)\s*\n([\s\S]*)\n```\s*$/;
