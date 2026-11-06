@@ -98,7 +98,7 @@ Main-session commands:
 - `/playbook-show [file path]`: jump to the pane of a connected document.
 - `/playbook-add [file path]`: pick recent session messages, the Playbook itself or a Run, a record kind and optionally a block, and add them to that execution log.
 
-These commands and the `playbook_*` tools are registered only in a main session running in a Tern pane; subagents do not see them.
+These commands and the `playbook_*` tools are available only in a main session running in a Tern pane; subagents do not see them.
 
 ## Language
 
