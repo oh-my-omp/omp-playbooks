@@ -39,9 +39,10 @@ function ternPane(): string | null {
 
 export default async function (pi: ExtensionAPI): Promise<void> {
 	// A Playbook lives in a Tern pane beside its coordinator: outside one, this extension adds no
-	// tool, topic, command, notice or eval rewrite to the session.
+	// tool, topic, command, notice or eval rewrite to the session. Wherever omp runs it with `tern`
+	// on PATH, the factory links the Tern plugin (tern-setup.ts), inside a pane or not.
 	const inTern = ternPane();
-	if (inTern === null) return;
+	if (inTern === null) { await ensureTernPlugin(); return; }
 	const pane: string = inTern;
 	const z = pi.zod;
 	const block = z.string().regex(/^b[1-9][0-9]*$/).transform(value => {
@@ -393,7 +394,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
 	// Tools register synchronously, before any await, and stay inactive until session_start activates them for the main session.
 	registerTools(tools);
-	// Wherever omp runs it with `tern` on PATH, the factory links the Tern plugin (tern-setup.ts).
 	const ternState = await ensureTernPlugin();
 
 	/** Activates this extension's tools in the main session: the active set plus these tools, in registration order. */
@@ -540,7 +540,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
 	pi.on("session_start", async (_event, ctx) => {
 		if (ctx.agent.kind !== "main") return;
-		await activateTools();
+		try { await activateTools(); } catch (error) { ctx.ui.notify(tr(`Playbook tools could not be activated: ${error instanceof Error ? error.message : String(error)}`, `Playbook 工具激活失败：${error instanceof Error ? error.message : String(error)}`), "error"); }
 		registerCommands();
 		const notice = ternNotice(ternState);
 		if (notice) ctx.ui.notify(notice.text, notice.level);
