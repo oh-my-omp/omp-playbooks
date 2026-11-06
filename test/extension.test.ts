@@ -154,7 +154,7 @@ async function harness(kind: "main" | "sub" = "main") {
 	const api = {
 		zod, registerTool: (value: Tool & { defaultInactive?: boolean }) => { tools.set(value.name, value); if (value.defaultInactive !== true) active.add(value.name); },
 		getActiveTools: () => [...active],
-		getAllTools: () => [...tools.keys()].map(name => ({ name })),
+		getAllTools: () => [...tools.keys()].map(name => ({ name, sourceInfo: { source: "extension" } })),
 		setActiveTools: async (names: string[]) => { active.clear(); for (const name of names) active.add(name); },
 		on: (event: string, handler: Handler) => { handlers.set(event, handler); },
 		registerCommand: (name: string, value: { handler(args: string, ctx: ExtensionCommandContext): Promise<void> }) => { commands.set(name, value); },
@@ -453,7 +453,7 @@ for (const value of [undefined, "coordinator-pane"]) {
 test("a session in a daemon Tern pane registers all eight tools inactive, and session_start activates them", async () => {
 	const h = await harness(); expect(h.active).toEqual([]); await h.event("session_start");
 	expect(h.registered.tools).toEqual(["playbook_open", ...documentToolNames]);
-	expect(h.active).toEqual(["playbook_open", ...documentToolNames]);
+	expect(h.active).toEqual(["playbook_check", "playbook_compile", "playbook_edit", "playbook_launch", "playbook_open", "playbook_read", "playbook_run", "playbook_timeline"]);
 });
 
 test("every tool keeps its short purpose before any topic pointers", async () => {
