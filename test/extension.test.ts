@@ -119,7 +119,8 @@ type Tool = { name: string; description: string; docTopics(): Readonly<Record<st
 type ToolCallResult = { input: { language: "js" | "py"; code: string; title?: string; timeout?: number; reset?: boolean } } | { block: true; reason: string } | undefined;
 type Handler = (event: unknown, ctx: ExtensionContext) => unknown | Promise<unknown>;
 async function harness(kind: "main" | "sub" = "main") {
-	const tools = new Map<string, Tool>();
+	const tools = new Map<string, Tool & { defaultInactive?: boolean }>();
+	const active = new Set<string>();
 	const handlers = new Map<string, Handler>();
 	const commands = new Map<string, { handler(args: string, ctx: ExtensionCommandContext): Promise<void> }>();
 	const messages: { message: { customType: string; content: string; display: boolean }; options: unknown }[] = [];
@@ -151,7 +152,10 @@ async function harness(kind: "main" | "sub" = "main") {
 	const waiting: (() => void)[] = [];
 	const warnings: string[] = [];
 	const api = {
-		zod, registerTool: (value: Tool) => { tools.set(value.name, value); },
+		zod, registerTool: (value: Tool & { defaultInactive?: boolean }) => { tools.set(value.name, value); if (value.defaultInactive !== true) active.add(value.name); },
+		getActiveTools: () => [...active],
+		getAllTools: () => [...tools.keys()].map(name => ({ name })),
+		setActiveTools: async (names: string[]) => { active.clear(); for (const name of names) active.add(name); },
 		on: (event: string, handler: Handler) => { handlers.set(event, handler); },
 		registerCommand: (name: string, value: { handler(args: string, ctx: ExtensionCommandContext): Promise<void> }) => { commands.set(name, value); },
 		sendMessage: (message: { customType: string; content: string; display: boolean }, options: unknown) => { messages.push({ message, options }); sent.resolve(); for (const resolve of waiting.splice(0)) resolve(); },
@@ -170,7 +174,7 @@ async function harness(kind: "main" | "sub" = "main") {
 	cleanup.push(async () => { await event("session_shutdown"); });
 	return {
 		ctx, messages, notices, menus, choices, event, tools, warnings, messageSent: sent.promise,
-		get aborted() { return aborted; }, get registered() { return { tools: [...tools.keys()], commands: [...commands.keys()] }; },
+		get aborted() { return aborted; }, get registered() { return { tools: [...tools.keys()], commands: [...commands.keys()] }; }, get active() { return [...active]; },
 		set idle(value: boolean) { idle = value; },
 		nextMessage: (): Promise<void> => { const next = Promise.withResolvers<void>(); waiting.push(next.resolve); return next.promise; },
 		set branch(value: Entry[]) { branch = value; }, set selectHook(value: typeof selectHook) { selectHook = value; },
@@ -426,10 +430,10 @@ test("open reuses a running service without tern", async () => {
 	expect(s.frames.map(frame => frame.op)).toEqual(["hello"]);
 });
 
-test("a child session registers no tool or command and never connects (R4)", async () => {
+test("a child session activates no tool and registers no command, and never connects (R4)", async () => {
 	const s = await service();
 	const h = await harness("sub"); await h.event("session_start");
-	expect(h.registered).toEqual({ tools: [], commands: [] });
+	expect(h.active).toEqual([]); expect(h.registered.commands).toEqual([]);
 	expect(s.frames).toHaveLength(0);
 });
 
@@ -446,9 +450,10 @@ for (const value of [undefined, "coordinator-pane"]) {
 	});
 }
 
-test("a session in a daemon Tern pane registers all eight tools at session_start", async () => {
-	const h = await harness(); await h.event("session_start");
+test("a session in a daemon Tern pane registers all eight tools inactive, and session_start activates them", async () => {
+	const h = await harness(); expect(h.active).toEqual([]); await h.event("session_start");
 	expect(h.registered.tools).toEqual(["playbook_open", ...documentToolNames]);
+	expect(h.active).toEqual(["playbook_open", ...documentToolNames]);
 });
 
 test("every tool keeps its short purpose before any topic pointers", async () => {

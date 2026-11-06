@@ -98,7 +98,7 @@ bun src/service/main.ts /绝对路径/playbook.yaml
 - `/playbook-show [文件路径]`：转到已连接文档的 pane。
 - `/playbook-add [文件路径]`：选择最近会话消息、Playbook 本身或某个 Run、记录类别及可选块，加入对应的执行记录。
 
-这些命令和 `playbook_*` 工具只注册在运行于 Tern pane 的主会话，subagent 看不到它们。
+这些命令和 `playbook_*` 工具只对运行于 Tern pane 的主会话可用，subagent 看不到它们。工具在扩展加载时同步注册（在任何 await 之前），并在主会话的 `session_start` 中激活，因此从第一个请求起就在系统提示里，`/restart` 前后一致。
 
 ## 语言
 
