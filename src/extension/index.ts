@@ -13,6 +13,7 @@ import { availableAgents } from "./agents";
 import { tr, withLanguage } from "../i18n";
 import { listenPane, type PaneListener } from "./pane-listener";
 import { playbookTopics } from "./topics";
+import { applyActiveTools } from "./active-tools";
 
 /** A block body that is one fenced js/py code block is an orchestration block (launch-events.md §1). */
 const ORCHESTRATION = /^\s*```(js|py)\s*\n([\s\S]*)\n```\s*$/;
@@ -396,11 +397,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	registerTools(tools);
 	const ternState = await ensureTernPlugin();
 
-	/** Activates this extension's tools in the main session: the active set plus these tools, in registration order. */
+	/** Activates this extension's tools in the main session: the active set plus these tools, in canonical order. */
 	async function activateTools(): Promise<void> {
 		const ours = new Set(tools.map(tool => tool.name));
 		const active = new Set(pi.getActiveTools());
-		await pi.setActiveTools(pi.getAllTools().map(tool => tool.name).filter(name => ours.has(name) || active.has(name)));
+		await applyActiveTools(pi, pi.getAllTools().map(tool => tool.name).filter(name => ours.has(name) || active.has(name)));
 	}
 
 	const header = tr("This is a Playbook document service notice, not a user message", "这是 Playbook 文档服务的通知，不是用户消息");
