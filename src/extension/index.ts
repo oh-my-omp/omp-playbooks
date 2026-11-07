@@ -99,7 +99,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		z.object({ doc, op: z.literal("list") }).strict(),
 	]);
 	const timelineParams = z.union([
-		z.object({ doc, op: z.literal("read"), run: run.optional(), after: z.number().int().nonnegative().optional() }).strict(),
+		z.object({ doc, op: z.literal("read"), run: run.optional(), after: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional() }).strict(),
 		z.object({ doc, op: z.literal("post"), run: run.optional(), kind, text: z.string(), block: block.optional(), launch: launch.optional(), next: positive.optional(), quote: z.string().optional() }).strict(),
 		z.object({ doc, op: z.literal("snooze"), run, after: positive }).strict(),
 	]);
@@ -142,7 +142,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		z.object({ event: z.literal("agents_requested"), data: z.object({}).strict() }),
 	]);
 	const error = z.object({ code: z.enum(["Busy", "NotHello", "Locked", "NotLocked", "UnknownBlock", "UnknownRun", "RunFinished", "BadValue", "NotFound", "Ambiguous", "BadLaunch", "CompileError", "UnknownTarget", "BadReport", "UnknownLaunch", "NotOwner", "UnknownEvent", "RevealFailed"]), message: z.string(), detail: z.unknown().optional() });
-	const frames = z.union([events, z.object({ id: z.string(), ok: z.literal(true), result: z.unknown().optional() }).strict().transform(frame => ({ ...frame, result: frame.result })), z.object({ id: z.string(), ok: z.literal(false), error }).strict()]);
+	const frames = z.union([events, z.object({ id: z.string(), ok: z.literal(true), result: z.unknown().optional() }).strict(), z.object({ id: z.string(), ok: z.literal(false), error }).strict()]);
 	const summary = z.object({ id: run, name: z.string(), status: z.enum(["running", "finished"]), started_at: z.number(), finished_at: z.number().nullable(), done: z.number(), total: z.number(), update_due: z.number().nullable(), update_overdue: z.boolean(), retrospective: z.boolean() });
 	const runsResult = z.object({ runs: z.array(summary) });
 	const helloResult = z.object({ blocks: z.array(block), runs: z.array(summary), pane: z.string().optional() });
@@ -208,7 +208,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		session = currentSession;
 		let client = clients.get(absolute);
 		if (!client) {
-			client = new K1Client(socketPath(tmpdir(), absolute), { session: currentSession, pane }, (input): ServerFrame => frames.parse(input), async (event: EventPayload) => {
+			client = new K1Client(socketPath(tmpdir(), absolute), { session: currentSession, pane }, (input): ServerFrame => frames.parse(input) as ServerFrame /* omptype marks an optional-valued key as optional; the wire ok-frame always carries result */, async (event: EventPayload) => {
 				// A human interrupt only revokes the lock of an in-flight playbook_edit, whose
 				// mutation then fails with NotLocked; nothing else in this session depends on it.
 				if (event.event === "interrupted") return;
@@ -274,7 +274,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const scoped = (value: RunId | undefined): { run?: RunId } => value === undefined ? {} : { run: value };
 
 	type ToolResult = { content: { type: "text"; text: string }[]; isError: boolean };
-	const reply = (value: Reply): ToolResult => ({ content: [{ type: "text", text: JSON.stringify(value.ok ? value.result ?? null : { error: value.error }) }], isError: !value.ok });
+	const reply = (value: Reply): ToolResult => ({ content: [{ type: "text", text: value.ok && value.raw !== undefined ? value.raw : JSON.stringify(value.ok ? value.result ?? null : { error: value.error }) }], isError: !value.ok });
 	const failure = (thrown: unknown): ToolResult => {
 		const message = thrown instanceof Error ? thrown.message : String(thrown);
 		const code = message.startsWith("Disconnected:") ? "Disconnected" : "NoService";
@@ -344,10 +344,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		} satisfies Tool<ReturnType<typeof runParams.parse>>,
 		{
 			name: "playbook_timeline", label: tr("Playbook: timeline", "Playbook: 时间线"), parameters: timelineParams,
-			description: "Execution log of the Playbook (or Run `run`): read {after?} entries; post {kind, text, …} a record, which closes no Launch; snooze {run, after} a Run's update reminder.",
+			description: "Execution log of the Playbook (or Run `run`): read {after?, limit?} entries via `next_after`; post {kind, text, …} a record, which closes no Launch; snooze {run, after} its update reminder.",
 			run: (params, ctx) => {
 				switch (params.op) {
-					case "read": return request(params.doc, ctx, { op: "timeline", args: { ...scoped(params.run), ...(params.after !== undefined ? { after: params.after } : {}) } });
+					case "read": return request(params.doc, ctx, { op: "timeline", args: { ...scoped(params.run), ...(params.after !== undefined ? { after: params.after } : {}), ...(params.limit !== undefined ? { limit: params.limit } : {}) } });
 					case "post": {
 						const { doc: _doc, op: _op, ...entry } = params;
 						return request(params.doc, ctx, { op: "post", args: entry });

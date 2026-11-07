@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import type { BlockId, DocRef } from "../src/domain/model";
+import type { BlockId, DocRef, TimelineEntry } from "../src/domain/model";
 import type { Request } from "../src/domain/protocol";
 import { registerCoreCleanup, coreFixture, design, task, template } from "./core-fixture";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import type { ServerFrame } from "../src/domain/protocol";
+import { K1Client } from "../src/extension/client";
+import { serveK1 } from "../src/service/socket";
+import { pageTimeline } from "../src/service/timeline";
 
 const run: DocRef = { kind: "run", run: "r1" };
 
@@ -121,6 +127,68 @@ describe("Run and Launch lifecycle through current protocol", () => {
 		await f.success({ op: "finish_run", args: { run: "r1" } });
 		expect(f.core.view(run).run!.updateDue).toBeNull();
 		expect(await f.request({ op: "snooze", args: { run: "r1", after: 60 } })).toMatchObject({ ok: false, error: { code: "BadValue" } });
+	});
+});
+
+describe("timeline paging (K1 §5)", () => {
+	const entry = (seq: number): TimelineEntry => ({ seq, at: seq, origin: "coordinator", data: { type: "post", kind: "update", text: `entry ${seq}` } });
+
+	test("pageTimeline binary-searches the start and reports next_after only on truncation", () => {
+		const sparse = [1, 3, 7, 8, 20].map(entry);
+		expect(pageTimeline(sparse, 0)).toEqual({ entries: sparse });
+		expect(pageTimeline(sparse, 7)).toEqual({ entries: sparse.slice(3) });
+		expect(pageTimeline(sparse, 20)).toEqual({ entries: [] });
+		expect(pageTimeline(sparse, 3, 2)).toEqual({ entries: sparse.slice(2, 4), next_after: 8 });
+		expect(pageTimeline(sparse, 3, 3)).toEqual({ entries: sparse.slice(2) });
+		expect(pageTimeline(sparse, 20, 5)).toEqual({ entries: [] });
+	});
+
+	test("timeline limit pages by seq with next_after continuation; no-limit unchanged", async () => {
+		const f = coreFixture(); await f.connect();
+		for (let i = 0; i < 5000; i++) await f.success({ op: "post", args: { kind: "update", text: `update ${i}` } });
+		type Page = { entries: { seq: number }[]; next_after?: number };
+		const first = await f.success({ op: "timeline", args: { after: 0, limit: 200 } }) as Page;
+		expect(first.entries).toHaveLength(200);
+		expect(first.entries.map(item => item.seq)).toEqual(Array.from({ length: 200 }, (_, i) => i + 1));
+		expect(first.next_after).toBe(200);
+		const second = await f.success({ op: "timeline", args: { after: first.next_after, limit: 200 } }) as Page;
+		expect(second.entries).toHaveLength(200);
+		expect(second.entries[0]!.seq).toBe(201);
+		expect(second.next_after).toBe(400);
+		const last = await f.success({ op: "timeline", args: { after: 4980, limit: 200 } }) as Page;
+		expect(last.entries.map(item => item.seq)).toEqual(Array.from({ length: 20 }, (_, i) => 4981 + i));
+		expect(last.next_after).toBeUndefined();
+		const exact = await f.success({ op: "timeline", args: { after: 4800, limit: 200 } }) as Page;
+		expect(exact.entries).toHaveLength(200);
+		expect(exact.next_after).toBeUndefined();
+		const whole = await f.success({ op: "timeline", args: {} }) as Page;
+		expect(whole.entries).toHaveLength(5000);
+		expect(whole.next_after).toBeUndefined();
+	});
+
+	test("serveK1 + K1Client carry limit and next_after end to end", async () => {
+		const f = coreFixture(); await f.connect();
+		for (let i = 0; i < 5000; i++) await f.success({ op: "post", args: { kind: "update", text: `update ${i}` } });
+		f.core.disconnected(f.connection);
+		const path = join(tmpdir(), `omp-playbooks-test-${Math.random().toString(36).slice(2)}.sock`);
+		const server = await serveK1(path, f.core);
+		const k1 = new K1Client(path, { session: "wire-test" }, (input): ServerFrame => input as ServerFrame, () => {});
+		try {
+			type Page = { entries: { seq: number }[]; next_after?: number };
+			const hello = await k1.connect();
+			expect(hello.ok).toBe(true);
+			const first = await k1.request({ op: "timeline", args: { after: 0, limit: 200 } });
+			if (!first.ok) throw new Error(`timeline failed: ${first.error.message}`);
+			const page = first.result as Page;
+			expect(page.entries).toHaveLength(200);
+			expect(page.next_after).toBe(200);
+			const second = await k1.request({ op: "timeline", args: { after: page.next_after, limit: 200 } });
+			expect(second.ok && (second.result as Page).entries[0]!.seq).toBe(201);
+			expect(first.raw).toBe(JSON.stringify(first.result));
+		} finally {
+			k1.close();
+			server.close();
+		}
 	});
 });
 

@@ -4,10 +4,19 @@ import { tr } from "../i18n";
 import type { EventPayload, ProtocolError, Request, ServerFrame } from "../domain/protocol";
 
 export type ClientError = ProtocolError | { readonly code: "NoService" | "Disconnected" | "StartFailed"; readonly message: string };
-export type Reply = { readonly id: string; readonly ok: true; readonly result: unknown } | { readonly id: string; readonly ok: false; readonly error: ClientError };
+export type Reply = { readonly id: string; readonly ok: true; readonly result: unknown; readonly raw?: string } | { readonly id: string; readonly ok: false; readonly error: ClientError };
 type Pending = { readonly resolve: (reply: Reply) => void };
 type Link = { readonly socket: Socket; readonly pending: Map<string, Pending> };
 type State = { readonly kind: "disconnected" } | { readonly kind: "connecting"; readonly link: Link; readonly ready: Promise<Reply> } | { readonly kind: "connected"; readonly link: Link; readonly hello: unknown } | { readonly kind: "closed" };
+
+/**
+ * The `result` field's already-serialized text inside an ok-reply line, or undefined when the line
+ * is not in the deterministic shape `{"id":<id>,"ok":true,"result":<result>}` the service writes.
+ */
+function rawResult(line: string, id: string): string | undefined {
+	const prefix = `{"id":${JSON.stringify(id)},"ok":true,"result":`;
+	return line.startsWith(prefix) && line.endsWith("}") ? line.slice(prefix.length, -1) : undefined;
+}
 
 /** One document connection. Requests are never replayed across transports. */
 export class K1Client {
@@ -35,7 +44,7 @@ export class K1Client {
 		const link: Link = { socket, pending: new Map() };
 		const ready = Promise.withResolvers<Reply>();
 		this.state = { kind: "connecting", link, ready: ready.promise };
-		let buffer = "";
+		const parts: string[] = [];
 		socket.setEncoding("utf8");
 		socket.on("connect", async () => {
 			const reply = await this.sendOn(link, { op: "hello", args: this.helloArgs });
@@ -44,20 +53,23 @@ export class K1Client {
 			ready.resolve(!reply.ok && reply.error.code === "Disconnected" ? this.failure("", "NoService") : reply);
 		});
 		socket.on("data", (chunk: string) => {
-			buffer += chunk;
+			let start = 0;
 			for (;;) {
-				const end = buffer.indexOf("\n");
-				if (end < 0) break;
-				const line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
+				const newline = chunk.indexOf("\n", start);
+				if (newline < 0) { parts.push(chunk.slice(start)); return; }
+				parts.push(chunk.slice(start, newline));
+				const line = parts.join("");
+				parts.length = 0;
+				start = newline + 1;
 				try {
 					const frame = this.parseFrame(JSON.parse(line));
 					if ("event" in frame) {
 						void this.deliver(link, frame).catch(() => socket.destroy());
 					} else {
 						const pending = link.pending.get(frame.id);
-						if (pending) { link.pending.delete(frame.id); pending.resolve(frame); }
+						if (pending) { link.pending.delete(frame.id); pending.resolve(frame.ok ? { ...frame, raw: rawResult(line, frame.id) } : frame); }
 					}
-				} catch { socket.destroy(); break; }
+				} catch { socket.destroy(); return; }
 			}
 		});
 		const disconnect = () => {

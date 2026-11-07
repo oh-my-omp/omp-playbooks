@@ -361,7 +361,7 @@ subagent 收到的是冻结文本，不是 UI、实时设计页或隐式 Playboo
 | `playbook_compile` | `{doc?, run?, op:"compile", blocks:[…]}`；重新取回 `{doc?, run?, op:"refetch", targets:[…]}` |
 | `playbook_check` | `{doc?, run?, op:"inspect", blocks:[…]}`；报告 `{doc?, run?, op:"report", blocks:[…], version, result}` |
 | `playbook_run` | `{doc?, op:"start", name, update_every?}`、`{doc?, op:"finish", run}`、`{doc?, op:"list"}` |
-| `playbook_timeline` | `{doc?, op:"read", run?, after?}`；`{doc?, op:"post", run?, kind, text, block?, launch?, next?, quote?}`；`{doc?, op:"snooze", run, after}` |
+| `playbook_timeline` | `{doc?, op:"read", run?, after?, limit?}` → `{entries}`，`limit` 截断时另带 `next_after`（下一页的 `after`）；`{doc?, op:"post", run?, kind, text, block?, launch?, next?, quote?}`；`{doc?, op:"snooze", run, after}` |
 | `playbook_launch` | `{doc?, op:"launch", run?, blocks:[…]}` → `{launch, kind, text, agent?, isolated?}`；`{doc?, op:"bind", launch, agent}`；`{doc?, op:"info" 或 "rebase" 或 "close", launch}` |
 
 `playbook_edit` 的 `write/replace` 只改执行正文或设计稿，不能改需求；`replace` 的 `find` 必须恰好出现一次。`panel` 的 `text` 必须是以 `## <ID> 标题` 开始的整个替换面板，可用于执行正文和设计稿。`insert`、`insert_design` 建立的块是 `todo`；`insert_design` 的需求固定从空开始，由人填写。`task` 只用于执行块。`move` 在位置不变时不写记录。`agent`、`isolated` 只用于执行块，修改它们不改变编译文本，不触发执行中的变更通知；`launch` 只在所有根块对某一项预设了相同值时返回该项。修改已有块时，一个调用内完成加锁、修改、解锁。

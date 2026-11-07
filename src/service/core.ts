@@ -55,6 +55,7 @@ import { fail, ok } from "../domain/protocol";
 import { tr } from "../i18n";
 import { launchFooter } from "./footer";
 import { IMAGE_EXTENSIONS, MAX_IMAGE_BYTES } from "./draft/image";
+import { pageTimeline } from "./timeline";
 
 export interface PaneControl {
 	ownPane(): string | null;
@@ -1233,8 +1234,7 @@ export class Core implements CoreApi, K1Handler {
 			case "timeline": {
 				const doc = this.#docOf(request.args.run);
 				if (!doc.ok) return doc;
-				const after = request.args.after ?? 0;
-				return ok({ entries: doc.result.log.entries.filter(entry => entry.seq > after) });
+				return ok(pageTimeline(doc.result.log.entries, request.args.after ?? 0, request.args.limit));
 			}
 			case "post": {
 				const args = request.args;

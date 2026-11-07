@@ -101,6 +101,7 @@ const valid: readonly [string, unknown][] = [
 	["post", { run: "r1", kind: "retrospective", text: "review" }],
 	["snooze", { run: "r1", after: 60 }],
 	["ack", { event: "event-id" }],
+	["timeline", { run: "r1", after: 0, limit: 200 }],
 ];
 
 describe("parseRequest", () => {
@@ -122,7 +123,7 @@ describe("parseRequest", () => {
 		for (const [op, args] of valid) {
 			if (typeof args !== "object" || args === null) throw new Error("invalid fixture");
 			for (const key of Object.keys(args)) {
-				if (["pane", "run", "after", "update_every", "next", "quote", "origin"].includes(key) && !(["finish_run", "snooze"].includes(op) && key === "run") && !(op === "snooze" && key === "after")) continue;
+				if (["pane", "run", "after", "update_every", "next", "quote", "origin", "limit"].includes(key) && !(["finish_run", "snooze"].includes(op) && key === "run") && !(op === "snooze" && key === "after")) continue;
 				if (key === "block" && (op === "read" || op === "post" || op === "revisions")) continue;
 				if (key === "launch" && op === "post") continue;
 				const incomplete = { ...args };
@@ -170,6 +171,7 @@ describe("parseRequest", () => {
 			expect(parseRequest("post", { run: "r1", kind: "update", text: "x", next: value })).toMatchObject({ code: "BadValue" });
 			expect(parseRequest("start_run", { name: "Run", update_every: value })).toMatchObject({ code: "BadValue" });
 			expect(parseRequest("snooze", { run: "r1", after: value })).toMatchObject({ code: "BadValue" });
+			expect(parseRequest("timeline", { run: "r1", limit: value })).toMatchObject({ code: "BadValue" });
 		}
 		for (const after of [-1, 1.5, NaN, "1"]) expect(parseRequest("timeline", { run: "r1", after })).toMatchObject({ code: "BadValue" });
 	});
@@ -300,6 +302,26 @@ describe("serveK1 real Unix sockets", () => {
 		c.socket.write('{"id":"bad","op":3,"args":{}}\n{"id":"good","op":"runs","args":{}}\n');
 		expect(await c.next()).toMatchObject({ id: "bad", ok: false, error: { code: "BadValue" } });
 		expect(await c.next()).toEqual({ id: "good", ok: true, result: "continued" });
+	});
+
+	test("consumes a large request frame arriving in small chunks, split inside a multi-byte character", async () => {
+		const path = tempPath();
+		const requests: Request[] = [];
+		await start(path, async (_conn, _id, request) => { requests.push(request); return { ok: true, result: request.args }; });
+		const c = await client(path);
+		const text = `你好🌟${"x".repeat(5 * 1024 * 1024)}`;
+		const bytes = Buffer.from(`${JSON.stringify({ id: "big", op: "write", args: { block: "b1", text } })}\n{"id":"after","op":"runs","args":{}}\n`);
+		const split = bytes.indexOf(Buffer.from("好")) + 1;
+		c.socket.write(bytes.subarray(0, split));
+		await setImmediate();
+		expect(requests).toHaveLength(0);
+		for (let at = split; at < bytes.length; at += 16384) c.socket.write(bytes.subarray(at, Math.min(at + 16384, bytes.length)));
+		expect(await c.next()).toMatchObject({ id: "big", ok: true });
+		expect(await c.next()).toEqual({ id: "after", ok: true, result: {} });
+		expect(requests).toEqual([
+			{ op: "write", args: { block: "b1", text, run: undefined } },
+			{ op: "runs", args: {} },
+		]);
 	});
 
 	test("delivers large event frames without losing bytes under backpressure", async () => {

@@ -43,7 +43,7 @@ export type Request =
 	| { readonly op: "start_run"; readonly args: { readonly name: string; readonly update_every?: number } }
 	| { readonly op: "finish_run"; readonly args: { readonly run: RunId } }
 	| { readonly op: "runs"; readonly args: Record<string, never> }
-	| { readonly op: "timeline"; readonly args: { readonly run?: RunId; readonly after?: number } }
+	| { readonly op: "timeline"; readonly args: { readonly run?: RunId; readonly after?: number; readonly limit?: number } }
 	| {
 			readonly op: "post";
 			readonly args: {
