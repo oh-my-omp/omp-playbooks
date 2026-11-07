@@ -5,13 +5,14 @@
 //   bun test/bench/memory.ts measure --src <repo root> --fixture <dir> [--poll 60]
 //   bun test/bench/memory.ts compare --base <repo root> --fixture <dir> [--poll 60]
 //   bun test/bench/memory.ts diff --base <repo root> --fixture <dir>
+//   bun test/bench/memory.ts compare-transport --base <repo root> --fixture <dir>
 //
 // `measure` copies the fixture, starts `Core` + `serveK1` from the given checkout and reports one JSON line;
 // `compare` runs `measure` for the base checkout and for this checkout in separate processes on the same
 // fixture. The fixture is written through the Store API both versions share (serialize, write, appendEntry,
 // appendLaunch, appendServiceRecord), so either version reads it.
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createConnection } from "node:net";
+import { createConnection, createServer } from "node:net";
 import { join, resolve } from "node:path";
 import type { Block, BlockId, DocRef, EntryData, Launch, LaunchId, PlaybookDoc, RunId, RunMeta, TimelineEntry } from "../../src/domain/model";
 import type { Store } from "../../src/domain/ports";
@@ -21,6 +22,7 @@ import type * as CoreModule from "../../src/service/core";
 import type * as ReferencesModule from "../../src/service/references";
 import type * as SocketModule from "../../src/service/socket";
 import type * as StoreModule from "../../src/service/store";
+import type * as ClientModule from "../../src/extension/client";
 import { createStore as createFixtureStore } from "../../src/service/store";
 
 const HERE = resolve(import.meta.dir, "../..");
@@ -324,6 +326,87 @@ async function compare(args: readonly string[]): Promise<void> {
 	for (const key of keys) console.log(`| ${key} | ${JSON.stringify(results.base?.[key])} | ${JSON.stringify(results.head?.[key])} |`);
 }
 
+// ---------------------------------------------------------------- K1 transport (#26 §5 §6)
+
+/**
+ * The K1 path of a timeline read and of one large frame, for the checkout at `src`:
+ * - the template timeline (5000 entries in the default fixture) read whole, read as a 200-entry page,
+ *   and read as its tail, over the service socket: wall time and reply bytes;
+ * - one reply frame of `--frame-mb` MiB sent in 16 KiB chunks to that checkout's `K1Client`: wall time
+ *   from the first chunk to the parsed reply.
+ */
+async function transport(args: readonly string[]): Promise<void> {
+	const src = resolve(required(args, "src"));
+	const fixture = resolve(required(args, "fixture"));
+	const frameMB = numberOption(args, "frame-mb", 8);
+	const { client, stop } = await startService(src, fixture, new Map(), { yaml: 0 });
+	const timed = async (requestArgs: Record<string, unknown>) => {
+		const started = performance.now();
+		const reply = await client.request("timeline", requestArgs);
+		const ms = performance.now() - started;
+		const result = reply.ok === true && typeof reply.result === "object" && reply.result !== null ? reply.result : null;
+		const entries = result !== null && "entries" in result && Array.isArray(result.entries) ? result.entries.length : null;
+		const next = result !== null && "next_after" in result ? result.next_after : null;
+		return { ok: reply.ok, ms: Math.round(ms * 10) / 10, bytes: JSON.stringify(reply).length, entries, next_after: next };
+	};
+	const whole = await timed({});
+	const page = await timed({ after: 0, limit: 200 });
+	const tail = await timed({ after: 4800 });
+	stop();
+
+	// One large reply frame, chunked, into the checkout's extension client.
+	// The checkout under test is chosen at run time (base or HEAD), so this import cannot be static.
+	const { K1Client }: typeof ClientModule = await import(join(src, "src/extension/client.ts"));
+	const directory = mkdtempSync("/tmp/opb-bench-");
+	const path = join(directory, "frame.sock");
+	const big = JSON.stringify({ entries: Array.from({ length: Math.ceil(frameMB * 1024 * 1024 / 1000) }, (_, index) => ({ seq: index + 1, text: filler(index, 970) })) });
+	let sentAt = 0;
+	// node:net buffers what the kernel does not take yet, so every chunk arrives whole and in order.
+	const server = createServer(socket => {
+		let buffer = "";
+		socket.setEncoding("utf8");
+		socket.on("data", (text: string) => {
+			buffer += text;
+			let newline: number;
+			while ((newline = buffer.indexOf("\n")) >= 0) {
+				const frame: Record<string, unknown> = JSON.parse(buffer.slice(0, newline));
+				buffer = buffer.slice(newline + 1);
+				const id = String(frame.id);
+				if (frame.op === "hello") { socket.write(`${JSON.stringify({ id, ok: true, result: { blocks: [], runs: [] } })}\n`); continue; }
+				const line = Buffer.from(`{"id":${JSON.stringify(id)},"ok":true,"result":${big}}\n`);
+				sentAt = performance.now();
+				for (let offset = 0; offset < line.length; offset += 16 * 1024) socket.write(line.subarray(offset, offset + 16 * 1024));
+			}
+		});
+	});
+	const listening = Promise.withResolvers<void>();
+	server.listen(path, () => listening.resolve());
+	await listening.promise;
+	const k1 = new K1Client(path, { session: "bench" }, input => {
+		if (typeof input !== "object" || input === null || !("id" in input) || typeof input.id !== "string") throw new Error("bad frame");
+		return { id: input.id, ok: true, result: "result" in input ? input.result : null };
+	}, () => {});
+	await k1.connect();
+	const reply = await k1.request({ op: "runs", args: {} });
+	const frameMs = performance.now() - sentAt;
+	if (!reply.ok) console.error(JSON.stringify(reply));
+	k1.close();
+	server.close();
+	rmSync(directory, { recursive: true, force: true });
+	console.log(JSON.stringify({ src, timeline: { whole, page, tail }, frame: { mb: Math.round(big.length / 1024 / 1024 * 10) / 10, chunks: Math.ceil(big.length / 16384), ok: reply.ok, ms: Math.round(frameMs) } }));
+	process.exit(0);
+}
+
+async function compareTransport(args: readonly string[]): Promise<void> {
+	const base = resolve(required(args, "base"));
+	const fixture = resolve(required(args, "fixture"));
+	for (const [label, src] of [["base", base], ["head", HERE]] as const) {
+		const child = Bun.spawnSync(["bun", join(HERE, "test/bench/memory.ts"), "transport", "--src", src, "--fixture", fixture], { stdout: "pipe", stderr: "inherit" });
+		if (child.exitCode !== 0) throw new Error(`${label} transport failed with ${child.exitCode}`);
+		console.log(`${label}: ${child.stdout.toString().trim().split("\n").at(-1)}`);
+	}
+}
+
 // ---------------------------------------------------------------- replay (G3: same answers, same files)
 
 /**
@@ -405,5 +488,7 @@ switch (command) {
 	case "compare": await compare(rest); break;
 	case "replay": await replay(rest); break;
 	case "diff": await diffReplay(rest); break;
+	case "transport": await transport(rest); break;
+	case "compare-transport": await compareTransport(rest); break;
 	default: throw new Error("usage: memory.ts fixture <dir> | measure --src <root> --fixture <dir> | compare --base <root> --fixture <dir> | replay --src <root> --fixture <dir> | diff --base <root> --fixture <dir>");
 }
