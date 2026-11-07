@@ -152,7 +152,7 @@ export function parseRequest(op: string, args: unknown): Request | ProtocolError
 			case "start_run": return { op, args: { name: string(a.name, "name"), update_every: optional(a.update_every, v => integer(v, "update_every")) } };
 			case "finish_run": return { op, args: { run: run(a.run) } };
 			case "runs": return { op, args: {} };
-			case "timeline": return { op, args: { run: optional(a.run, run), after: optional(a.after, v => integer(v, "after", 0)) } };
+			case "timeline": return { op, args: { run: optional(a.run, run), after: optional(a.after, v => integer(v, "after", 0)), limit: optional(a.limit, v => integer(v, "limit")) } };
 			case "post": {
 				const kind = a.kind;
 				if (kind !== "update" && kind !== "result" && kind !== "failure" && kind !== "retrospective") throw new BadInput(tr("unknown post kind", "未知的 post kind"));
@@ -183,7 +183,7 @@ export function parseRequest(op: string, args: unknown): Request | ProtocolError
 interface SocketState {
 	readonly conn: Connection;
 	readonly decoder: TextDecoder;
-	buffer: string;
+	parts: string[];
 	tail: Promise<void>;
 	closed: boolean;
 	readonly outgoing: Uint8Array[];
@@ -239,7 +239,7 @@ export type RevealOutcome = { readonly kind: "revealed" } | { readonly kind: "ab
 export function revealService(path: string): Promise<RevealOutcome> {
 	const { promise, resolve } = Promise.withResolvers<RevealOutcome>();
 	const socket = createConnection(path);
-	let buffer = "";
+	const parts: string[] = [];
 	let connected = false;
 	socket.setEncoding("utf8");
 	socket.once("connect", () => {
@@ -247,18 +247,22 @@ export function revealService(path: string): Promise<RevealOutcome> {
 		socket.write(`${JSON.stringify({ id: "reveal", op: "reveal", args: {} })}\n`);
 	});
 	socket.on("data", (chunk: string) => {
-		buffer += chunk;
-		const end = buffer.indexOf("\n");
-		if (end < 0) return;
-		socket.destroy();
-		try {
-			const reply: unknown = JSON.parse(buffer.slice(0, end));
-			const frame = object(reply, "reply");
-			if (frame.ok === true) { resolve({ kind: "revealed" }); return; }
-			const error = object(frame.error, "error");
-			resolve({ kind: "failed", message: `${string(error.code, "code")}: ${string(error.message, "message")}` });
-		} catch (error) {
-			resolve({ kind: "failed", message: tr(`Invalid reveal reply: ${error instanceof Error ? error.message : String(error)}`, `显示回复无效：${error instanceof Error ? error.message : String(error)}`) });
+		let start = 0;
+		for (;;) {
+			const newline = chunk.indexOf("\n", start);
+			if (newline < 0) { parts.push(chunk.slice(start)); return; }
+			parts.push(chunk.slice(start, newline));
+			socket.destroy();
+			try {
+				const reply: unknown = JSON.parse(parts.join(""));
+				const frame = object(reply, "reply");
+				if (frame.ok === true) { resolve({ kind: "revealed" }); return; }
+				const error = object(frame.error, "error");
+				resolve({ kind: "failed", message: `${string(error.code, "code")}: ${string(error.message, "message")}` });
+			} catch (error) {
+				resolve({ kind: "failed", message: tr(`Invalid reveal reply: ${error instanceof Error ? error.message : String(error)}`, `显示回复无效：${error instanceof Error ? error.message : String(error)}`) });
+			}
+			return;
 		}
 	});
 	socket.once("error", error => resolve(connected ? { kind: "failed", message: tr(`Reveal failed: ${error.message}`, `显示失败：${error.message}`) } : { kind: "absent" }));
@@ -294,7 +298,7 @@ function listenK1(path: string, handler: K1Handler): { close(): void } {
 		const state = socket.data;
 		if (state.closed) return;
 		state.closed = true;
-		state.buffer = "";
+		state.parts.length = 0;
 		state.outgoing.length = 0;
 		connections.delete(socket);
 		handler.disconnected(state.conn);
@@ -335,19 +339,24 @@ function listenK1(path: string, handler: K1Handler): { close(): void } {
 					send: frame => send(socket, frame),
 					close: () => { disconnect(socket); socket.terminate(); },
 				};
-				socket.data = { conn, decoder: new TextDecoder(), buffer: "", tail: Promise.resolve(), closed: false, outgoing: [], offset: 0 };
+				socket.data = { conn, decoder: new TextDecoder(), parts: [], tail: Promise.resolve(), closed: false, outgoing: [], offset: 0 };
 				connections.add(socket);
 				handler.connected(conn);
 			},
 			data(socket, bytes) {
 				const state = socket.data;
 				if (state.closed) return;
-				state.buffer += state.decoder.decode(bytes, { stream: true });
-				let newline: number;
-				while ((newline = state.buffer.indexOf("\n")) !== -1) {
-					const line = state.buffer.slice(0, newline);
-					state.buffer = state.buffer.slice(newline + 1);
+				const chunk = state.decoder.decode(bytes, { stream: true });
+				const parts = state.parts;
+				let start = 0;
+				for (;;) {
+					const newline = chunk.indexOf("\n", start);
+					if (newline < 0) { parts.push(chunk.slice(start)); return; }
+					parts.push(chunk.slice(start, newline));
+					const line = parts.join("");
+					parts.length = 0;
 					state.tail = state.tail.then(() => processLine(socket, line)).catch(() => state.conn.close());
+					start = newline + 1;
 				}
 			},
 			drain: flush,

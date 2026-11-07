@@ -849,3 +849,47 @@ test("a rejected edit still releases its lock and the next call receives a fresh
 	expect(s.frames[3]!.args).toEqual({ block: "b1", request: s.frames[1]!.id });
 	expect(s.frames[6]!.args).toEqual({ block: "b1", request: s.frames[4]!.id });
 });
+
+test("playbook_timeline read forwards after and limit to the K1 request", async () => {
+	const s = await service(); const h = await harness();
+	await h.execute("playbook_open", { doc: s.doc });
+	s.handler = (frame, socket) => respond(socket, frame, { entries: [{ seq: 7 }], next_after: 7 });
+	const result = await h.execute("playbook_timeline", { doc: s.doc, op: "read", run: "r1", after: 6, limit: 200 });
+	expect(result.isError).toBe(false);
+	expect(s.frames.at(-1)).toMatchObject({ op: "timeline", args: { run: "r1", after: 6, limit: 200 } });
+	expect(result.content[0]!.text).toBe('{"entries":[{"seq":7}],"next_after":7}');
+});
+
+test("tool output passes the reply's serialized result through byte-identically, canonical or not", async () => {
+	const s = await service(); const h = await harness();
+	await h.execute("playbook_open", { doc: s.doc });
+	s.handler = (frame, socket) => socket.write(`{"id":${JSON.stringify(frame.id)},"ok":true,"result":{ "entries" : [{"seq":9}] }}\n`);
+	const result = await h.execute("playbook_timeline", { doc: s.doc, op: "read" });
+	expect(result.isError).toBe(false);
+	expect(result.content[0]!.text).toBe('{ "entries" : [{"seq":9}] }');
+});
+
+test("a large reply frame arriving in small chunks reassembles, split inside a multi-byte character", async () => {
+	const s = await service(); const h = await harness();
+	await h.execute("playbook_open", { doc: s.doc });
+	const text = `你好🌟${"x".repeat(5 * 1024 * 1024)}`;
+	s.handler = (frame, socket) => {
+		const bytes = Buffer.from(`${JSON.stringify({ id: frame.id, ok: true, result: { entries: [{ seq: 1, text }] } })}\n`);
+		const split = bytes.indexOf(Buffer.from("好")) + 1;
+		socket.write(bytes.subarray(0, split));
+		for (let at = split; at < bytes.length; at += 16384) socket.write(bytes.subarray(at, Math.min(at + 16384, bytes.length)));
+	};
+	const result = await h.execute("playbook_timeline", { doc: s.doc, op: "read" });
+	expect(result.isError).toBe(false);
+	expect(result.content[0]!.text).toBe(JSON.stringify({ entries: [{ seq: 1, text }] }));
+});
+
+test("a bad reply line closes the connection and in-flight requests fail Disconnected", async () => {
+	const s = await service(); const h = await harness();
+	await h.execute("playbook_open", { doc: s.doc });
+	s.handler = (_frame, socket) => socket.write("not-json\n");
+	const result = await h.execute("playbook_timeline", { doc: s.doc, op: "read" });
+	expect(result.isError).toBe(true);
+	expect(JSON.parse(result.content[0]!.text!)).toMatchObject({ error: { code: "Disconnected" } });
+	expect(s.frames.at(-1)!.op).toBe("timeline");
+});
