@@ -271,4 +271,26 @@ describe("current Playbook user interactions", () => {
 	});
 });
 
+describe("redraws follow core changes (#26 §7)", () => {
+	test("every change in one tick is drawn by one redraw and one view", async () => {
+		const f = await fixture([task("b1"), task("b2"), task("b3")]);
+		await settle();
+		let views = 0;
+		const view = f.core.view.bind(f.core);
+		f.core.view = ref => { views++; return view(ref); };
+		const frames = f.tsp.frames.length;
+		expect(f.core.setStatus(template, "b1", "done")).toBeNull();
+		expect(f.core.setStatus(template, "b2", "done")).toBeNull();
+		expect(f.core.setTitle(template, "Playbook", "Renamed")).toBeNull();
+		expect(f.core.deleteBlock(template, "b3")).toBeNull();
+		expect(f.core.setStatus(template, "b1", "todo")).toBeNull();
+		await settle();
+		expect(f.tsp.frames.length - frames).toBe(1);
+		expect(views).toBe(1);
+		// Frame status reports use the blocks that frame drew, without another view.
+		f.tsp.statusListener(["b1", "b2"]);
+		expect(views).toBe(1);
+	});
+});
+
 registerCoreCleanup();

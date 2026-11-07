@@ -284,6 +284,8 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 	const handlers = new Map<string, Handler>();
 	const views = new Map<string, ChangeView>();
 	const summaries = new Map<BlockId, Pick<RenderStatus, "view" | "draftErrors">>();
+	/** The blocks the last redraw drew, in order. */
+	let drawnBlocks: readonly BlockId[] = [];
 	const sentBlobs = new Set<string>();
 
 	function notify(text: string, tone: "error" | "success" = "error"): void {
@@ -864,9 +866,10 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 	 * so a closed card keeps the facts of the last frame that mounted it.
 	 */
 	function reportStatus(blocks: readonly string[]): void {
-		for (const item of core.view(REF).blocks) {
-			const summary = summaries.get(item.block.id);
-			if (summary && blocks.includes(item.block.id)) core.setRenderStatus(REF, item.block.id, { ...tsp.status(item.block.id), ...summary });
+		// The blocks of the frame the statuses belong to: the view the last redraw drew.
+		for (const id of drawnBlocks) {
+			const summary = summaries.get(id);
+			if (summary && blocks.includes(id)) core.setRenderStatus(REF, id, { ...tsp.status(id), ...summary });
 		}
 	}
 	/**
@@ -878,6 +881,7 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 		const view = core.view(REF);
 		handlers.clear();
 		const present = new Set(view.blocks.map(item => item.block.id));
+		drawnBlocks = view.blocks.map(item => item.block.id);
 		for (const id of selected) if (!present.has(id)) selected.delete(id);
 		if (open !== null && !present.has(open)) open = null;
 		if (!openChosen && open === null) open = view.blocks[0]?.block.id ?? null;
@@ -1039,7 +1043,16 @@ export function startUi(core: CoreApi, tsp: TspSession, baseDir: string, coordin
 			case "keys": keys(value.bytes); break;
 		}
 	}
-	core.onChange(() => queueMicrotask(redraw));
+	// Every change in one tick is drawn by one redraw (#26 §7).
+	let redrawQueued = false;
+	core.onChange(() => {
+		if (redrawQueued) return;
+		redrawQueued = true;
+		queueMicrotask(() => {
+			redrawQueued = false;
+			redraw();
+		});
+	});
 	tsp.onStatusChange(reportStatus);
 	tsp.start("omp-playbooks", input);
 }

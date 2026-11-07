@@ -206,7 +206,7 @@ export interface CoreApi extends HumanCommands {
 	/** Ask the coordinator for that list again (a SUBAGENT dropdown opened); a no-op without a coordinator. */
 	requestAgents(): void;
 	focusCoordinator(): Promise<string | null>;
-	/** Document-level messages (disk parse errors, unmapped TSP errors, K5 errors). */
+	/** Document-level messages (disk parse errors, unmapped TSP errors, K5 errors): the latest 200, oldest first; older ones are dropped. */
 	errors(): readonly string[];
 	/** Subscribe to state changes; the UI redraws the affected document (null = everything). */
 	onChange(listener: (ref: DocRef | null) => void): () => void;
