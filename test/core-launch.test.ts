@@ -164,7 +164,7 @@ describe("Core Launch integration", () => {
 			expect(event.data.changed).toEqual(["b2"]);
 			expect(structuredClone(event.data.current)).toMatchObject({ kind: "Ok", text: expect.stringContaining("Task:\n## A Overview\nafter") });
 			expect(event.data.diff).toBe(references.unifiedDiff(prompt(f, "Task:\n## A Overview\nbefore"), prompt(f, "Task:\n## A Overview\nafter")));
-			const persisted = f.store.readRuns().get(f.run);
+			const persisted = f.store.readRun(f.run);
 			if (!persisted?.ok) throw new Error("expected persisted Run");
 			expect(persisted.doc.blocks.find(block => block.id === "b2")!.content).toEqual({
 				kind: "design", requirement: "Human requirement", design: after,

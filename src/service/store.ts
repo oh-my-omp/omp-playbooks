@@ -1,4 +1,4 @@
-import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import {
 	parseBlockId, parseLaunchId, parseRunId,
@@ -8,7 +8,7 @@ import {
 	type RunMeta, type Source, type Status, type TimelineEntry,
 } from "../domain/model";
 import { tr } from "../i18n";
-import type { ParsedFile, ServiceRecord, Store } from "../domain/ports";
+import type { LaunchChanges, ParsedFile, ServiceRecord, Store } from "../domain/ports";
 
 // Only boundary decoders inspect untrusted maps. Domain objects are constructed below.
 type Fields = Readonly<Record<string, unknown>>;
@@ -356,6 +356,19 @@ function decodeBlockResult(value: unknown): BlockResult {
 	keys(v, ["text", "at", "seq", "origin", "launch"]);
 	return { text: string(v.text), at: number(v.at), seq: positive(v.seq), origin: origin(v.origin), launch: nullable(v.launch, launchId) };
 }
+function decodeFetches(value: unknown): (readonly [string, FetchOutcome])[] {
+	return list(value, pair => tuple(pair, string, decodeFetch));
+}
+function decodeDirty(value: unknown): (readonly [BlockId, number])[] {
+	return list(value, pair => tuple(pair, blockId, positive));
+}
+function decodeClosed(value: unknown): Launch["closed"] {
+	return nullable(value, closed => { const c = fields(closed); keys(c, ["at", "by"]); return { at: number(c.at), by: choice(c.by, ["coordinator", "human", "run_finished"]) }; });
+}
+function checkBaselines(launch: Launch): Launch {
+	if (launch.baselines[0] !== launch.snapshot.result.text) throw new Error("First baseline must equal snapshot text");
+	return launch;
+}
 function decodeLaunch(value: unknown): Launch {
 	const v = fields(value);
 	keys(v, ["id", "run", "session", "blocks", "kind", "snapshot", "agents", "baselines", "notified", "dirty", "fetches", "closed"]);
@@ -365,14 +378,27 @@ function decodeLaunch(value: unknown): Launch {
 	if (result.kind !== "Ok") throw new Error("Launch snapshot must be a successful compile");
 	const blocks = list(v.blocks, blockId);
 	if (blocks.length === 0) throw new Error("Launch requires blocks");
-	const fetches = (value: unknown) => list(value, pair => tuple(pair, string, decodeFetch));
-	const baselines = list(v.baselines, string);
-	if (baselines[0] !== result.text) throw new Error("First baseline must equal snapshot text");
-	return {
+	return checkBaselines({
 		id: launchId(v.id), run: nullable(v.run, runId), session: string(v.session), blocks, kind: choice(v.kind, ["prompt", "orchestration"]),
-		snapshot: { result, fetches: fetches(snapshot.fetches), results: list(snapshot.results, pair => tuple(pair, blockId, decodeBlockResult)) },
-		agents: list(v.agents, string), baselines, notified: nullable(v.notified, decodeCompile), dirty: list(v.dirty, pair => tuple(pair, blockId, positive)), fetches: fetches(v.fetches),
-		closed: nullable(v.closed, value => { const c = fields(value); keys(c, ["at", "by"]); return { at: number(c.at), by: choice(c.by, ["coordinator", "human", "run_finished"]) }; }),
+		snapshot: { result, fetches: decodeFetches(snapshot.fetches), results: list(snapshot.results, pair => tuple(pair, blockId, decodeBlockResult)) },
+		agents: list(v.agents, string), baselines: list(v.baselines, string), notified: nullable(v.notified, decodeCompile), dirty: decodeDirty(v.dirty), fetches: decodeFetches(v.fetches),
+		closed: decodeClosed(v.closed),
+	});
+}
+/** A `launch_update` line: the Launch's id and the fields that changed, each whole. */
+function decodeLaunchUpdate(value: unknown): { readonly id: LaunchId; readonly changes: LaunchChanges } {
+	const v = fields(value);
+	keys(v, ["id"], ["agents", "baselines", "notified", "dirty", "fetches", "closed"]);
+	return {
+		id: launchId(v.id),
+		changes: {
+			...(Object.hasOwn(v, "agents") ? { agents: list(v.agents, string) } : {}),
+			...(Object.hasOwn(v, "baselines") ? { baselines: list(v.baselines, string) } : {}),
+			...(Object.hasOwn(v, "notified") ? { notified: nullable(v.notified, decodeCompile) } : {}),
+			...(Object.hasOwn(v, "dirty") ? { dirty: decodeDirty(v.dirty) } : {}),
+			...(Object.hasOwn(v, "fetches") ? { fetches: decodeFetches(v.fetches) } : {}),
+			...(Object.hasOwn(v, "closed") ? { closed: decodeClosed(v.closed) } : {}),
+		},
 	};
 }
 function decodeServiceRecord(value: unknown): ServiceRecord {
@@ -388,18 +414,46 @@ function decodeServiceRecord(value: unknown): ServiceRecord {
 function missing(error: unknown): boolean {
 	return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
-function readOptional(path: string): string | null {
-	try { return readFileSync(path, "utf8"); } catch (error) { if (missing(error)) return null; throw error; }
+const LINE_CHUNK_BYTES = 64 * 1024;
+/**
+ * Decode every line of a JSON-lines file in order, reading it in fixed chunks through one reused buffer:
+ * neither the whole text nor an array of all lines is held. A missing file has no lines.
+ */
+function eachLine(path: string, visit: (value: unknown) => void): void {
+	let fd: number;
+	try { fd = openSync(path, "r"); } catch (error) { if (missing(error)) return; throw error; }
+	const chunk = Buffer.allocUnsafe(LINE_CHUNK_BYTES);
+	// Bytes of the current line that arrived in earlier chunks (copied out, since `chunk` is reused).
+	const carried: Buffer[] = [];
+	let number = 0;
+	const emit = (tail: Buffer): void => {
+		number++;
+		const bytes = carried.length === 0 ? tail : Buffer.concat([...carried, tail]);
+		carried.length = 0;
+		try { visit(JSON.parse(bytes.toString("utf8"))); }
+		catch (error) { throw new Error(`${path}:${number}: ${error instanceof Error ? error.message : String(error)}`); }
+	};
+	try {
+		for (;;) {
+			const read = readSync(fd, chunk, 0, LINE_CHUNK_BYTES, null);
+			if (read === 0) break;
+			let start = 0;
+			for (let newline = chunk.indexOf(10, start); newline !== -1 && newline < read; newline = chunk.indexOf(10, start)) {
+				emit(chunk.subarray(start, newline));
+				start = newline + 1;
+			}
+			if (start < read) carried.push(Buffer.from(chunk.subarray(start, read)));
+		}
+		// A last line without its newline is still a line.
+		if (carried.length > 0) emit(Buffer.alloc(0));
+	} finally {
+		closeSync(fd);
+	}
 }
 function readLines<T>(path: string, decode: (value: unknown) => T): T[] {
-	const text = readOptional(path);
-	if (text === null || text === "") return [];
-	const lines = text.split("\n");
-	if (lines.at(-1) === "") lines.pop();
-	return lines.map((line, index) => {
-		try { return decode(JSON.parse(line)); }
-		catch (error) { throw new Error(`${path}:${index + 1}: ${error instanceof Error ? error.message : String(error)}`); }
-	});
+	const values: T[] = [];
+	eachLine(path, value => values.push(decode(value)));
+	return values;
 }
 function append(path: string, value: unknown): void {
 	mkdirSync(dirname(path), { recursive: true });
@@ -429,23 +483,20 @@ export function createStore(templatePath: string): Store {
 			}
 			catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
 		},
-		readRuns() {
-			const runs = new Map<RunId, ParsedFile>();
+		runIds() {
 			let names: string[];
-			try { names = readdirSync(runsDir); } catch (error) { if (missing(error)) return runs; throw error; }
-			for (const name of names.sort()) {
-				if (!name.endsWith(".yaml")) continue;
-				const id = runId(name.slice(0, -5));
-				let parsed: ParsedFile;
-				try {
-					const value = parse(readFileSync(join(runsDir, name), "utf8"), true);
-					parsed = value.ok ? value : { ...value, error: parseFailure(value.error) };
-				}
-				catch (error) { parsed = { ok: false, error: error instanceof Error ? error.message : String(error) }; }
-				if (parsed.ok && parsed.run?.id !== id) parsed = { ok: false, error: tr(`Run id does not match filename: ${name}`, `Run ID 与文件名不匹配：${name}`) };
-				runs.set(id, parsed);
+			try { names = readdirSync(runsDir); } catch (error) { if (missing(error)) return []; throw error; }
+			return names.sort().flatMap(name => name.endsWith(".yaml") ? [runId(name.slice(0, -5))] : []);
+		},
+		readRun(id) {
+			const name = `${id}.yaml`;
+			let parsed: ParsedFile;
+			try {
+				const value = parse(readFileSync(join(runsDir, name), "utf8"), true);
+				parsed = value.ok ? value : { ...value, error: parseFailure(value.error) };
 			}
-			return runs;
+			catch (error) { parsed = { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+			return parsed.ok && parsed.run?.id !== id ? { ok: false, error: tr(`Run id does not match filename: ${name}`, `Run ID 与文件名不匹配：${name}`) } : parsed;
 		},
 		write(ref, text) {
 			const destination = filePath(ref);
@@ -462,9 +513,11 @@ export function createStore(templatePath: string): Store {
 				try { unlinkSync(temporary); } catch (error) { if (!missing(error)) throw error; }
 			}
 		},
-		stat(ref) {
-			const destination = filePath(ref);
-			try { return { text: readFileSync(destination, "utf8"), mtimeMs: statSync(destination).mtimeMs }; }
+		mtime(ref) {
+			return statSync(filePath(ref), { throwIfNoEntry: false })?.mtimeMs ?? null;
+		},
+		readText(ref) {
+			try { return readFileSync(filePath(ref), "utf8"); }
 			catch (error) { if (missing(error)) return null; throw error; }
 		},
 		readServiceRecords: () => readLines(`${path}.pb.jsonl`, decodeServiceRecord),
@@ -473,13 +526,19 @@ export function createStore(templatePath: string): Store {
 			const entries: TimelineEntry[] = [];
 			const launches = new Map<LaunchId, Launch>();
 			const run = ref.kind === "template" ? null : ref.run;
-			readLines(logPath(ref), value => {
+			eachLine(logPath(ref), value => {
 				const v = fields(value);
 				if (Object.hasOwn(v, "entry")) {
 					keys(v, ["entry"]);
 					const entry = decodeEntry(v.entry);
 					if (entry.seq <= (entries.at(-1)?.seq ?? 0)) throw new Error("Timeline sequence must increase");
 					entries.push(entry);
+				} else if (Object.hasOwn(v, "launch_update")) {
+					keys(v, ["launch_update"]);
+					const update = decodeLaunchUpdate(v.launch_update);
+					const launch = launches.get(update.id);
+					if (!launch) throw new Error(`Launch update before its record: ${update.id}`);
+					launches.set(update.id, checkBaselines({ ...launch, ...update.changes }));
 				} else {
 					keys(v, ["launch"]);
 					const launch = decodeLaunch(v.launch);
@@ -493,6 +552,7 @@ export function createStore(templatePath: string): Store {
 			append(logPath(ref), { entry: { seq: entry.seq, at: entry.at, type: entry.data.type, origin: entry.origin, data: encodeEntryData(entry.data) } });
 		},
 		appendLaunch: (ref, launch) => append(logPath(ref), { launch }),
+		appendLaunchUpdate: (ref, id, changes) => append(logPath(ref), { launch_update: { id, ...changes } }),
 		readRevisions(ref) {
 			const revisions = readLines(revisionsPath(ref), decodeRevision);
 			revisions.forEach((revision, index) => { if (index > 0 && revision.seq <= revisions[index - 1]!.seq) throw new Error(`${revisionsPath(ref)}: revision sequence must increase`); });

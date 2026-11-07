@@ -73,6 +73,9 @@ export type ServiceRecord = { readonly kind: "block"; readonly id: BlockId } | {
 
 export type ParsedFile = { readonly ok: true; readonly doc: PlaybookDoc; readonly run: RunMeta | null } | { readonly ok: false; readonly error: string };
 
+/** The fields of a Launch that change after it is created; a `launch_update` log line carries the changed ones, each whole. */
+export type LaunchChanges = Partial<Pick<Launch, "agents" | "baselines" | "notified" | "dirty" | "fetches" | "closed">>;
+
 export interface Store {
 	readonly templatePath: string;
 	/** Directory the template lives in (base for `file:` targets and `tern split --cwd`). */
@@ -81,23 +84,30 @@ export interface Store {
 	path(ref: DocRef): string;
 	/** Read and parse the template; null run. */
 	readTemplate(): ParsedFile;
-	/** Read and parse every Run file under `<name>.runs/`. */
-	readRuns(): Map<RunId, ParsedFile>;
+	/** Run ids that have a file under `<name>.runs/`, in file-name order. */
+	runIds(): RunId[];
+	/** Read and parse one Run file. */
+	readRun(run: RunId): ParsedFile;
 	/** Serialize (README §S2, runs.md §1). Block bodies as YAML block scalars. */
 	serialize(doc: PlaybookDoc, run: RunMeta | null): string;
 	/** Parse text in the same format; used for disk edits. */
 	parse(text: string, expectRun: boolean): ParsedFile;
 	/** Atomic write through a temp file in the same directory; returns the written text. */
 	write(ref: DocRef, text: string): void;
-	/** Current file text and mtime, or null when the file is missing. */
-	stat(ref: DocRef): { readonly text: string; readonly mtimeMs: number } | null;
+	/** Modification time of a document's file, or null when the file is missing; reads no content. */
+	mtime(ref: DocRef): number | null;
+	/** A document file's whole text, or null when the file is missing. */
+	readText(ref: DocRef): string | null;
 	/** Service record file (append-only). */
 	readServiceRecords(): ServiceRecord[];
 	appendServiceRecord(record: ServiceRecord): void;
-	/** Execution log of a document (`<file>.log.jsonl` for the template, `<runs>/<run>.jsonl` for a Run): entries and launch lines (runs.md §3). */
+	/** Execution log of a document (`<file>.log.jsonl` for the template, `<runs>/<run>.jsonl` for a Run): entries and launch lines (runs.md §3), launch lines merged by id. */
 	readLog(ref: DocRef): { readonly entries: TimelineEntry[]; readonly launches: Map<LaunchId, Launch> };
 	appendEntry(ref: DocRef, entry: TimelineEntry): void;
+	/** A new Launch's whole record. */
 	appendLaunch(ref: DocRef, launch: Launch): void;
+	/** Only the fields of Launch `id` that changed since its last line. */
+	appendLaunchUpdate(ref: DocRef, id: LaunchId, changes: LaunchChanges): void;
 	/** Revision journal of a document (`<file>.revisions.jsonl`, `<runs>/<run>.revisions.jsonl`): every submitted design change request, append-only. */
 	readRevisions(ref: DocRef): Revision[];
 	appendRevision(ref: DocRef, revision: Revision): void;

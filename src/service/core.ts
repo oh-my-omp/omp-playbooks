@@ -44,6 +44,7 @@ import type {
 	DocView,
 	Fetcher,
 	K1Handler,
+	LaunchChanges,
 	ReferencesModule,
 	RenderStatus,
 	ServiceRecord,
@@ -77,8 +78,7 @@ interface DocState {
 	blocks: Block[];
 	run: RunMeta | null;
 	locks: Map<BlockId, BlockLock>;
-	/** Text and parsed form of the file as last written or read (README §S2). */
-	lastText: string;
+	/** Parsed form of the file as last written or read, and the file's mtime then (README §S2). */
 	lastDoc: PlaybookDoc;
 	lastMtime: number;
 	writeTimer: Timer | undefined;
@@ -89,11 +89,25 @@ interface DocState {
 	inspections: Map<string, { blocks: BlockId[]; version: string; stale: boolean; report: JudgeReport | null }>;
 	/** The document's revision journal (authoritative copy on disk; append-only). */
 	revisions: Revision[];
+	/** The document's execution log (authoritative copy on disk; append-only). */
+	readonly log: DocLog;
 }
 
 /** A document's execution log: the template's and every Run's. */
 interface DocLog {
 	entries: TimelineEntry[];
+}
+
+/**
+ * What stays in memory of a finished Run (#26 §2): the inputs of its RunSummary, and its inspections, which a
+ * later `report` answers. Its document, log and Launches stay on disk and are read back per request.
+ */
+interface FinishedRun {
+	readonly meta: RunMeta;
+	readonly done: number;
+	readonly total: number;
+	retrospective: boolean;
+	readonly inspections: DocState["inspections"];
 }
 
 interface LaunchState {
@@ -143,6 +157,20 @@ function sameResult(a: CompileResult | null, b: CompileResult | null): boolean {
 function sameProgress(a: Progress, b: Progress): boolean {
 	if (a.kind === "untracked" || b.kind === "untracked") return a.kind === b.kind;
 	return a.status === b.status && a.report === b.report;
+}
+function isRetrospective(entry: TimelineEntry): boolean {
+	return entry.data.type === "post" && entry.data.kind === "retrospective";
+}
+/** RunSummary `done` and `total`: tracked blocks that are done, and all tracked blocks. */
+function progressCounts(blocks: readonly Block[]): { done: number; total: number } {
+	let done = 0;
+	let total = 0;
+	for (const block of blocks) {
+		if (block.progress.kind !== "tracked") continue;
+		total++;
+		if (block.progress.status === "done") done++;
+	}
+	return { done, total };
 }
 /** Blocks a logged `launch_requested` payload names; the log keeps event data as it was sent. */
 function requestedBlocks(data: unknown): readonly string[] {
@@ -207,9 +235,15 @@ export class Core implements CoreApi, K1Handler {
 	readonly #panes: PaneControl;
 	readonly #now: () => number;
 
+	/** The template and every running Run; a Run leaves when it finishes (#26 §2). */
 	readonly #docs = new Map<DocKey, DocState>();
-	readonly #logs = new Map<DocKey, DocLog>();
+	readonly #finished = new Map<RunId, FinishedRun>();
+	/** Every Run id, in load and start order: the order `runs()` lists them in. */
+	readonly #runOrder: RunId[] = [];
+	/** Launches of the documents in `#docs`. */
 	readonly #launches = new Map<LaunchId, LaunchState>();
+	/** The Run each Launch of a finished Run belongs to; the record itself stays in that Run's log. */
+	readonly #finishedLaunches = new Map<LaunchId, RunId>();
 	/** Document fetch table (references.md §5); not persisted. */
 	readonly #fetches = new Map<TargetKey, FetchOutcome>();
 	readonly #inflight = new Map<TargetKey, Promise<FetchOutcome>>();
@@ -242,26 +276,20 @@ export class Core implements CoreApi, K1Handler {
 	load(): string | null {
 		const template = this.#store.readTemplate();
 		if (!template.ok) return template.error;
-		this.#docs.set("template", this.#newDocState({ kind: "template" }, template.doc, null));
+		this.#loadLive({ kind: "template" }, template.doc, null);
 		for (const record of this.#store.readServiceRecords()) this.#noteRecord(record);
-		for (const [run, parsed] of this.#store.readRuns()) {
+		// One Run file at a time: a finished Run is read once for its summary and counters, then dropped.
+		for (const run of this.#store.runIds()) {
+			const parsed = this.#store.readRun(run);
 			if (!parsed.ok || parsed.run === null) {
 				this.#errors.push(tr(`Run ${run} file could not be parsed: ${parsed.ok ? "missing run mapping" : parsed.error}`, `Run ${run} 的文件不能解析：${parsed.ok ? "缺少 run 映射" : parsed.error}`));
 				continue;
 			}
-			this.#docs.set(run, this.#newDocState({ kind: "run", run }, parsed.doc, parsed.run));
 			this.#maxRun = Math.max(this.#maxRun, idNumber(run));
-		}
-		for (const [key, doc] of this.#docs) {
-			const log = this.#store.readLog(doc.ref);
-			this.#logs.set(key, { entries: log.entries });
-			for (const launch of log.launches.values()) {
-				this.#maxLaunch = Math.max(this.#maxLaunch, idNumber(launch.id));
-				this.#launches.set(launch.id, { record: launch, pending: null, deadline: null, timer: undefined, generation: 0, judging: false });
-				// Dirty entries are ordered against new edits, so edit numbers continue above every persisted one.
-				for (const [, seq] of launch.dirty) this.#editSeq = Math.max(this.#editSeq, seq);
-			}
-			for (const entry of log.entries) if (entry.data.type === "block_edited") this.#editSeq = Math.max(this.#editSeq, entry.data.edit);
+			this.#runOrder.push(run);
+			for (const block of parsed.doc.blocks) this.#maxBlock = Math.max(this.#maxBlock, idNumber(block.id));
+			if (parsed.run.status === "finished") this.#loadFinished(parsed.doc, parsed.run);
+			else this.#loadLive({ kind: "run", run }, parsed.doc, parsed.run);
 		}
 		for (const doc of this.#docs.values()) for (const block of doc.blocks) this.#maxBlock = Math.max(this.#maxBlock, idNumber(block.id));
 		for (const doc of this.#docs.values()) if (doc.run?.status === "running") this.#scheduleReminder(doc.run.id, true);
@@ -282,25 +310,90 @@ export class Core implements CoreApi, K1Handler {
 		}
 	}
 
-	#newDocState(ref: DocRef, doc: PlaybookDoc, run: RunMeta | null): DocState {
-		const text = this.#store.serialize(doc, run);
-		const stat = this.#store.stat(ref);
+	#newDocState(ref: DocRef, doc: PlaybookDoc, run: RunMeta | null, entries: TimelineEntry[], inspections: DocState["inspections"] = new Map()): DocState {
 		return {
 			ref,
 			title: doc.title,
 			blocks: [...doc.blocks],
 			run,
 			locks: new Map(doc.blocks.map(block => [block.id, { kind: "none" }])),
-			lastText: stat?.text ?? text,
 			lastDoc: doc,
-			lastMtime: stat?.mtimeMs ?? 0,
+			lastMtime: this.#store.mtime(ref) ?? 0,
 			writeTimer: undefined,
 			parseError: null,
 			findings: new Map(),
 			render: new Map(),
-			inspections: new Map(),
+			inspections,
 			revisions: this.#store.readRevisions(ref),
+			log: { entries },
 		};
+	}
+
+	/** Read a document's log, advancing the id and edit counters past everything it records. */
+	#readLog(ref: DocRef): { readonly entries: TimelineEntry[]; readonly launches: ReadonlyMap<LaunchId, Launch> } {
+		const log = this.#store.readLog(ref);
+		for (const launch of log.launches.values()) {
+			this.#maxLaunch = Math.max(this.#maxLaunch, idNumber(launch.id));
+			// Dirty entries are ordered against new edits, so edit numbers continue above every persisted one.
+			for (const [, seq] of launch.dirty) this.#editSeq = Math.max(this.#editSeq, seq);
+		}
+		for (const entry of log.entries) if (entry.data.type === "block_edited") this.#editSeq = Math.max(this.#editSeq, entry.data.edit);
+		return log;
+	}
+
+	/** The template or a running Run: kept in memory with its log and Launches. */
+	#loadLive(ref: DocRef, doc: PlaybookDoc, run: RunMeta | null): void {
+		const log = this.#readLog(ref);
+		this.#docs.set(keyOf(ref), this.#newDocState(ref, doc, run, log.entries));
+		for (const launch of log.launches.values()) this.#launches.set(launch.id, { record: launch, pending: null, deadline: null, timer: undefined, generation: 0, judging: false });
+	}
+
+	/** A finished Run: only its summary stays; its log is read for the counters and dropped. */
+	#loadFinished(doc: PlaybookDoc, meta: RunMeta): void {
+		const log = this.#readLog({ kind: "run", run: meta.id });
+		for (const id of log.launches.keys()) this.#finishedLaunches.set(id, meta.id);
+		this.#finished.set(meta.id, { meta, ...progressCounts(doc.blocks), retrospective: log.entries.some(isRetrospective), inspections: new Map() });
+	}
+
+	/**
+	 * #26 §2: a finished Run leaves memory. Its Launches (all closed by now) and its document go; what `runs()`
+	 * reports stays, and fetch entries no remaining document references go with it (R9).
+	 */
+	#evict(doc: DocState, meta: RunMeta): void {
+		for (const [id, launch] of this.#launches) {
+			if (launch.record.run !== meta.id) continue;
+			this.#launches.delete(id);
+			this.#finishedLaunches.set(id, meta.id);
+		}
+		this.#docs.delete(meta.id);
+		this.#finished.set(meta.id, { meta, ...progressCounts(doc.blocks), retrospective: doc.log.entries.some(isRetrospective), inspections: doc.inspections });
+		const referenced = new Set<TargetKey>();
+		for (const live of this.#docs.values()) {
+			const contents = this.#contents(live);
+			for (const target of this.#refs.externalTargets([...contents.keys()], contents)) referenced.add(this.#refs.targetKey(target));
+		}
+		for (const key of this.#fetches.keys()) if (!referenced.has(key)) this.#fetches.delete(key);
+	}
+
+	/** A finished Run's document and log read back from disk for one request; the caller does not keep it. */
+	#readFinished(run: RunId, finished: FinishedRun): Outcome<DocState> {
+		const parsed = this.#store.readRun(run);
+		if (!parsed.ok || parsed.run === null) return fail("UnknownRun", tr(`Run ${run} file could not be parsed: ${parsed.ok ? "missing run mapping" : parsed.error}`, `Run ${run} 的文件不能解析：${parsed.ok ? "缺少 run 映射" : parsed.error}`));
+		const ref: DocRef = { kind: "run", run };
+		return ok(this.#newDocState(ref, parsed.doc, parsed.run, this.#store.readLog(ref).entries, finished.inspections));
+	}
+
+	/** A Launch by id: a live one, or a finished Run's record read back from its log (closed; not kept). */
+	#launchById(id: LaunchId): LaunchState | null {
+		const live = this.#launches.get(id);
+		if (live) return live;
+		const run = this.#finishedLaunches.get(id);
+		const record = run === undefined ? undefined : this.#store.readLog({ kind: "run", run }).launches.get(id);
+		return record ? { record, pending: null, deadline: null, timer: undefined, generation: 0, judging: false } : null;
+	}
+
+	#isFinishedRun(run: RunId | undefined): boolean {
+		return run !== undefined && this.#finished.has(run);
 	}
 
 	#noteRecord(record: ServiceRecord): void {
@@ -319,8 +412,15 @@ export class Core implements CoreApi, K1Handler {
 
 	// ============================================================ lookup helpers
 
+	/** The template or a running Run. */
 	#doc(ref: DocRef): DocState | null {
 		return this.#docs.get(keyOf(ref)) ?? null;
+	}
+	/** A document that must be in memory: the template, or the running Run a live Launch or event names. */
+	#live(key: DocKey): DocState {
+		const doc = this.#docs.get(key);
+		if (!doc) throw new Error(`no document ${key}`);
+		return doc;
 	}
 	#block(doc: DocState, id: BlockId): Block | null {
 		return doc.blocks.find(block => block.id === id) ?? null;
@@ -337,19 +437,18 @@ export class Core implements CoreApi, K1Handler {
 
 	// ============================================================ execution log
 
-	#append(key: DocKey, origin: EntryOrigin, data: EntryData): TimelineEntry {
-		const log = this.#logs.get(key);
-		if (!log) throw new Error(`no log for ${key}`);
-		const entry: TimelineEntry = { seq: (log.entries.at(-1)?.seq ?? 0) + 1, at: this.#now(), origin, data };
-		log.entries.push(entry);
-		this.#store.appendEntry(refOf(key), entry);
+	#append(doc: DocState, origin: EntryOrigin, data: EntryData): TimelineEntry {
+		const entries = doc.log.entries;
+		const entry: TimelineEntry = { seq: (entries.at(-1)?.seq ?? 0) + 1, at: this.#now(), origin, data };
+		entries.push(entry);
+		this.#store.appendEntry(doc.ref, entry);
 		return entry;
 	}
 
 	/** Block result table of a document (references.md §4). */
-	#results(key: DocKey): Map<BlockId, BlockResult> {
+	#results(doc: DocState): Map<BlockId, BlockResult> {
 		const table = new Map<BlockId, BlockResult>();
-		for (const entry of this.#logs.get(key)?.entries ?? []) {
+		for (const entry of doc.log.entries) {
 			const data = entry.data;
 			if (data.type === "post" && data.kind === "result" && data.block !== undefined) {
 				table.set(data.block, { text: data.text, at: entry.at, seq: entry.seq, origin: entry.origin, launch: data.launch ?? null });
@@ -391,7 +490,7 @@ export class Core implements CoreApi, K1Handler {
 		return {
 			blocks: contents ?? this.#contents(doc),
 			fetches,
-			results: results ?? this.#results(keyOf(doc.ref)),
+			results: results ?? this.#results(doc),
 		};
 	}
 
@@ -409,7 +508,6 @@ export class Core implements CoreApi, K1Handler {
 	 */
 	#applyEdit(doc: DocState, origin: EditOrigin, change: EditChange): number {
 		const seq = ++this.#editSeq;
-		const key = keyOf(doc.ref);
 		const beforeContents = this.#contents(doc);
 		let touched: BlockId | null = null;
 		let contentOrExistence = false;
@@ -425,7 +523,7 @@ export class Core implements CoreApi, K1Handler {
 				touched = change.block;
 				contentOrExistence = change.field !== "title";
 				if (change.field === "design") notifies = true;
-				this.#append(key, origin, { type: "block_edited", block: change.block, field: change.field, text: change.text, edit: seq });
+				this.#append(doc, origin, { type: "block_edited", block: change.block, field: change.field, text: change.text, edit: seq });
 				break;
 			}
 			case "content": {
@@ -433,8 +531,8 @@ export class Core implements CoreApi, K1Handler {
 				doc.blocks[index] = { ...doc.blocks[index]!, content: change.content, progress: change.progress };
 				touched = change.block;
 				contentOrExistence = true;
-				this.#append(key, origin, { type: "content_replaced", block: change.block, content: change.content });
-				this.#append(key, origin, { type: "progress_changed", block: change.block, progress: change.progress });
+				this.#append(doc, origin, { type: "content_replaced", block: change.block, content: change.content });
+				this.#append(doc, origin, { type: "progress_changed", block: change.block, progress: change.progress });
 				break;
 			}
 			case "config": {
@@ -444,14 +542,14 @@ export class Core implements CoreApi, K1Handler {
 				if (current.content.kind !== "task") throw new Error(`block ${change.block} is not a task block`);
 				const content = withConfig(current.content, change.config);
 				doc.blocks[index] = { ...current, content };
-				this.#append(key, origin, { type: "content_replaced", block: change.block, content });
+				this.#append(doc, origin, { type: "content_replaced", block: change.block, content });
 				break;
 			}
 			case "progress": {
 				// Progress is not compiled text either: a report or a status never reaches a Launch's prompt.
 				const index = doc.blocks.findIndex(block => block.id === change.block);
 				doc.blocks[index] = { ...doc.blocks[index]!, progress: change.progress };
-				this.#append(key, origin, { type: "progress_changed", block: change.block, progress: change.progress });
+				this.#append(doc, origin, { type: "progress_changed", block: change.block, progress: change.progress });
 				break;
 			}
 			case "insert": {
@@ -460,7 +558,7 @@ export class Core implements CoreApi, K1Handler {
 				doc.locks.set(change.block.id, { kind: "none" });
 				touched = change.block.id;
 				contentOrExistence = true;
-				this.#append(key, origin, { type: "block_added", block: change.block.id, title: change.block.title, content: change.block.content });
+				this.#append(doc, origin, { type: "block_added", block: change.block.id, title: change.block.title, content: change.block.content });
 				break;
 			}
 			case "delete": {
@@ -469,7 +567,7 @@ export class Core implements CoreApi, K1Handler {
 				doc.locks.delete(change.block);
 				touched = change.block;
 				contentOrExistence = true;
-				if (removed) this.#append(key, origin, { type: "block_deleted", block: removed.id, title: removed.title, content: removed.content });
+				if (removed) this.#append(doc, origin, { type: "block_deleted", block: removed.id, title: removed.title, content: removed.content });
 				break;
 			}
 			case "reorder": {
@@ -478,7 +576,7 @@ export class Core implements CoreApi, K1Handler {
 					throw new Error("reorder needs a permutation of the document's blocks");
 				}
 				doc.blocks = change.order.map(id => byId.get(id)!);
-				this.#append(key, origin, { type: "blocks_reordered", order: change.order });
+				this.#append(doc, origin, { type: "blocks_reordered", order: change.order });
 				break;
 			}
 		}
@@ -538,11 +636,9 @@ export class Core implements CoreApi, K1Handler {
 		this.#pollDoc(doc);
 		if (doc.parseError !== null) return;
 		const snapshot: PlaybookDoc = { title: doc.title, blocks: [...doc.blocks] };
-		const text = this.#store.serialize(snapshot, doc.run);
-		this.#store.write(doc.ref, text);
-		doc.lastText = text;
+		this.#store.write(doc.ref, this.#store.serialize(snapshot, doc.run));
 		doc.lastDoc = snapshot;
-		doc.lastMtime = this.#store.stat(doc.ref)?.mtimeMs ?? doc.lastMtime;
+		doc.lastMtime = this.#store.mtime(doc.ref) ?? doc.lastMtime;
 	}
 
 	/** Run mapping changes are written immediately, before their timeline entry (runs.md §6). */
@@ -558,18 +654,22 @@ export class Core implements CoreApi, K1Handler {
 		for (const doc of this.#docs.values()) this.#pollDoc(doc);
 	}
 
+	/** #26 §1: the file's mtime decides whether it is read at all; only a changed mtime reads the text. */
 	#pollDoc(doc: DocState): void {
-		const stat = this.#store.stat(doc.ref);
-		if (!stat || stat.mtimeMs === doc.lastMtime) return;
-		doc.lastMtime = stat.mtimeMs;
-		if (stat.text === doc.lastText) {
+		const mtime = this.#store.mtime(doc.ref);
+		if (mtime === null || mtime === doc.lastMtime) return;
+		const text = this.#store.readText(doc.ref);
+		if (text === null) return;
+		doc.lastMtime = mtime;
+		// The text last written or read is rebuilt only here, when the file may have changed.
+		if (text === this.#store.serialize(doc.lastDoc, doc.run)) {
 			if (doc.parseError !== null) {
 				doc.parseError = null;
 				this.#emit(doc.ref);
 			}
 			return;
 		}
-		const parsed = this.#store.parse(stat.text, doc.run !== null);
+		const parsed = this.#store.parse(text, doc.run !== null);
 		if (!parsed.ok) {
 			doc.parseError = parsed.error;
 			this.#emit(doc.ref);
@@ -579,7 +679,6 @@ export class Core implements CoreApi, K1Handler {
 			doc.parseError = null;
 			this.#emit(doc.ref);
 		}
-		doc.lastText = stat.text;
 		this.#applyDisk(doc, parsed.doc);
 		doc.lastDoc = parsed.doc;
 	}
@@ -640,9 +739,19 @@ export class Core implements CoreApi, K1Handler {
 
 	// ============================================================ Launch persistence and judgment (launch-events.md)
 
+	/** #26 §4: the log gets only the fields that changed; every change of a record goes through here. */
 	#setLaunch(launch: LaunchState, record: Launch): void {
+		const previous = launch.record;
 		launch.record = record;
-		this.#store.appendLaunch(refOf(keyOfRun(record.run)), record);
+		const changes: LaunchChanges = {
+			...(record.agents === previous.agents ? {} : { agents: record.agents }),
+			...(record.baselines === previous.baselines ? {} : { baselines: record.baselines }),
+			...(record.notified === previous.notified ? {} : { notified: record.notified }),
+			...(record.dirty === previous.dirty ? {} : { dirty: record.dirty }),
+			...(record.fetches === previous.fetches ? {} : { fetches: record.fetches }),
+			...(record.closed === previous.closed ? {} : { closed: record.closed }),
+		};
+		this.#store.appendLaunchUpdate(refOf(keyOfRun(record.run)), record.id, changes);
 	}
 
 	/** Open, owned by the connected coordinator, and in a document that can still run (the template, or a running Run). */
@@ -678,12 +787,11 @@ export class Core implements CoreApi, K1Handler {
 		// The same inputs `rebase` accepts: current contents and the document's current results.
 		const result = this.#launchText(doc, launch.record.blocks, launch.record.kind, this.#refs.compile(launch.record.blocks, this.#input(doc, fetches)));
 		const baseline = launch.record.baselines.at(-1)!;
-		const dropUpTo = (): void => {
-			this.#setLaunch(launch, { ...launch.record, dirty: launch.record.dirty.filter(([, seq]) => seq > maxSeq) });
+		const dropUpTo = (notified: CompileResult | null): void => {
+			this.#setLaunch(launch, { ...launch.record, notified, dirty: launch.record.dirty.filter(([, seq]) => seq > maxSeq) });
 		};
 		if (result.kind === "Ok" && result.text === baseline) {
-			launch.record = { ...launch.record, notified: null };
-			dropUpTo();
+			dropUpTo(null);
 		} else if (!sameResult(result, launch.record.notified)) {
 			const id = `e${++this.#eventSeq}`;
 			launch.pending = { event: id, maxSeq, result };
@@ -699,7 +807,7 @@ export class Core implements CoreApi, K1Handler {
 				},
 			});
 		} else {
-			dropUpTo();
+			dropUpTo(launch.record.notified);
 		}
 		this.#emit(refOf(keyOfRun(launch.record.run)));
 		if (launch.pending === null && launch.record.dirty.length > 0 && launch.deadline !== null && launch.deadline <= this.#now()) void this.#judge(launch);
@@ -736,7 +844,7 @@ export class Core implements CoreApi, K1Handler {
 		clearTimeout(launch.timer);
 		launch.timer = undefined;
 		this.#setLaunch(launch, { ...launch.record, closed: { at: this.#now(), by } });
-		this.#append(keyOfRun(launch.record.run), origin, { type: "launch_closed", launch: launch.record.id });
+		this.#append(this.#live(keyOfRun(launch.record.run)), origin, { type: "launch_closed", launch: launch.record.id });
 	}
 
 	/**
@@ -759,7 +867,7 @@ export class Core implements CoreApi, K1Handler {
 		if (!this.#conn || this.#conn.session === null) return false;
 		this.#conn.conn.send(payload);
 		const run = payload.event === "block_changed" ? payload.data.launch.run : payload.data.run;
-		this.#append(keyOfRun(run), "service", { type: "event_sent", event: payload.event, data: payload.data });
+		this.#append(this.#live(keyOfRun(run)), "service", { type: "event_sent", event: payload.event, data: payload.data });
 		return true;
 	}
 
@@ -773,7 +881,7 @@ export class Core implements CoreApi, K1Handler {
 		const meta = doc?.run;
 		if (!doc || !meta || meta.status !== "running" || meta.updateDue === null) return;
 		const due = meta.updateDue;
-		const fired = (this.#logs.get(run)?.entries ?? []).some(entry => entry.data.type === "update_due" && entry.data.due === due);
+		const fired = doc.log.entries.some(entry => entry.data.type === "update_due" && entry.data.due === due);
 		if (fired) return;
 		const wait = Math.max(0, due - this.#now());
 		if (startup && wait === 0) {
@@ -790,13 +898,13 @@ export class Core implements CoreApi, K1Handler {
 		this.#reminders.delete(run);
 		const doc = this.#docs.get(run);
 		if (!doc?.run || doc.run.status !== "running" || doc.run.updateDue !== due) return;
-		this.#append(run, "service", { type: "update_due", due });
-		this.#send({ event: "update_due", data: { run, due, last_update: this.#lastUpdateAt(run) } });
+		this.#append(doc, "service", { type: "update_due", due });
+		this.#send({ event: "update_due", data: { run, due, last_update: this.#lastUpdateAt(doc) } });
 		this.#emit(doc.ref);
 	}
 
-	#lastUpdateAt(run: RunId): number | null {
-		const entries = this.#logs.get(run)?.entries ?? [];
+	#lastUpdateAt(doc: DocState): number | null {
+		const entries = doc.log.entries;
 		for (let i = entries.length - 1; i >= 0; i--) {
 			const entry = entries[i]!;
 			if (entry.data.type === "post" && entry.data.kind === "update") return entry.at;
@@ -822,10 +930,7 @@ export class Core implements CoreApi, K1Handler {
 		const input = this.#input(doc, this.#fetches);
 		let changed = false;
 		for (const block of doc.blocks) {
-			const compiled = this.#refs.compile([block.id], input);
-			const expansions = block.content.kind === "task" ? this.#refs.parseReferences(block.content.body).map(reference => this.#refs.expandOne(block.id, reference, input)) : [];
-			const render = doc.render.get(block.id) ?? { blockError: false, documentError: false, pendingOverdue: false, view: { md: [], images: [] }, draftErrors: 0 };
-			const next = this.#checks.findings({ compiled, expansions, content: block.content, render });
+			const next = this.#findings(doc, block, input);
 			const previous = doc.findings.get(block.id);
 			if (JSON.stringify(previous) !== JSON.stringify(next)) changed = true;
 			doc.findings.set(block.id, next);
@@ -838,6 +943,13 @@ export class Core implements CoreApi, K1Handler {
 			}
 		}
 		if (changed) this.#emit(doc.ref);
+	}
+
+	#findings(doc: DocState, block: Block, input: CompileInput): Findings {
+		const compiled = this.#refs.compile([block.id], input);
+		const expansions = block.content.kind === "task" ? this.#refs.parseReferences(block.content.body).map(reference => this.#refs.expandOne(block.id, reference, input)) : [];
+		const render = doc.render.get(block.id) ?? { blockError: false, documentError: false, pendingOverdue: false, view: { md: [], images: [] }, draftErrors: 0 };
+		return this.#checks.findings({ compiled, expansions, content: block.content, render });
 	}
 
 	#version(doc: DocState, blocks: readonly BlockId[], input: CompileInput): string {
@@ -1029,9 +1141,9 @@ export class Core implements CoreApi, K1Handler {
 				return ok(null);
 			}
 			case "insert": {
+				if (this.#isFinishedRun(request.args.run)) return fail("RunFinished", tr("Run has finished", "Run 已结束"));
 				const doc = this.#docOf(request.args.run);
 				if (!doc.ok) return doc;
-				if (this.#isFinished(doc.result)) return fail("RunFinished", tr("Run has finished", "Run 已结束"));
 				if (request.args.after !== undefined && !this.#block(doc.result, request.args.after)) return fail("UnknownBlock", tr(`Block ${request.args.after} does not exist`, `块 ${request.args.after} 不存在`));
 				const id = this.#allocateBlock(doc.result);
 				const given = request.args.content;
@@ -1077,6 +1189,11 @@ export class Core implements CoreApi, K1Handler {
 				const doc = this.#blocksOf(request.args.run, request.args.blocks);
 				if (!doc.ok) return doc;
 				await this.#ensureFetched(doc.result, request.args.blocks);
+				// A finished Run read back for this request has no findings yet: the ones checks would hold.
+				if (this.#docs.get(keyOf(doc.result.ref)) !== doc.result) {
+					const input = this.#input(doc.result, this.#fetches);
+					for (const id of request.args.blocks) doc.result.findings.set(id, this.#findings(doc.result, this.#block(doc.result, id)!, input));
+				}
 				return ok(this.#inspectState(doc.result, request.args.blocks));
 			}
 			case "report":
@@ -1088,7 +1205,7 @@ export class Core implements CoreApi, K1Handler {
 				if (!launch.ok) return launch;
 				if (launch.result.record.closed !== null) return fail("BadLaunch", tr("Launch is closed", "Launch 已关闭"));
 				this.#setLaunch(launch.result, { ...launch.result.record, agents: [...launch.result.record.agents, request.args.agent] });
-				this.#append(keyOfRun(launch.result.record.run), "coordinator", { type: "agent_bound", launch: request.args.launch, agent: request.args.agent });
+				this.#append(this.#live(keyOfRun(launch.result.record.run)), "coordinator", { type: "agent_bound", launch: request.args.launch, agent: request.args.agent });
 				this.#emit(refOf(keyOfRun(launch.result.record.run)));
 				return ok(null);
 			}
@@ -1102,7 +1219,7 @@ export class Core implements CoreApi, K1Handler {
 				return ok(null);
 			}
 			case "launch_info": {
-				const launch = this.#launches.get(request.args.launch);
+				const launch = this.#launchById(request.args.launch);
 				return launch ? ok(launch.record) : fail("UnknownLaunch", tr(`Launch ${request.args.launch} does not exist`, `Launch ${request.args.launch} 不存在`));
 			}
 			case "start_run":
@@ -1117,7 +1234,7 @@ export class Core implements CoreApi, K1Handler {
 				const doc = this.#docOf(request.args.run);
 				if (!doc.ok) return doc;
 				const after = request.args.after ?? 0;
-				return ok({ entries: this.#logs.get(keyOf(doc.result.ref))!.entries.filter(entry => entry.seq > after) });
+				return ok({ entries: doc.result.log.entries.filter(entry => entry.seq > after) });
 			}
 			case "post": {
 				const args = request.args;
@@ -1152,12 +1269,16 @@ export class Core implements CoreApi, K1Handler {
 
 	// ------------------------------------------------------------ K1 helpers
 
+	/** The document a request names; a finished Run is read back from disk for this request (#26 §2). */
 	#docOf(run: RunId | undefined): Outcome<DocState> {
 		const doc = this.#docs.get(run ?? "template");
-		return doc ? ok(doc) : fail("UnknownRun", tr(`Run ${run} does not exist`, `Run ${run} 不存在`));
+		if (doc) return ok(doc);
+		const finished = run === undefined ? undefined : this.#finished.get(run);
+		return run !== undefined && finished ? this.#readFinished(run, finished) : fail("UnknownRun", tr(`Run ${run} does not exist`, `Run ${run} 不存在`));
 	}
 
 	#target(run: RunId | undefined, id: BlockId, modifying: boolean): Outcome<{ doc: DocState; block: Block }> {
+		if (modifying && this.#isFinishedRun(run)) return fail("RunFinished", tr("Run has finished", "Run 已结束"));
 		const doc = this.#docOf(run);
 		if (!doc.ok) return doc;
 		if (modifying && this.#isFinished(doc.result)) return fail("RunFinished", tr("Run has finished", "Run 已结束"));
@@ -1180,7 +1301,7 @@ export class Core implements CoreApi, K1Handler {
 	}
 
 	#owned(session: string, id: LaunchId): Outcome<LaunchState> {
-		const launch = this.#launches.get(id);
+		const launch = this.#launchById(id);
 		if (!launch) return fail("UnknownLaunch", tr(`Launch ${id} does not exist`, `Launch ${id} 不存在`));
 		if (launch.record.session !== session) return fail("NotOwner", tr(`Launch ${id} belongs to another session`, `Launch ${id} 属于其他会话`));
 		return ok(launch);
@@ -1196,6 +1317,7 @@ export class Core implements CoreApi, K1Handler {
 	}
 
 	async #launch(session: string, run: RunId | undefined, blocks: readonly BlockId[]): Promise<Outcome<unknown>> {
+		if (this.#isFinishedRun(run)) return fail("RunFinished", tr("Run has finished", "Run 已结束"));
 		const found = this.#docOf(run);
 		if (!found.ok) return found;
 		const docState = found.result;
@@ -1212,7 +1334,7 @@ export class Core implements CoreApi, K1Handler {
 		if (after) return fail("BadLaunch", after);
 		const kind = this.#launchKind(docState, blocks);
 		const bodies = this.#contents(docState);
-		const results = this.#results(keyOf(docState.ref));
+		const results = this.#results(docState);
 		const result = this.#launchText(docState, blocks, kind, this.#refs.compile(blocks, this.#input(docState, this.#fetches, bodies, results)));
 		if (result.kind === "Err") return fail("CompileError", tr("Compilation failed", "编译失败"), result.error);
 		const fetchKeys = this.#refs.externalTargets(blocks, bodies).map(target => this.#refs.targetKey(target));
@@ -1244,7 +1366,7 @@ export class Core implements CoreApi, K1Handler {
 		const state: LaunchState = { record, pending: null, deadline: null, timer: undefined, generation: 0, judging: false };
 		this.#launches.set(id, state);
 		this.#store.appendLaunch(docState.ref, record);
-		this.#append(keyOf(docState.ref), "coordinator", { type: "launch_created", launch: id, kind: record.kind, blocks: record.blocks });
+		this.#append(docState, "coordinator", { type: "launch_created", launch: id, kind: record.kind, blocks: record.blocks });
 		this.#emit(docState.ref);
 		const config = kind === "prompt" ? sharedConfig(blocks.map(block => this.#block(docState, block)!.content)) : {};
 		return ok({ launch: id, kind, text: result.text, ...config });
@@ -1278,8 +1400,9 @@ export class Core implements CoreApi, K1Handler {
 		const generation = launch.generation;
 		const accepted = this.#editSeq;
 		const fetches = await this.#launchFetches(launch);
-		const doc = this.#docs.get(key)!;
-		if (this.#isFinished(doc)) return fail("RunFinished", tr("Run has finished", "Run 已结束"));
+		// The Run may have finished, and left memory, while fetching.
+		const doc = this.#docs.get(key);
+		if (!doc || this.#isFinished(doc)) return fail("RunFinished", tr("Run has finished", "Run 已结束"));
 		if (launch.record.closed !== null) return fail("BadLaunch", tr("Launch is closed", "Launch 已关闭"));
 		if (launch.generation !== generation) return fail("BadLaunch", tr("Launch changed during rebase; rebase again", "Launch 在 rebase 期间已变化，请重新 rebase"));
 		const missing = launch.record.blocks.filter(block => !this.#block(doc, block));
@@ -1311,7 +1434,7 @@ export class Core implements CoreApi, K1Handler {
 		const current = this.#version(doc.result, blocks, this.#input(doc.result, this.#fetches));
 		if (!inspection || inspection.stale || inspection.version !== version || current !== version) return ok(null);
 		doc.result.inspections.set(setKey, { ...inspection, report: result });
-		this.#append(keyOf(doc.result.ref), "coordinator", { type: "check_reported", blocks: [...blocks], version, result });
+		this.#append(doc.result, "coordinator", { type: "check_reported", blocks: [...blocks], version, result });
 		this.#emit(doc.result.ref);
 		return ok(null);
 	}
@@ -1336,10 +1459,10 @@ export class Core implements CoreApi, K1Handler {
 		const doc: PlaybookDoc = { title: template.title, blocks: template.blocks.map(block => ({ ...block, progress: freshProgress(block.progress) })) };
 		const text = this.#store.serialize(doc, meta);
 		this.#store.write({ kind: "run", run: id }, text);
-		const state = this.#newDocState({ kind: "run", run: id }, doc, meta);
+		const state = this.#newDocState({ kind: "run", run: id }, doc, meta, []);
 		this.#docs.set(id, state);
-		this.#logs.set(id, { entries: [] });
-		this.#append(id, "coordinator", { type: "run_started", name });
+		this.#runOrder.push(id);
+		this.#append(state, "coordinator", { type: "run_started", name });
 		this.#scheduleReminder(id);
 		void this.#recomputeChecks(id);
 		this.#emit(null);
@@ -1347,15 +1470,16 @@ export class Core implements CoreApi, K1Handler {
 	}
 
 	#finishRun(run: RunId): Outcome<never> | null {
+		if (this.#finished.has(run)) return fail("RunFinished", tr("Run has finished", "Run 已结束"));
 		const doc = this.#docs.get(run);
 		if (!doc?.run) return fail("UnknownRun", tr(`Run ${run} does not exist`, `Run ${run} 不存在`));
-		if (doc.run.status === "finished") return fail("RunFinished", tr("Run has finished", "Run 已结束"));
 		for (const launch of this.#launches.values()) if (launch.record.run === run && launch.record.closed === null) this.#closeLaunch(launch, "run_finished", "service");
-		for (const block of doc.locks.keys()) doc.locks.set(block, { kind: "none" });
-		doc.run = { ...doc.run, status: "finished", finishedAt: this.#now(), updateDue: null };
+		const meta: RunMeta = { ...doc.run, status: "finished", finishedAt: this.#now(), updateDue: null };
+		doc.run = meta;
 		this.#writeRunNow(doc);
 		this.#scheduleReminder(run);
-		this.#append(run, "coordinator", { type: "run_finished" });
+		this.#append(doc, "coordinator", { type: "run_finished" });
+		this.#evict(doc, meta);
 		this.#emit(null);
 		return null;
 	}
@@ -1379,15 +1503,16 @@ export class Core implements CoreApi, K1Handler {
 		if (next !== null && (kind !== "update" || doc.run === null)) return fail("BadValue", tr("next is only valid for a Run update", "next 只用于 Run 的 update"));
 		if (block !== null && !this.#block(doc, block)) return fail("UnknownBlock", tr(`Block ${block} does not exist`, `块 ${block} 不存在`));
 		if (launch !== null) {
-			const owner = this.#launches.get(launch);
-			if (!owner) return fail("UnknownLaunch", tr(`Launch ${launch} does not exist`, `Launch ${launch} 不存在`));
-			if (keyOfRun(owner.record.run) !== key) return fail("BadValue", tr("Launch does not belong to this document", "Launch 不属于这个文档"));
+			const live = this.#launches.get(launch);
+			const owner = live ? keyOfRun(live.record.run) : this.#finishedLaunches.get(launch);
+			if (owner === undefined) return fail("UnknownLaunch", tr(`Launch ${launch} does not exist`, `Launch ${launch} 不存在`));
+			if (owner !== key) return fail("BadValue", tr("Launch does not belong to this document", "Launch 不属于这个文档"));
 		}
 		if (kind === "update" && doc.run?.status === "running") {
 			const seconds = next ?? doc.run.updateEvery;
 			if (seconds !== null) this.#setDue(doc, this.#now() + seconds * 1000);
 		}
-		const entry = this.#append(key, origin, {
+		const entry = this.#append(doc, origin, {
 			type: "post",
 			kind,
 			text,
@@ -1400,17 +1525,19 @@ export class Core implements CoreApi, K1Handler {
 			this.#invalidateInspections(doc, blocks => this.#refs.resultTargets(blocks, this.#contents(doc)).includes(block));
 			void this.#recomputeChecks(key);
 		}
+		const finished = doc.run === null ? undefined : this.#finished.get(doc.run.id);
+		if (finished && kind === "retrospective") finished.retrospective = true;
 		this.#emit(doc.ref);
 		return ok({ seq: entry.seq });
 	}
 
 	#snooze(run: RunId, after: number): Outcome<unknown> {
 		const doc = this.#docs.get(run);
-		if (!doc?.run) return fail("UnknownRun", tr(`Run ${run} does not exist`, `Run ${run} 不存在`));
-		if (doc.run.updateDue === null) return fail("BadValue", tr("There is no update due", "没有待到期的状态更新"));
+		// A finished Run has no update due.
+		if (!doc?.run || doc.run.updateDue === null) return this.#finished.has(run) || doc?.run ? fail("BadValue", tr("There is no update due", "没有待到期的状态更新")) : fail("UnknownRun", tr(`Run ${run} does not exist`, `Run ${run} 不存在`));
 		const due = this.#now() + after * 1000;
 		this.#setDue(doc, due);
-		this.#append(run, "coordinator", { type: "update_snoozed", due });
+		this.#append(doc, "coordinator", { type: "update_snoozed", due });
 		this.#emit(doc.ref);
 		return ok({ due });
 	}
@@ -1418,9 +1545,10 @@ export class Core implements CoreApi, K1Handler {
 	// ============================================================ CoreApi (human, K4)
 
 	view(ref: DocRef): DocView {
-		const doc = this.#doc(ref);
-		if (!doc) return { ref, title: "", run: null, blocks: [], errors: [tr("The document does not exist", "文档不存在")] };
-		const entries = this.#logs.get(keyOf(ref))?.entries ?? [];
+		const found = this.#docOf(ref.kind === "template" ? undefined : ref.run);
+		if (!found.ok) return { ref, title: "", run: null, blocks: [], errors: [tr("The document does not exist", "文档不存在")] };
+		const doc = found.result;
+		const entries = doc.log.entries;
 		// A launch request stays pending until a Launch is created from that block.
 		const pending = new Set<string>();
 		for (const entry of entries) {
@@ -1439,21 +1567,24 @@ export class Core implements CoreApi, K1Handler {
 
 	runs(): RunSummary[] {
 		const now = this.#now();
-		return [...this.#docs.values()].flatMap(doc => {
-			if (!doc.run) return [];
-			const entries = this.#logs.get(doc.run.id)?.entries ?? [];
+		return this.#runOrder.flatMap(id => {
+			const doc = this.#docs.get(id);
+			const finished = this.#finished.get(id);
+			const summary = doc?.run ? { meta: doc.run, ...progressCounts(doc.blocks), retrospective: doc.log.entries.some(isRetrospective) } : finished;
+			if (!summary) return [];
+			const meta = summary.meta;
 			return [
 				{
-					id: doc.run.id,
-					name: doc.run.name,
-					status: doc.run.status,
-					started_at: doc.run.startedAt,
-					finished_at: doc.run.finishedAt,
-					done: doc.blocks.filter(block => block.progress.kind === "tracked" && block.progress.status === "done").length,
-					total: doc.blocks.filter(block => block.progress.kind === "tracked").length,
-					update_due: doc.run.updateDue,
-					update_overdue: doc.run.updateDue !== null && doc.run.updateDue <= now,
-					retrospective: entries.some(entry => entry.data.type === "post" && entry.data.kind === "retrospective"),
+					id: meta.id,
+					name: meta.name,
+					status: meta.status,
+					started_at: meta.startedAt,
+					finished_at: meta.finishedAt,
+					done: summary.done,
+					total: summary.total,
+					update_due: meta.updateDue,
+					update_overdue: meta.updateDue !== null && meta.updateDue <= now,
+					retrospective: summary.retrospective,
 				},
 			];
 		});
@@ -1519,10 +1650,17 @@ export class Core implements CoreApi, K1Handler {
 		if (JSON.stringify(previous) !== JSON.stringify(status)) void this.#recomputeChecks(keyOf(ref));
 	}
 
-	#humanTarget(ref: DocRef, id: BlockId): { doc: DocState; block: Block } | string {
+	/** The document a person changes, or why they cannot: it does not exist, or its Run has finished. */
+	#humanDoc(ref: DocRef): DocState | string {
 		const doc = this.#doc(ref);
-		if (!doc) return tr("The document does not exist", "文档不存在");
-		if (this.#isFinished(doc)) return tr("Run has finished", "Run 已结束");
+		const finished = doc ? this.#isFinished(doc) : ref.kind === "run" && this.#finished.has(ref.run);
+		if (finished) return tr("Run has finished", "Run 已结束");
+		return doc ?? tr("The document does not exist", "文档不存在");
+	}
+
+	#humanTarget(ref: DocRef, id: BlockId): { doc: DocState; block: Block } | string {
+		const doc = this.#humanDoc(ref);
+		if (typeof doc === "string") return doc;
 		const block = this.#block(doc, id);
 		return block ? { doc, block } : tr(`Block ${id} does not exist`, `块 ${id} 不存在`);
 	}
@@ -1535,7 +1673,7 @@ export class Core implements CoreApi, K1Handler {
 		const lock = doc.locks.get(id);
 		if (lock?.kind !== "coordinator") return;
 		doc.locks.set(id, { kind: "none" });
-		this.#append(keyOf(doc.ref), "human", { type: "interrupted", block: id, request: lock.request });
+		this.#append(doc, "human", { type: "interrupted", block: id, request: lock.request });
 		this.#conn?.conn.send({ event: "interrupted", data: { ...runField(doc), block: id, request: lock.request } });
 	}
 
@@ -1559,9 +1697,8 @@ export class Core implements CoreApi, K1Handler {
 	}
 
 	setTitle(ref: DocRef, expected: string, text: string): string | null {
-		const doc = this.#doc(ref);
-		if (!doc) return tr("The document does not exist", "文档不存在");
-		if (this.#isFinished(doc)) return tr("Run has finished", "Run 已结束");
+		const doc = this.#humanDoc(ref);
+		if (typeof doc === "string") return doc;
 		if (doc.title !== expected) return tr("The title changed while you were editing; edit the latest title again", "标题在你编辑时已被修改，请在最新内容上重新编辑");
 		if (doc.title === text) return null;
 		doc.title = text;
@@ -1626,9 +1763,8 @@ export class Core implements CoreApi, K1Handler {
 	}
 
 	requestLaunch(ref: DocRef, blocks: readonly BlockId[]): string | null {
-		const doc = this.#doc(ref);
-		if (!doc) return tr("The document does not exist", "文档不存在");
-		if (this.#isFinished(doc)) return tr("Run has finished", "Run 已结束");
+		const doc = this.#humanDoc(ref);
+		if (typeof doc === "string") return doc;
 		if (blocks.length === 0) return tr("No blocks are selected", "没有选中的块");
 		const missing = blocks.filter(id => !this.#block(doc, id));
 		if (missing.length > 0) return tr(`Block${missing.length === 1 ? "" : "s"} ${missing.join(", ")} not found`, `块 ${missing.join(", ")} 不存在`);

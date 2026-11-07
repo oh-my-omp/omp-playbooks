@@ -9,6 +9,7 @@ import { checks } from "../src/service/checks";
 import { Core, type PaneControl } from "../src/service/core";
 import { references } from "../src/service/references";
 import { createStore } from "../src/service/store";
+import { tr } from "../src/i18n";
 
 const BASE_TIME = Date.parse("2026-10-11T00:00:00.000Z");
 const template: PlaybookDoc = {
@@ -92,7 +93,7 @@ function fixture(doc: PlaybookDoc = template) {
 		expectOk(await request({ op: "hello", args: { session } }, target));
 	}
 	function persisted(run: RunId = "r1") {
-		const parsed = store.readRuns().get(run);
+		const parsed = store.readRun(run);
 		if (!parsed || !parsed.ok || !parsed.run) throw new Error(`Missing persisted Run ${run}`);
 		return { doc: parsed.doc, run: parsed.run };
 	}
@@ -295,5 +296,83 @@ describe("Run persistence, timeline and summaries (runs.md §§3,5–7)", () => 
 		expect(expectOk(await f.request({ op: "runs", args: {} }))).toEqual({ runs: summaries });
 		expectOk(await f.request({ op: "post", args: { run: "r2", kind: "retrospective", text: "Complete review" } }));
 		expect(f.core.runs()[1]).toEqual({ ...summaries[1]!, retrospective: true });
+	});
+});
+
+describe("Finished Runs leave memory and are read back per request (#26 §2)", () => {
+	async function finishedRun() {
+		const f = fixture(designTemplate);
+		await f.connect();
+		expectOk(await f.request({ op: "start_run", args: { name: "Evicted" } }));
+		expectOk(await f.request({ op: "start_run", args: { name: "Still running" } }));
+		const launched = expectOk(await f.request({ op: "launch", args: { run: "r1", blocks: ["b2"] } }));
+		expectOk(await f.request({ op: "bind", args: { launch: "l1", agent: "task" } }));
+		expectOk(await f.request({ op: "post", args: { run: "r1", kind: "update", text: "Halfway" } }));
+		expectOk(await f.request({ op: "lock", args: { run: "r1", block: "b1" } }));
+		expectOk(await f.request({ op: "write", args: { run: "r1", block: "b1", text: "Edited in the Run" } }));
+		f.setTime(BASE_TIME + 5_000);
+		expectOk(await f.request({ op: "finish_run", args: { run: "r1" } }));
+		return { f, launched };
+	}
+
+	test("timeline, read, revisions, launch_info and runs answer from disk exactly as a fresh load does", async () => {
+		const { f } = await finishedRun();
+		const questions: Request[] = [
+			{ op: "timeline", args: { run: "r1" } },
+			{ op: "timeline", args: { run: "r1", after: 3 } },
+			{ op: "read", args: { run: "r1" } },
+			{ op: "read", args: { run: "r1", block: "b1" } },
+			{ op: "revisions", args: { run: "r1" } },
+			{ op: "launch_info", args: { launch: "l1" } },
+			{ op: "runs", args: {} },
+		];
+		const answers = await Promise.all(questions.map(question => f.request(question)));
+		const fresh = f.newCore();
+		await f.connect(fresh, "session-two");
+		expect(await Promise.all(questions.map(question => f.request(question, fresh)))).toEqual(answers);
+		// The answers are the files: the timeline is the log, the document is the Run file.
+		expect(expectOk(answers[0]!)).toEqual({ entries: f.store.readLog(runRef).entries });
+		expect(expectOk(answers[2]!)).toMatchObject({ title: designTemplate.title, run: f.persisted().run });
+		expect(f.persisted().doc.blocks[0]!.content).toEqual({ kind: "task", body: "Edited in the Run" });
+		expect(expectOk(answers[5]!)).toMatchObject({ id: "l1", run: "r1", agents: ["task"], closed: { at: BASE_TIME + 5_000, by: "run_finished" } });
+		const persistedBlocks: readonly Block[] = f.persisted().doc.blocks;
+		expect(f.core.view(runRef).blocks.map(item => item.block)).toEqual([...persistedBlocks]);
+		expect(f.core.runs().map(run => [run.id, run.status])).toEqual([["r1", "finished"], ["r2", "running"]]);
+	});
+
+	test("changes to a finished Run are refused with the same errors, without reading it back", async () => {
+		const { f } = await finishedRun();
+		const reads: string[] = [];
+		const readRun = f.store.readRun.bind(f.store);
+		f.store.readRun = run => { reads.push(run); return readRun(run); };
+		expectError(await f.request({ op: "lock", args: { run: "r1", block: "b1" } }), "RunFinished");
+		expectError(await f.request({ op: "write", args: { run: "r1", block: "b1", text: "x" } }), "RunFinished");
+		expectError(await f.request({ op: "insert", args: { run: "r1", title: "x", content: { kind: "task", body: "x" } } }), "RunFinished");
+		expectError(await f.request({ op: "launch", args: { run: "r1", blocks: ["b2"] } }), "RunFinished");
+		expectError(await f.request({ op: "finish_run", args: { run: "r1" } }), "RunFinished");
+		expectError(await f.request({ op: "snooze", args: { run: "r1", after: 5 } }), "BadValue");
+		expect(f.core.setStatus(runRef, "b1", "done")).toBe(tr("Run has finished", "Run 已结束"));
+		expect(f.core.setTitle(runRef, designTemplate.title, "x")).toBe(tr("Run has finished", "Run 已结束"));
+		expect(f.core.requestLaunch(runRef, ["b2"])).toBe(tr("Run has finished", "Run 已结束"));
+		expect(reads).toEqual([]);
+		expectError(await f.request({ op: "bind", args: { launch: "l1", agent: "late" } }), "BadLaunch");
+		expectError(await f.request({ op: "rebase", args: { launch: "l1" } }), "BadLaunch");
+		expectOk(await f.request({ op: "close", args: { launch: "l1" } }));
+		expectError(await f.request({ op: "finish_run", args: { run: "r9" } }), "UnknownRun");
+		expectError(await f.request({ op: "snooze", args: { run: "r9", after: 5 } }), "UnknownRun");
+	});
+
+	test("a retrospective and an inspection report still land in the finished Run's log", async () => {
+		const { f } = await finishedRun();
+		expectOk(await f.request({ op: "post", args: { run: "r1", kind: "retrospective", text: "Lessons", launch: "l1" } }));
+		expect(f.core.runs()[0]!.retrospective).toBe(true);
+		const inspected = expectOk(await f.request({ op: "inspect", args: { run: "r1", blocks: ["b2"] } }));
+		expect(inspected).toMatchObject({ blocks: ["b2"], findings: { b2: expect.any(Object) } });
+		if (typeof inspected !== "object" || inspected === null || !("version" in inspected) || typeof inspected.version !== "string") throw new Error("inspect returned no version");
+		const version = inspected.version;
+		expectOk(await f.request({ op: "report", args: { run: "r1", blocks: ["b2"], version, result: { kind: "judge_unavailable" } } }));
+		expect(f.store.readLog(runRef).entries.slice(-2).map(entry => entry.data.type)).toEqual(["post", "check_reported"]);
+		const fresh = f.newCore();
+		expect(fresh.runs()[0]!.retrospective).toBe(true);
 	});
 });
