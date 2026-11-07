@@ -6,6 +6,8 @@
 //   bun test/bench/memory.ts compare --base <repo root> --fixture <dir> [--poll 60]
 //   bun test/bench/memory.ts diff --base <repo root> --fixture <dir>
 //   bun test/bench/memory.ts compare-transport --base <repo root> --fixture <dir>
+//   bun test/bench/memory.ts pages --src <repo root> --fixture <dir> [--limit 200]
+//   bun test/bench/memory.ts compare-derived --base <repo root> --fixtures <dir>,<dir>
 //
 // `measure` copies the fixture, starts `Core` + `serveK1` from the given checkout and reports one JSON line;
 // `compare` runs `measure` for the base checkout and for this checkout in separate processes on the same
@@ -147,6 +149,8 @@ async function writeFixture(directory: string, args: readonly string[]): Promise
 
 class LineClient {
 	readonly #pending = new Map<string, (frame: Record<string, unknown>) => void>();
+	/** Event frames, in arrival order. */
+	readonly events: Record<string, unknown>[] = [];
 	readonly #socket;
 	#buffer = "";
 	#next = 0;
@@ -161,6 +165,7 @@ class LineClient {
 				this.#buffer = this.#buffer.slice(newline + 1);
 				const id = frame.id;
 				if (typeof id === "string") this.#pending.get(id)?.(frame);
+				else this.events.push(frame);
 			}
 		});
 	}
@@ -245,7 +250,7 @@ async function startService(src: string, fixture: string, counts: Map<string, nu
 		server.close();
 		rmSync(directory, { recursive: true, force: true });
 	};
-	return { directory, store, client, rssStart, rssAfterLoad, loadMs, stop };
+	return { directory, store, core, client, rssStart, rssAfterLoad, loadMs, stop };
 }
 
 async function measure(args: readonly string[]): Promise<void> {
@@ -407,6 +412,132 @@ async function compareTransport(args: readonly string[]): Promise<void> {
 	}
 }
 
+/**
+ * Timeline paging over the socket of the checkout at `src`: the template, a finished Run read back from disk,
+ * and a running Run finished during the check. Each is read whole, then page by page (`limit`, continued with
+ * `next_after`); the pages must join to the whole read with no overlap. Exits non-zero on any mismatch.
+ */
+async function pages(args: readonly string[]): Promise<void> {
+	const src = resolve(required(args, "src"));
+	const fixture = resolve(required(args, "fixture"));
+	const limit = numberOption(args, "limit", 200);
+	const { client, stop } = await startService(src, fixture, new Map(), { yaml: 0 });
+	const entriesOf = (reply: Record<string, unknown>): { seqs: number[]; text: string; next: unknown } => {
+		const result = reply.ok === true && typeof reply.result === "object" && reply.result !== null ? reply.result : null;
+		const entries = result !== null && "entries" in result && Array.isArray(result.entries) ? result.entries : [];
+		const seqs = entries.flatMap((entry: unknown) => typeof entry === "object" && entry !== null && "seq" in entry && typeof entry.seq === "number" ? [entry.seq] : []);
+		return { seqs, text: JSON.stringify(entries), next: result !== null && "next_after" in result ? result.next_after : undefined };
+	};
+	const report: Record<string, unknown>[] = [];
+	let failed = false;
+	const check = async (label: string, scope: Record<string, unknown>): Promise<void> => {
+		const whole = entriesOf(await client.request("timeline", scope));
+		const joined: string[] = [];
+		const seen: number[] = [];
+		let after = 0;
+		let count = 0;
+		for (;;) {
+			const page = entriesOf(await client.request("timeline", { ...scope, after, limit }));
+			count++;
+			seen.push(...page.seqs);
+			if (page.seqs.length > 0) joined.push(page.text.slice(1, -1));
+			if (page.next === undefined) break;
+			if (page.next !== page.seqs.at(-1)) { failed = true; break; }
+			after = Number(page.next);
+		}
+		const same = `[${joined.join(",")}]` === whole.text;
+		const increasing = seen.every((seq, index) => index === 0 || seq > seen[index - 1]!);
+		if (!same || !increasing) failed = true;
+		report.push({ document: label, whole: whole.seqs.length, pages: count, paged: seen.length, joinedEqualsWhole: same, noOverlap: increasing });
+	};
+	await check("template", {});
+	await check("r1 (finished, read back from disk)", { run: "r1" });
+	await client.request("finish_run", { run: "r201" });
+	await check("r201 (finished during this check)", { run: "r201" });
+	stop();
+	for (const row of report) console.log(JSON.stringify(row));
+	console.log(failed ? "paging mismatch" : "paging ok");
+	process.exit(failed ? 1 : 0);
+}
+
+// ---------------------------------------------------------------- derived reads (#26 §3)
+
+/**
+ * Per-call cost of the reads derived from the timeline: `view()`, `runs()`, and a human edit (which
+ * recomputes checks and compiles every block against the result table). Same fixture shape with a
+ * different template timeline length shows whether the cost grows with it.
+ */
+async function derived(args: readonly string[]): Promise<void> {
+	const src = resolve(required(args, "src"));
+	const fixture = resolve(required(args, "fixture"));
+	const rounds = numberOption(args, "rounds", 200);
+	// The checkout under test is chosen at run time (base or HEAD), so these imports cannot be static.
+	const { Core }: typeof CoreModule = await import(join(src, "src/service/core.ts"));
+	const { createStore }: typeof StoreModule = await import(join(src, "src/service/store.ts"));
+	const { references }: typeof ReferencesModule = await import(join(src, "src/service/references.ts"));
+	const { checks }: typeof ChecksModule = await import(join(src, "src/service/checks.ts"));
+	const directory = mkdtempSync("/tmp/opb-bench-");
+	cpSync(fixture, directory, { recursive: true });
+	const store = createStore(join(directory, "book.yaml"));
+	const core = new Core({
+		store, references, checks,
+		fetcher: { fetch: async () => ({ ok: true, at: 1, value: { kind: "file", text: "bench" } }) },
+		panes: { ownPane: () => null, focusPane: async () => ({ ok: true }) },
+	});
+	const loadError = core.load();
+	if (loadError !== null) throw new Error(loadError);
+	await sleep(200);
+	const template: DocRef = { kind: "template" };
+	const entries = store.readLog(template).entries.length;
+	const measureCalls = (call: () => void): { msPerCall: number; heapKBPerCall: number } => {
+		call();
+		Bun.gc(true);
+		const heap = process.memoryUsage().heapUsed;
+		const started = performance.now();
+		for (let i = 0; i < rounds; i++) call();
+		const ms = performance.now() - started;
+		return { msPerCall: Math.round(ms / rounds * 1000) / 1000, heapKBPerCall: Math.round((process.memoryUsage().heapUsed - heap) / rounds / 1024 * 10) / 10 };
+	};
+	const view = measureCalls(() => { core.view(template); });
+	const runs = measureCalls(() => { core.runs(); });
+	// One human edit per round; its check recompute runs after the fetch wait, so each round awaits it.
+	let text = core.view(template).blocks[0]!.block;
+	const editRounds = Math.max(1, Math.floor(rounds / 10));
+	Bun.gc(true);
+	const heap = process.memoryUsage().heapUsed;
+	const times: number[] = [];
+	for (let i = 0; i < editRounds; i++) {
+		const body = text.content.kind === "task" ? text.content.body : "";
+		const started = performance.now();
+		const refused = core.edit(template, text.id, "body", body, `${body.slice(0, 200)} edit ${i}`);
+		if (refused !== null) throw new Error(refused);
+		await sleep(0);
+		times.push(performance.now() - started);
+		text = core.view(template).blocks[0]!.block;
+	}
+	// The median: an edit round now and then also pays for a timer (write-back, judgment) firing inside it.
+	times.sort((a, b) => a - b);
+	const edit = { msPerCall: Math.round(times[Math.floor(times.length / 2)]! * 1000) / 1000, heapKBPerCall: Math.round((process.memoryUsage().heapUsed - heap) / editRounds / 1024 * 10) / 10 };
+	core.stop();
+	rmSync(directory, { recursive: true, force: true });
+	console.log(JSON.stringify({ src, templateEntries: entries, view, runs, edit }));
+	process.exit(0);
+}
+
+async function compareDerived(args: readonly string[]): Promise<void> {
+	const base = resolve(required(args, "base"));
+	const fixtures = required(args, "fixtures").split(",").map(path => resolve(path));
+	console.log("| checkout | template entries | view ms/call | view heap KB/call | runs ms/call | runs heap KB/call | edit ms (median) | edit heap KB/call |\n|---|---|---|---|---|---|---|---|");
+	for (const fixture of fixtures) {
+		for (const [label, src] of [["base", base], ["head", HERE]] as const) {
+			const child = Bun.spawnSync(["bun", join(HERE, "test/bench/memory.ts"), "derived", "--src", src, "--fixture", fixture], { stdout: "pipe", stderr: "inherit" });
+			if (child.exitCode !== 0) throw new Error(`${label} derived failed with ${child.exitCode}`);
+			const r = JSON.parse(child.stdout.toString().trim().split("\n").at(-1)!);
+			console.log(`| ${label} | ${r.templateEntries} | ${r.view.msPerCall} | ${r.view.heapKBPerCall} | ${r.runs.msPerCall} | ${r.runs.heapKBPerCall} | ${r.edit.msPerCall} | ${r.edit.heapKBPerCall} |`);
+		}
+	}
+}
+
 // ---------------------------------------------------------------- replay (G3: same answers, same files)
 
 /**
@@ -417,7 +548,7 @@ async function compareTransport(args: readonly string[]): Promise<void> {
 async function replay(args: readonly string[]): Promise<void> {
 	const src = resolve(required(args, "src"));
 	const fixture = resolve(required(args, "fixture"));
-	const { directory, client, stop } = await startService(src, fixture, new Map(), { yaml: 0 }, () => 1_800_000_000_000);
+	const { directory, core, client, stop } = await startService(src, fixture, new Map(), { yaml: 0 }, () => 1_800_000_000_000);
 	const script: [string, Record<string, unknown>][] = [
 		["runs", {}],
 		["timeline", { run: "r1" }], ["timeline", { run: "r1", after: 300 }], ["read", { run: "r1" }], ["read", { run: "r1", block: "b7" }], ["revisions", { run: "r1" }],
@@ -442,6 +573,16 @@ async function replay(args: readonly string[]): Promise<void> {
 	const version = typeof inspected === "object" && inspected !== null && "result" in inspected && typeof inspected.result === "object" && inspected.result !== null && "version" in inspected.result ? inspected.result.version : null;
 	const reported = await client.request("report", { run: "r5", blocks: ["b2"], version, result: { kind: "judge_unavailable" } });
 	answers.push({ op: "report", ok: reported.ok, ...(reported.ok === true ? { result: reported.result } : { error: reported.error }) });
+	// What the pane draws, and a Run's update reminder firing with its last update.
+	answers.push({ op: "view(template)", result: core.view({ kind: "template" }) });
+	answers.push({ op: "view(r202)", result: core.view({ kind: "run", run: "r202" as RunId }) });
+	answers.push({ op: "view(r1)", result: core.view({ kind: "run", run: "r1" as RunId }) });
+	const started = await client.request("start_run", { name: "Reminded", update_every: 1 });
+	const run = typeof started.result === "object" && started.result !== null && "run" in started.result ? started.result.run : null;
+	await client.request("post", { run, kind: "update", text: "Before the reminder" });
+	await sleep(1300);
+	answers.push({ op: "events", result: client.events });
+	answers.push({ op: "runs()", result: core.runs() });
 	const digest = (text: string): string => new Bun.CryptoHasher("sha256").update(text).digest("hex").slice(0, 16);
 	const files: Record<string, string> = {};
 	for (const name of ["book.yaml", "book.runs/r1.yaml", "book.runs/r3.yaml", "book.runs/r5.yaml", "book.runs/r201.yaml"]) files[name] = digest(readFileSync(join(directory, name), "utf8"));
@@ -490,5 +631,8 @@ switch (command) {
 	case "diff": await diffReplay(rest); break;
 	case "transport": await transport(rest); break;
 	case "compare-transport": await compareTransport(rest); break;
-	default: throw new Error("usage: memory.ts fixture <dir> | measure --src <root> --fixture <dir> | compare --base <root> --fixture <dir> | replay --src <root> --fixture <dir> | diff --base <root> --fixture <dir>");
+	case "derived": await derived(rest); break;
+	case "pages": await pages(rest); break;
+	case "compare-derived": await compareDerived(rest); break;
+	default: throw new Error("usage: memory.ts fixture <dir> | measure --src <root> --fixture <dir> | compare --base <root> --fixture <dir> | replay --src <root> --fixture <dir> | diff --base <root> --fixture <dir> | compare-transport --base <root> --fixture <dir> | compare-derived --base <root> --fixtures <dir>,<dir> | pages --src <root> --fixture <dir>");
 }

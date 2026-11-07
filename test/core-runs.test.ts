@@ -1,6 +1,6 @@
 import { fieldText } from "../src/domain/model";
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Block, BlockContent, DocRef, FetchOutcome, PlaybookDoc, Revision, RunId, RunMeta, TimelineEntry } from "../src/domain/model";
 import type { Connection } from "../src/domain/ports";
@@ -374,5 +374,19 @@ describe("Finished Runs leave memory and are read back per request (#26 §2)", (
 		expect(f.store.readLog(runRef).entries.slice(-2).map(entry => entry.data.type)).toEqual(["post", "check_reported"]);
 		const fresh = f.newCore();
 		expect(fresh.runs()[0]!.retrospective).toBe(true);
+	});
+});
+
+describe("document-level errors keep the latest window (#26 §8)", () => {
+	test("more than 200 unreadable Run files leave the latest 200 messages, oldest dropped", () => {
+		const f = fixture();
+		const runs = join(f.store.baseDir, "operations.runs");
+		mkdirSync(runs, { recursive: true });
+		for (let n = 1; n <= 205; n++) writeFileSync(join(runs, `r${n}.yaml`), "invalid: true\n");
+		const all = f.store.runIds();
+		const errors = f.newCore().errors();
+		expect(errors).toHaveLength(200);
+		expect(errors[0]).toContain(`Run ${all[5]}`);
+		expect(errors.at(-1)).toContain(`Run ${all.at(-1)}`);
 	});
 });

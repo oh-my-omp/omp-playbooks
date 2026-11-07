@@ -79,6 +79,8 @@ interface DocState {
 	blocks: Block[];
 	run: RunMeta | null;
 	locks: Map<BlockId, BlockLock>;
+	/** Each block's content, kept current by every edit (#26 §3): the compiler's `blocks` input. */
+	readonly contents: Map<BlockId, BlockContent>;
 	/** Parsed form of the file as last written or read, and the file's mtime then (README §S2). */
 	lastDoc: PlaybookDoc;
 	lastMtime: number;
@@ -94,9 +96,44 @@ interface DocState {
 	readonly log: DocLog;
 }
 
-/** A document's execution log: the template's and every Run's. */
+/**
+ * A document's execution log (the template's and every Run's) and what is derived from it (#26 §3): built
+ * once when the log is read, then kept current by every append, so no reader scans `entries`. The log on
+ * disk stays the authority; this is rebuilt from it whenever the document is read back.
+ */
 interface DocLog {
-	entries: TimelineEntry[];
+	readonly entries: TimelineEntry[];
+	/** Block result table (references.md §4): each block's latest associated result post. */
+	readonly results: Map<BlockId, BlockResult>;
+	/** Blocks a launch request was sent for and no Launch has been created from since. */
+	readonly pending: Set<string>;
+	retrospective: boolean;
+	/** The `due` of every `update_due` entry: a reminder fires once per due. */
+	readonly fired: Set<number>;
+	/** When the latest `update` post was written. */
+	lastUpdateAt: number | null;
+}
+
+function noteEntry(log: DocLog, entry: TimelineEntry): void {
+	const data = entry.data;
+	if (data.type === "post") {
+		if (data.kind === "result" && data.block !== undefined) log.results.set(data.block, { text: data.text, at: entry.at, seq: entry.seq, origin: entry.origin, launch: data.launch ?? null });
+		if (data.kind === "retrospective") log.retrospective = true;
+		if (data.kind === "update") log.lastUpdateAt = entry.at;
+	} else if (data.type === "event_sent" && data.event === "launch_requested") {
+		// A launch request stays pending until a Launch is created from that block.
+		for (const block of requestedBlocks(data.data)) log.pending.add(block);
+	} else if (data.type === "launch_created") {
+		for (const block of data.blocks) log.pending.delete(block);
+	} else if (data.type === "update_due") {
+		log.fired.add(data.due);
+	}
+}
+
+function newLog(entries: TimelineEntry[]): DocLog {
+	const log: DocLog = { entries, results: new Map(), pending: new Set(), retrospective: false, fired: new Set(), lastUpdateAt: null };
+	for (const entry of entries) noteEntry(log, entry);
+	return log;
 }
 
 /**
@@ -132,6 +169,8 @@ interface ConnState {
 const JUDGE_DELAY_MS = 2_000;
 const WRITE_DELAY_MS = 1_000;
 const DISK_POLL_MS = 1_000;
+/** How many document-level messages `errors()` keeps. */
+const ERRORS_KEPT = 200;
 /** How long a SUBAGENT dropdown waits for the coordinator's list. */
 const AGENTS_WAIT_MS = 5_000;
 
@@ -250,6 +289,7 @@ export class Core implements CoreApi, K1Handler {
 	readonly #inflight = new Map<TargetKey, Promise<FetchOutcome>>();
 	readonly #listeners = new Set<(ref: DocRef | null) => void>();
 	readonly #reminders = new Map<RunId, Timer>();
+	/** The latest `ERRORS_KEPT` document-level messages; the oldest is dropped first (#26 §8). */
 	readonly #errors: string[] = [];
 
 	#maxBlock = 0;
@@ -283,7 +323,7 @@ export class Core implements CoreApi, K1Handler {
 		for (const run of this.#store.runIds()) {
 			const parsed = this.#store.readRun(run);
 			if (!parsed.ok || parsed.run === null) {
-				this.#errors.push(tr(`Run ${run} file could not be parsed: ${parsed.ok ? "missing run mapping" : parsed.error}`, `Run ${run} 的文件不能解析：${parsed.ok ? "缺少 run 映射" : parsed.error}`));
+				this.#noteError(tr(`Run ${run} file could not be parsed: ${parsed.ok ? "missing run mapping" : parsed.error}`, `Run ${run} 的文件不能解析：${parsed.ok ? "缺少 run 映射" : parsed.error}`));
 				continue;
 			}
 			this.#maxRun = Math.max(this.#maxRun, idNumber(run));
@@ -318,6 +358,7 @@ export class Core implements CoreApi, K1Handler {
 			blocks: [...doc.blocks],
 			run,
 			locks: new Map(doc.blocks.map(block => [block.id, { kind: "none" }])),
+			contents: new Map(doc.blocks.map(block => [block.id, block.content])),
 			lastDoc: doc,
 			lastMtime: this.#store.mtime(ref) ?? 0,
 			writeTimer: undefined,
@@ -326,7 +367,7 @@ export class Core implements CoreApi, K1Handler {
 			render: new Map(),
 			inspections,
 			revisions: this.#store.readRevisions(ref),
-			log: { entries },
+			log: newLog(entries),
 		};
 	}
 
@@ -367,11 +408,10 @@ export class Core implements CoreApi, K1Handler {
 			this.#finishedLaunches.set(id, meta.id);
 		}
 		this.#docs.delete(meta.id);
-		this.#finished.set(meta.id, { meta, ...progressCounts(doc.blocks), retrospective: doc.log.entries.some(isRetrospective), inspections: doc.inspections });
+		this.#finished.set(meta.id, { meta, ...progressCounts(doc.blocks), retrospective: doc.log.retrospective, inspections: doc.inspections });
 		const referenced = new Set<TargetKey>();
 		for (const live of this.#docs.values()) {
-			const contents = this.#contents(live);
-			for (const target of this.#refs.externalTargets([...contents.keys()], contents)) referenced.add(this.#refs.targetKey(target));
+			for (const target of this.#refs.externalTargets([...live.contents.keys()], live.contents)) referenced.add(this.#refs.targetKey(target));
 		}
 		for (const key of this.#fetches.keys()) if (!referenced.has(key)) this.#fetches.delete(key);
 	}
@@ -426,9 +466,6 @@ export class Core implements CoreApi, K1Handler {
 	#block(doc: DocState, id: BlockId): Block | null {
 		return doc.blocks.find(block => block.id === id) ?? null;
 	}
-	#contents(doc: DocState): Map<BlockId, BlockContent> {
-		return new Map(doc.blocks.map(block => [block.id, block.content]));
-	}
 	#isFinished(doc: DocState): boolean {
 		return doc.run !== null && doc.run.status === "finished";
 	}
@@ -442,20 +479,9 @@ export class Core implements CoreApi, K1Handler {
 		const entries = doc.log.entries;
 		const entry: TimelineEntry = { seq: (entries.at(-1)?.seq ?? 0) + 1, at: this.#now(), origin, data };
 		entries.push(entry);
+		noteEntry(doc.log, entry);
 		this.#store.appendEntry(doc.ref, entry);
 		return entry;
-	}
-
-	/** Block result table of a document (references.md §4). */
-	#results(doc: DocState): Map<BlockId, BlockResult> {
-		const table = new Map<BlockId, BlockResult>();
-		for (const entry of doc.log.entries) {
-			const data = entry.data;
-			if (data.type === "post" && data.kind === "result" && data.block !== undefined) {
-				table.set(data.block, { text: data.text, at: entry.at, seq: entry.seq, origin: entry.origin, launch: data.launch ?? null });
-			}
-		}
-		return table;
 	}
 
 	// ============================================================ fetching and compiling
@@ -471,7 +497,7 @@ export class Core implements CoreApi, K1Handler {
 			this.#inflight.delete(key);
 			if (replace) {
 				for (const doc of this.#docs.values()) {
-					this.#invalidateInspections(doc, blocks => this.#refs.externalTargets(blocks, this.#contents(doc)).some(other => this.#refs.targetKey(other) === key));
+					this.#invalidateInspections(doc, blocks => this.#refs.externalTargets(blocks, doc.contents).some(other => this.#refs.targetKey(other) === key));
 				}
 			}
 			return outcome;
@@ -483,16 +509,12 @@ export class Core implements CoreApi, K1Handler {
 
 	/** Fetch every external target the closure of `roots` references that is missing from the document table. */
 	async #ensureFetched(doc: DocState, roots: readonly BlockId[]): Promise<void> {
-		const targets = this.#refs.externalTargets(roots, this.#contents(doc));
+		const targets = this.#refs.externalTargets(roots, doc.contents);
 		await Promise.all(targets.filter(target => !this.#fetches.has(this.#refs.targetKey(target))).map(target => this.#fetchTarget(target, false)));
 	}
 
-	#input(doc: DocState, fetches: ReadonlyMap<TargetKey, FetchOutcome>, contents?: ReadonlyMap<BlockId, BlockContent>, results?: ReadonlyMap<BlockId, BlockResult>): CompileInput {
-		return {
-			blocks: contents ?? this.#contents(doc),
-			fetches,
-			results: results ?? this.#results(doc),
-		};
+	#input(doc: DocState, fetches: ReadonlyMap<TargetKey, FetchOutcome>): CompileInput {
+		return { blocks: doc.contents, fetches, results: doc.log.results };
 	}
 
 	/** Compile after fetching missing targets; the compile itself runs synchronously on current state. */
@@ -509,9 +531,10 @@ export class Core implements CoreApi, K1Handler {
 	 */
 	#applyEdit(doc: DocState, origin: EditOrigin, change: EditChange): number {
 		const seq = ++this.#editSeq;
-		const beforeContents = this.#contents(doc);
+		// The contents before a change of compiled text or existence: closures before and after are compared.
+		const changesContents = change.kind === "content" || change.kind === "insert" || change.kind === "delete" || (change.kind === "field" && change.field !== "title");
+		const beforeContents = changesContents ? new Map(doc.contents) : null;
 		let touched: BlockId | null = null;
-		let contentOrExistence = false;
 		// A coordinator's task edit is its own work and does not notify it back; a design is the input
 		// of the task blocks that reference it, so the coordinator's design edits reach their Launches.
 		let notifies = origin !== "coordinator";
@@ -521,8 +544,8 @@ export class Core implements CoreApi, K1Handler {
 				const next = withField(doc.blocks[index]!, change.field, change.text);
 				if (next === null) throw new Error(`block ${change.block} has no field ${change.field}`);
 				doc.blocks[index] = next;
+				doc.contents.set(change.block, next.content);
 				touched = change.block;
-				contentOrExistence = change.field !== "title";
 				if (change.field === "design") notifies = true;
 				this.#append(doc, origin, { type: "block_edited", block: change.block, field: change.field, text: change.text, edit: seq });
 				break;
@@ -530,8 +553,8 @@ export class Core implements CoreApi, K1Handler {
 			case "content": {
 				const index = doc.blocks.findIndex(block => block.id === change.block);
 				doc.blocks[index] = { ...doc.blocks[index]!, content: change.content, progress: change.progress };
+				doc.contents.set(change.block, change.content);
 				touched = change.block;
-				contentOrExistence = true;
 				this.#append(doc, origin, { type: "content_replaced", block: change.block, content: change.content });
 				this.#append(doc, origin, { type: "progress_changed", block: change.block, progress: change.progress });
 				break;
@@ -543,6 +566,7 @@ export class Core implements CoreApi, K1Handler {
 				if (current.content.kind !== "task") throw new Error(`block ${change.block} is not a task block`);
 				const content = withConfig(current.content, change.config);
 				doc.blocks[index] = { ...current, content };
+				doc.contents.set(change.block, content);
 				this.#append(doc, origin, { type: "content_replaced", block: change.block, content });
 				break;
 			}
@@ -556,18 +580,18 @@ export class Core implements CoreApi, K1Handler {
 			case "insert": {
 				const index = change.after === null ? doc.blocks.length : doc.blocks.findIndex(block => block.id === change.after) + 1;
 				doc.blocks.splice(index, 0, change.block);
+				doc.contents.set(change.block.id, change.block.content);
 				doc.locks.set(change.block.id, { kind: "none" });
 				touched = change.block.id;
-				contentOrExistence = true;
 				this.#append(doc, origin, { type: "block_added", block: change.block.id, title: change.block.title, content: change.block.content });
 				break;
 			}
 			case "delete": {
 				const index = doc.blocks.findIndex(block => block.id === change.block);
 				const [removed] = doc.blocks.splice(index, 1);
+				doc.contents.delete(change.block);
 				doc.locks.delete(change.block);
 				touched = change.block;
-				contentOrExistence = true;
 				if (removed) this.#append(doc, origin, { type: "block_deleted", block: removed.id, title: removed.title, content: removed.content });
 				break;
 			}
@@ -581,12 +605,11 @@ export class Core implements CoreApi, K1Handler {
 				break;
 			}
 		}
-		if (touched !== null && contentOrExistence) {
+		if (touched !== null && beforeContents !== null) {
 			const changed = touched;
-			const afterContents = this.#contents(doc);
-			this.#invalidateInspections(doc, blocks => this.#refs.closure(blocks, beforeContents).has(changed) || this.#refs.closure(blocks, afterContents).has(changed));
+			this.#invalidateInspections(doc, blocks => this.#refs.closure(blocks, beforeContents).has(changed) || this.#refs.closure(blocks, doc.contents).has(changed));
+			if (notifies) this.#markDirty(doc, changed, seq, beforeContents);
 		}
-		if (touched !== null && contentOrExistence && notifies) this.#markDirty(doc, touched, seq, beforeContents);
 		this.#scheduleWrite(doc);
 		this.#afterChange(doc);
 		return seq;
@@ -603,11 +626,10 @@ export class Core implements CoreApi, K1Handler {
 	/** launch-events.md §3: human and disk edits of body or existence enter `dirty`. */
 	#markDirty(doc: DocState, block: BlockId, seq: number, beforeContents: ReadonlyMap<BlockId, BlockContent>): void {
 		const key = keyOf(doc.ref);
-		const afterBodies = this.#contents(doc);
 		for (const launch of this.#launches.values()) {
 			if (keyOfRun(launch.record.run) !== key || launch.record.closed !== null) continue;
 			const inBefore = this.#refs.closure(launch.record.blocks, beforeContents).has(block);
-			const inAfter = this.#refs.closure(launch.record.blocks, afterBodies).has(block);
+			const inAfter = this.#refs.closure(launch.record.blocks, doc.contents).has(block);
 			if (!inBefore && !inAfter) continue;
 			const dirty = new Map(launch.record.dirty);
 			dirty.set(block, seq);
@@ -824,7 +846,7 @@ export class Core implements CoreApi, K1Handler {
 		for (;;) {
 			const table = new Map(launch.record.fetches);
 			const added: [TargetKey, FetchOutcome][] = [];
-			for (const target of this.#refs.externalTargets(launch.record.blocks, this.#contents(doc))) {
+			for (const target of this.#refs.externalTargets(launch.record.blocks, doc.contents)) {
 				const key = this.#refs.targetKey(target);
 				if (table.has(key)) continue;
 				const outcome = this.#fetches.get(key) ?? (await this.#fetchTarget(target, false));
@@ -882,8 +904,7 @@ export class Core implements CoreApi, K1Handler {
 		const meta = doc?.run;
 		if (!doc || !meta || meta.status !== "running" || meta.updateDue === null) return;
 		const due = meta.updateDue;
-		const fired = doc.log.entries.some(entry => entry.data.type === "update_due" && entry.data.due === due);
-		if (fired) return;
+		if (doc.log.fired.has(due)) return;
 		const wait = Math.max(0, due - this.#now());
 		if (startup && wait === 0) {
 			this.#fireReminder(run, due);
@@ -900,17 +921,8 @@ export class Core implements CoreApi, K1Handler {
 		const doc = this.#docs.get(run);
 		if (!doc?.run || doc.run.status !== "running" || doc.run.updateDue !== due) return;
 		this.#append(doc, "service", { type: "update_due", due });
-		this.#send({ event: "update_due", data: { run, due, last_update: this.#lastUpdateAt(doc) } });
+		this.#send({ event: "update_due", data: { run, due, last_update: doc.log.lastUpdateAt } });
 		this.#emit(doc.ref);
-	}
-
-	#lastUpdateAt(doc: DocState): number | null {
-		const entries = doc.log.entries;
-		for (let i = entries.length - 1; i >= 0; i--) {
-			const entry = entries[i]!;
-			if (entry.data.type === "post" && entry.data.kind === "update") return entry.at;
-		}
-		return null;
 	}
 
 	#setDue(doc: DocState, due: number | null): void {
@@ -954,7 +966,7 @@ export class Core implements CoreApi, K1Handler {
 	}
 
 	#version(doc: DocState, blocks: readonly BlockId[], input: CompileInput): string {
-		const contents = this.#contents(doc);
+		const contents = doc.contents;
 		const closure = new Map<BlockId, string | null>();
 		// A task contributes its body (as before design blocks existed); a design its kind and both parts.
 		for (const id of this.#refs.closure(blocks, contents)) {
@@ -1333,9 +1345,9 @@ export class Core implements CoreApi, K1Handler {
 		const after = this.#rootsError(docState, blocks);
 		if (after) return fail("BadLaunch", after);
 		const kind = this.#launchKind(docState, blocks);
-		const bodies = this.#contents(docState);
-		const results = this.#results(docState);
-		const result = this.#launchText(docState, blocks, kind, this.#refs.compile(blocks, this.#input(docState, this.#fetches, bodies, results)));
+		const bodies = docState.contents;
+		const results = docState.log.results;
+		const result = this.#launchText(docState, blocks, kind, this.#refs.compile(blocks, this.#input(docState, this.#fetches)));
 		if (result.kind === "Err") return fail("CompileError", tr("Compilation failed", "编译失败"), result.error);
 		const fetchKeys = this.#refs.externalTargets(blocks, bodies).map(target => this.#refs.targetKey(target));
 		const fetches = fetchKeys.flatMap(key => {
@@ -1522,7 +1534,7 @@ export class Core implements CoreApi, K1Handler {
 			...(session !== null ? { session } : {}),
 		});
 		if (kind === "result" && block !== null) {
-			this.#invalidateInspections(doc, blocks => this.#refs.resultTargets(blocks, this.#contents(doc)).includes(block));
+			this.#invalidateInspections(doc, blocks => this.#refs.resultTargets(blocks, doc.contents).includes(block));
 			void this.#recomputeChecks(key);
 		}
 		const finished = doc.run === null ? undefined : this.#finished.get(doc.run.id);
@@ -1548,14 +1560,7 @@ export class Core implements CoreApi, K1Handler {
 		const found = this.#docOf(ref.kind === "template" ? undefined : ref.run);
 		if (!found.ok) return { ref, title: "", run: null, blocks: [], errors: [tr("The document does not exist", "文档不存在")] };
 		const doc = found.result;
-		const entries = doc.log.entries;
-		// A launch request stays pending until a Launch is created from that block.
-		const pending = new Set<string>();
-		for (const entry of entries) {
-			const data = entry.data;
-			if (data.type === "event_sent" && data.event === "launch_requested") for (const block of requestedBlocks(data.data)) pending.add(block);
-			if (data.type === "launch_created") for (const block of data.blocks) pending.delete(block);
-		}
+		const pending = doc.log.pending;
 		return {
 			ref,
 			title: doc.title,
@@ -1570,7 +1575,7 @@ export class Core implements CoreApi, K1Handler {
 		return this.#runOrder.flatMap(id => {
 			const doc = this.#docs.get(id);
 			const finished = this.#finished.get(id);
-			const summary = doc?.run ? { meta: doc.run, ...progressCounts(doc.blocks), retrospective: doc.log.entries.some(isRetrospective) } : finished;
+			const summary = doc?.run ? { meta: doc.run, ...progressCounts(doc.blocks), retrospective: doc.log.retrospective } : finished;
 			if (!summary) return [];
 			const meta = summary.meta;
 			return [
@@ -1628,9 +1633,14 @@ export class Core implements CoreApi, K1Handler {
 	}
 
 	#k5Error(error: string): string {
-		this.#errors.push(error);
+		this.#noteError(error);
 		this.#emit(null);
 		return error;
+	}
+
+	#noteError(error: string): void {
+		this.#errors.push(error);
+		if (this.#errors.length > ERRORS_KEPT) this.#errors.splice(0, this.#errors.length - ERRORS_KEPT);
 	}
 
 	errors(): readonly string[] {
