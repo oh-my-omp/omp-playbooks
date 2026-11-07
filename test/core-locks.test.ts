@@ -277,7 +277,7 @@ describe("Design ownership and coordinator edits", () => {
 			expect(h.api.view(ref).blocks.map(item => item.block.id)).toEqual(["b1", "b4", "b2", "b3"]);
 			expect(await h.request({ op: "read", args: { ...scope, block: "b4" } })).toEqual({ ok: true, result: wire(block) });
 			h.stop();
-			const stored = r ? h.store.readRuns().get(r.id) : h.store.readTemplate();
+			const stored = r ? h.store.readRun(r.id) : h.store.readTemplate();
 			expect(stored?.ok).toBe(true);
 			if (!stored?.ok) throw new Error("Inserted document was not persisted");
 			expect(stored.doc.blocks.find(item => item.id === "b4")).toEqual(block);

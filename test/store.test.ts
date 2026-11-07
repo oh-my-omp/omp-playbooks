@@ -138,7 +138,7 @@ describe("YAML persistence", () => {
 				expect(readFileSync(path, "utf8")).toBe(original);
 			}
 			expect(() => store.write({ kind: "run", run: "r1" }, store.serialize(doc, { ...run, name: text }))).toThrow(RangeError);
-			expect(store.stat({ kind: "run", run: "r1" })).toBeNull();
+			expect(store.mtime({ kind: "run", run: "r1" })).toBeNull();
 		}
 		expect(readdirSync(directory)).toEqual(["incident.yaml"]);
 	});
@@ -175,22 +175,26 @@ describe("YAML persistence", () => {
 });
 
 describe("filesystem persistence", () => {
-	test("write, stat, template and run discovery use their real files", () => {
+	test("write, mtime, text, template and run discovery use their real files", () => {
 		const { directory, path, store } = fixture();
-		expect(store.stat({ kind: "template" })).toBeNull();
+		expect(store.mtime({ kind: "template" })).toBeNull();
+		expect(store.readText({ kind: "template" })).toBeNull();
 		expect(store.readTemplate().ok).toBe(false);
-		expect(store.readRuns().size).toBe(0);
+		expect(store.runIds()).toEqual([]);
 		store.write({ kind: "template" }, store.serialize(doc, null));
 		store.write({ kind: "run", run: "r1" }, store.serialize(doc, run));
 		expect(readFileSync(path, "utf8")).toBe(store.serialize(doc, null));
 		expect(readFileSync(join(directory, "incident.runs/r1.yaml"), "utf8")).toBe(store.serialize(doc, run));
-		expect(store.stat({ kind: "template" })).toEqual({ text: store.serialize(doc, null), mtimeMs: statSync(path).mtimeMs });
+		expect(store.mtime({ kind: "template" })).toBe(statSync(path).mtimeMs);
+		expect(store.readText({ kind: "template" })).toBe(store.serialize(doc, null));
 		expect(store.readTemplate()).toEqual({ ok: true, doc, run: null });
-		expect(store.readRuns().get("r1")).toEqual({ ok: true, doc, run });
+		expect(store.readRun("r1")).toEqual({ ok: true, doc, run });
 		writeFileSync(join(directory, "incident.runs/r2.yaml"), store.serialize(doc, run));
 		writeFileSync(join(directory, "incident.runs/r3.yaml"), "invalid: true");
-		expect(store.readRuns().get("r2")?.ok).toBe(false);
-		expect(store.readRuns().get("r3")?.ok).toBe(false);
+		writeFileSync(join(directory, "incident.runs/notes.txt"), "not a Run");
+		expect(store.runIds()).toEqual(["r1", "r2", "r3"]);
+		expect(store.readRun("r2").ok).toBe(false);
+		expect(store.readRun("r3").ok).toBe(false);
 		writeFileSync(path, "title: x\nblocks: invalid\n");
 		expect(store.readTemplate().ok).toBe(false);
 	});
@@ -320,6 +324,45 @@ describe("append-only facts", () => {
 		expect(result.launches.get("l1")).toEqual(latest);
 		expect(result.launches.get("l2")).toEqual({ ...launch, id: "l2" });
 	});
+	test("launch_update lines carry changed fields only and replay to the same record as whole lines", () => {
+		const { directory, store } = fixture();
+		const ref: DocRef = { kind: "run", run: "r1" };
+		const steps: Launch[] = [launch];
+		const next = (change: Partial<Launch>): void => { steps.push({ ...steps.at(-1)!, ...change }); };
+		next({ agents: ["agent-1"] });
+		next({ dirty: [["b1", 2]] });
+		next({ baselines: ["snapshot", "new baseline"], notified: { kind: "Ok", text: "changed", sources: [] }, dirty: [] });
+		next({ fetches: [["missing", { ok: false, at: 13, error: "Missing" }]] });
+		next({ notified: null, closed: { at: 15, by: "run_finished" } });
+		store.appendLaunch(ref, launch);
+		for (const [index, step] of steps.entries()) {
+			if (index === 0) continue;
+			const previous = steps[index - 1]!;
+			const changes = Object.fromEntries((["agents", "baselines", "notified", "dirty", "fetches", "closed"] as const).filter(key => step[key] !== previous[key]).map(key => [key, step[key]]));
+			store.appendLaunchUpdate(ref, launch.id, changes);
+		}
+		const lines = readFileSync(join(directory, "incident.runs/r1.jsonl"), "utf8").trimEnd().split("\n").map(line => JSON.parse(line));
+		expect(lines[1]).toEqual({ launch_update: { id: "l1", agents: ["agent-1"] } });
+		expect(lines[5]).toEqual({ launch_update: { id: "l1", notified: null, closed: { at: 15, by: "run_finished" } } });
+		// The same history as whole lines, the format before launch_update existed, replays to the same record.
+		const whole = createStore(join(directory, "whole.yaml"));
+		for (const step of steps) whole.appendLaunch(ref, step);
+		expect(store.readLog(ref).launches.get("l1")).toEqual(steps.at(-1)!);
+		expect(store.readLog(ref)).toEqual(whole.readLog(ref));
+		// Mixed: a whole line after updates still wins, and updates continue from it.
+		store.appendLaunch(ref, { ...launch, agents: ["fresh"] });
+		store.appendLaunchUpdate(ref, launch.id, { dirty: [["b1", 9]] });
+		expect(store.readLog(ref).launches.get("l1")).toEqual({ ...launch, agents: ["fresh"], dirty: [["b1", 9]] });
+	});
+	test("log lines are read across chunk boundaries, including a multi-byte character split between chunks", () => {
+		const { directory, store } = fixture();
+		const ref: DocRef = { kind: "run", run: "r1" };
+		// 64 KiB chunks: a ~150 KiB entry spans three, and the 4-byte emoji lands on the boundaries at varying offsets.
+		const entries: TimelineEntry[] = Array.from({ length: 6 }, (_, index) => ({ seq: index + 1, at: index, origin: "coordinator", data: { type: "post", kind: "update", text: `${"x".repeat(index * 7)}${"😀".repeat(37_000 + index)}` } }));
+		for (const entry of entries) store.appendEntry(ref, entry);
+		writeFileSync(join(directory, "incident.runs/r1.jsonl"), readFileSync(join(directory, "incident.runs/r1.jsonl"), "utf8").trimEnd());
+		expect(store.readLog(ref).entries).toEqual(entries);
+	});
 	test("every persisted compile-error variant is decoded", () => {
 		const { store } = fixture();
 		const at = { block: "b1" as const, reference: "((x))" };
@@ -335,7 +378,7 @@ describe("append-only facts", () => {
 		mkdirSync(join(directory, "incident.runs"));
 		const path = join(directory, "incident.runs/r1.jsonl");
 		const valid = JSON.stringify({ entry: { seq: 1, at: 0, type: "run_finished", origin: "service", data: {} } });
-		for (const bad of ["{", "", '{"entry":{"seq":2,"at":0,"type":"unknown","origin":"service","data":{}}}', '{"entry":{"seq":2,"at":0,"type":"done_changed","origin":"service","data":{"block":"b1","done":"yes"}}}', valid, JSON.stringify({ launch: { ...launch, run: "r2" } }), JSON.stringify({ launch: { ...launch, dirty: [["b1"]] } })]) {
+		for (const bad of ["{", "", '{"entry":{"seq":2,"at":0,"type":"unknown","origin":"service","data":{}}}', '{"entry":{"seq":2,"at":0,"type":"done_changed","origin":"service","data":{"block":"b1","done":"yes"}}}', valid, JSON.stringify({ launch: { ...launch, run: "r2" } }), JSON.stringify({ launch: { ...launch, dirty: [["b1"]] } }), JSON.stringify({ launch_update: { id: "l1", agents: [] } }), JSON.stringify({ launch_update: { id: "l1", session: "other" } })]) {
 			writeFileSync(path, `${valid}\n${bad}\n`);
 			expect(() => store.readLog({ kind: "run", run: "r1" })).toThrow(`${path}:2:`);
 		}
