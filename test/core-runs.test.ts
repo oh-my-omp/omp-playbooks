@@ -2,7 +2,7 @@ import { fieldText } from "../src/domain/model";
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Block, BlockContent, DocRef, FetchOutcome, PlaybookDoc, Revision, RunId, RunMeta, TimelineEntry } from "../src/domain/model";
+import type { Block, BlockContent, BlockId, CompileResult, DocRef, FetchOutcome, PlaybookDoc, Revision, RunId, RunMeta, TimelineEntry } from "../src/domain/model";
 import type { Connection } from "../src/domain/ports";
 import type { ErrorCode, EventPayload, Outcome, Request, RunSummary } from "../src/domain/protocol";
 import { checks } from "../src/service/checks";
@@ -51,7 +51,7 @@ function fixture(doc: PlaybookDoc = template) {
 	fixtures.push({ directory, cores });
 	let clock = BASE_TIME;
 	let fetchCalls = 0;
-	const fetched: FetchOutcome = { ok: true, at: BASE_TIME, value: { kind: "file", text: "External instruction" } };
+	let fetched: FetchOutcome = { ok: true, at: BASE_TIME, value: { kind: "file", text: "External instruction" } };
 	const panes: PaneControl = {
 		ownPane: () => null,
 		focusPane: async () => ({ ok: true }),
@@ -98,7 +98,7 @@ function fixture(doc: PlaybookDoc = template) {
 		return { doc: parsed.doc, run: parsed.run };
 	}
 	return { core, store, events, connection, request, connect, persisted, newCore, nextEvent,
-		setTime: (value: number) => { clock = value; }, fetchCount: () => fetchCalls };
+		setTime: (value: number) => { clock = value; }, setFetched: (outcome: FetchOutcome) => { fetched = outcome; }, fetchCount: () => fetchCalls };
 }
 
 afterEach(() => {
@@ -374,6 +374,70 @@ describe("Finished Runs leave memory and are read back per request (#26 §2)", (
 		expect(f.store.readLog(runRef).entries.slice(-2).map(entry => entry.data.type)).toEqual(["post", "check_reported"]);
 		const fresh = f.newCore();
 		expect(fresh.runs()[0]!.retrospective).toBe(true);
+	});
+
+	test("a finished Run keeps the fetches of its last live compile across later evictions; only refetch replaces them (#34)", async () => {
+		const f = fixture();
+		await f.connect();
+		expectOk(await f.request({ op: "start_run", args: { name: "Fetched once" } }));
+		const inserted = expectOk(await f.request({ op: "insert", args: { run: "r1", title: "External", content: { kind: "task", body: "Read ((file:notes.md))" } } })) as { readonly block: BlockId };
+		const compiled = expectOk(await f.request({ op: "compile", args: { run: "r1", blocks: [inserted.block] } })) as CompileResult;
+		if (compiled.kind !== "Ok") throw new Error("live compile failed");
+		expect(compiled.text).toContain("External instruction");
+		expect(f.fetchCount()).toBe(1);
+		expectOk(await f.request({ op: "finish_run", args: { run: "r1" } }));
+		expectOk(await f.request({ op: "start_run", args: { name: "Still running" } }));
+
+		f.setFetched({ ok: true, at: BASE_TIME + 1, value: { kind: "file", text: "Changed after the Run ended" } });
+		const unchanged = expectOk(await f.request({ op: "compile", args: { run: "r1", blocks: [inserted.block] } })) as CompileResult;
+		if (unchanged.kind !== "Ok") throw new Error("finished Run recompiled from a changed source");
+		expect(unchanged.text).toContain("External instruction");
+		expect(f.fetchCount()).toBe(1);
+
+		// A later Run finishing evicts again: r1's retained targets must survive that cleanup too.
+		expectOk(await f.request({ op: "finish_run", args: { run: "r2" } }));
+		const afterSecondFinish = expectOk(await f.request({ op: "compile", args: { run: "r1", blocks: [inserted.block] } })) as CompileResult;
+		if (afterSecondFinish.kind !== "Ok") throw new Error("finished Run recompiled after another Run was evicted");
+		expect(afterSecondFinish.text).toContain("External instruction");
+		expect(f.fetchCount()).toBe(1);
+
+		f.setFetched({ ok: false, at: BASE_TIME + 2, error: "gone" });
+		const absent = expectOk(await f.request({ op: "compile", args: { run: "r1", blocks: [inserted.block] } })) as CompileResult;
+		if (absent.kind !== "Ok") throw new Error(`finished Run read a source that is gone: ${absent.error.kind}`);
+		expect(absent.text).toContain("External instruction");
+		expect(f.fetchCount()).toBe(1);
+
+		f.setFetched({ ok: true, at: BASE_TIME + 3, value: { kind: "file", text: "Replacement" } });
+		expectOk(await f.request({ op: "refetch", args: { targets: ["file:notes.md"] } }));
+		const refetched = expectOk(await f.request({ op: "compile", args: { run: "r1", blocks: [inserted.block] } })) as CompileResult;
+		if (refetched.kind !== "Ok") throw new Error("refetched finished Run did not compile");
+		expect(refetched.text).toContain("Replacement");
+		expect(f.fetchCount()).toBe(2);
+	});
+
+	test("a finished Run loaded by a new Core keeps the fetch of its first post-restart compile (#34)", async () => {
+		const f = fixture();
+		await f.connect();
+		expectOk(await f.request({ op: "start_run", args: { name: "Before the restart" } }));
+		const inserted = expectOk(await f.request({ op: "insert", args: { run: "r1", title: "External", content: { kind: "task", body: "Read ((file:notes.md))" } } })) as { readonly block: BlockId };
+		expectOk(await f.request({ op: "finish_run", args: { run: "r1" } }));
+
+		// A new Core on the same store is a restart: it starts with an empty fetch table.
+		const restarted = f.newCore();
+		await f.connect(restarted, "session-two");
+		const baseline = f.fetchCount();
+		const first = expectOk(await f.request({ op: "compile", args: { run: "r1", blocks: [inserted.block] } }, restarted)) as CompileResult;
+		if (first.kind !== "Ok") throw new Error("post-restart compile failed");
+		expect(first.text).toContain("External instruction");
+		expect(f.fetchCount() - baseline).toBe(1);
+
+		expectOk(await f.request({ op: "start_run", args: { name: "After the restart" } }, restarted));
+		f.setFetched({ ok: true, at: BASE_TIME + 1, value: { kind: "file", text: "Changed after the restart" } });
+		expectOk(await f.request({ op: "finish_run", args: { run: "r2" } }, restarted));
+		const afterEviction = expectOk(await f.request({ op: "compile", args: { run: "r1", blocks: [inserted.block] } }, restarted)) as CompileResult;
+		if (afterEviction.kind !== "Ok") throw new Error("post-restart Run recompiled after another Run was evicted");
+		expect(afterEviction.text).toContain("External instruction");
+		expect(f.fetchCount() - baseline).toBe(1);
 	});
 });
 

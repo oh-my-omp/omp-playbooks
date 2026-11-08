@@ -286,6 +286,11 @@ export class Core implements CoreApi, K1Handler {
 	readonly #finishedLaunches = new Map<LaunchId, RunId>();
 	/** Document fetch table (references.md §5); not persisted. */
 	readonly #fetches = new Map<TargetKey, FetchOutcome>();
+	/**
+	 * External targets a finished Run still reads. Their fetch entries stay in `#fetches` for the process's
+	 * lifetime, so no later eviction drops them (#34); only the keys are kept, never the Run's document.
+	 */
+	readonly #finishedTargets = new Set<TargetKey>();
 	readonly #inflight = new Map<TargetKey, Promise<FetchOutcome>>();
 	readonly #listeners = new Set<(ref: DocRef | null) => void>();
 	readonly #reminders = new Map<RunId, Timer>();
@@ -398,8 +403,19 @@ export class Core implements CoreApi, K1Handler {
 	}
 
 	/**
+	 * A closed Run reads these external targets; keep only their keys, so no eviction — at any later point, in this
+	 * process or after a restart — drops the fetch entries that answer that Run (#34).
+	 */
+	#rememberTargets(doc: DocState): void {
+		for (const target of this.#refs.externalTargets([...doc.contents.keys()], doc.contents)) this.#finishedTargets.add(this.#refs.targetKey(target));
+	}
+
+	/**
 	 * #26 §2: a finished Run leaves memory. Its Launches (all closed by now) and its document go; what `runs()`
-	 * reports stays, and fetch entries no remaining document references go with it (R9).
+	 * reports stays. The external targets it reads are remembered in `#finishedTargets`, and the fetch entries for
+	 * every remembered target stay in the table: a closed Run's `compile` and `inspect` answer from the fetches of
+	 * the moment it finished, no matter how many later Runs are evicted, and only an explicit `refetch` replaces
+	 * one (#34). Fetch entries no document references go with it (R9).
 	 */
 	#evict(doc: DocState, meta: RunMeta): void {
 		for (const [id, launch] of this.#launches) {
@@ -409,7 +425,8 @@ export class Core implements CoreApi, K1Handler {
 		}
 		this.#docs.delete(meta.id);
 		this.#finished.set(meta.id, { meta, ...progressCounts(doc.blocks), retrospective: doc.log.retrospective, inspections: doc.inspections });
-		const referenced = new Set<TargetKey>();
+		this.#rememberTargets(doc);
+		const referenced = new Set(this.#finishedTargets);
 		for (const live of this.#docs.values()) {
 			for (const target of this.#refs.externalTargets([...live.contents.keys()], live.contents)) referenced.add(this.#refs.targetKey(target));
 		}
@@ -421,7 +438,10 @@ export class Core implements CoreApi, K1Handler {
 		const parsed = this.#store.readRun(run);
 		if (!parsed.ok || parsed.run === null) return fail("UnknownRun", tr(`Run ${run} file could not be parsed: ${parsed.ok ? "missing run mapping" : parsed.error}`, `Run ${run} 的文件不能解析：${parsed.ok ? "缺少 run 映射" : parsed.error}`));
 		const ref: DocRef = { kind: "run", run };
-		return ok(this.#newDocState(ref, parsed.doc, parsed.run, this.#store.readLog(ref).entries, finished.inspections));
+		const doc = this.#newDocState(ref, parsed.doc, parsed.run, this.#store.readLog(ref).entries, finished.inspections);
+		// Reading it is what makes its targets known: a Run finished before a restart never passed through #evict.
+		this.#rememberTargets(doc);
+		return ok(doc);
 	}
 
 	/** A Launch by id: a live one, or a finished Run's record read back from its log (closed; not kept). */
