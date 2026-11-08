@@ -100,6 +100,8 @@ Main-session commands:
 
 These commands and the `playbook_*` tools are available only in a main session running in a Tern pane; subagents do not see them.
 
+The `playbook_*` tools are `xd://` devices: the model reads `xd://playbook_<name>` for the description and schema and writes the JSON arguments to it; eval calls them as `tool.playbook_<name>`. The extension registers them in the main session's `session_start`, after omp has built the session, so omp mounts them with a hidden mount notice on the next prompt instead of adding them to the system prompt or tool list. Adding them therefore never changes the prompt prefix the provider caches, and a subagent session, which never registers them, carries none of them.
+
 ## Language
 
 The pane, its notices and component diagnostics, the coordinator's notices and tool errors, the launch-prompt footer a subagent reads and the Tern command are English or Chinese. Each process resolves its language when it uses UI text; string-only registration metadata (the Tern palette title) resolves when the plugin loads:
@@ -349,7 +351,7 @@ Execution bodies and designs are drawn with the same component parser. The compo
 
 These are tool arguments, not shell commands. `doc` can be omitted only when exactly one document is connected; `run` is omitted to act on the Playbook file itself. All input is strictly validated and extra fields are rejected. A plain `playbook_read` **has no `op: "read"`**.
 
-What the model reads of these tools comes in two layers. omp shows only the first 200 characters of a plugin tool's description in the prompt, so each description starts with a short purpose and the semantics its schema cannot carry. The full description ends with `xd://` topic pointers and when to read each. The call instructions are read on demand: `playbook_open` has `format`, `outline`, `slots`, `references`, `execution`, `runs` and `language`; `playbook_edit` has `text`, `blocks` and `state`; `playbook_read` has `revisions`, `playbook_launch` `lifecycle`, `playbook_timeline` `records` and `playbook_check` `judge`. `read xd://playbook_open` reads the full description and pointers; `read xd://playbook_open/format` returns that topic's Markdown body without its file header. The topics live in `src/extension/topics/`; `language` is generated on every read in the session's current language.
+What the model reads of these tools comes in two layers. omp lists a device with only the first 200 characters of its description, so each description starts with a short purpose and the semantics its schema cannot carry. The full description ends with `xd://` topic pointers and when to read each. The call instructions are read on demand: `playbook_open` has `format`, `outline`, `slots`, `references`, `execution`, `runs` and `language`; `playbook_edit` has `text`, `blocks` and `state`; `playbook_read` has `revisions`, `playbook_launch` `lifecycle`, `playbook_timeline` `records` and `playbook_check` `judge`. `read xd://playbook_open` reads the full description and pointers; `read xd://playbook_open/format` returns that topic's Markdown body without its file header. The topics live in `src/extension/topics/`; `language` is generated on every read in the session's current language.
 
 Each tool provides its topics through `docTopics()` on its own tool definition. Topic reads use omp's native `xd://` protocol and need no omp-config extension or shared topic registry.
 

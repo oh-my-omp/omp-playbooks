@@ -13,7 +13,6 @@ import { availableAgents } from "./agents";
 import { tr, withLanguage } from "../i18n";
 import { listenPane, type PaneListener } from "./pane-listener";
 import { playbookTopics } from "./topics";
-import { applyActiveTools } from "./active-tools";
 
 /** A block body that is one fenced js/py code block is an orchestration block (launch-events.md §1). */
 const ORCHESTRATION = /^\s*```(js|py)\s*\n([\s\S]*)\n```\s*$/;
@@ -193,7 +192,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		const connected = [...clients.entries()].filter(([, client]) => client.connected).map(([path]) => path);
 		if (connected.length === 1) return connected[0]!;
 		throw new Error(connected.length === 0
-			? tr("NoService: no Playbook is open in this session; pass doc or call playbook_open first", "NoService：本会话没有打开的 Playbook；请传入 doc 或先调用 playbook_open")
+			? tr("NoService: no Playbook is open in this session; pass doc or call xd://playbook_open first", "NoService：本会话没有打开的 Playbook；请传入 doc 或先调用 xd://playbook_open")
 			: tr(`NoService: several Playbooks are open (${connected.join(", ")}); pass doc`, `NoService：打开了多个 Playbook（${connected.join("、")}）；请传入 doc`));
 	}
 
@@ -372,13 +371,22 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	] as const;
 	type AnyTool = (typeof tools)[number];
 
+	/**
+	 * Registers the tools as `xd://` devices (`loadMode: "discoverable"`) once per extension binding.
+	 * Called from the main session's session_start, after the session is built: omp installs a late
+	 * registration into the live registry and mounts it with a hidden mount notice, so the system and
+	 * tools prefix stays byte-stable and subagent sessions, which never register, carry none of them.
+	 */
+	let registered = false;
 	function registerTools(entries: readonly AnyTool[]): void {
+		if (registered) return;
+		registered = true;
 		const topics = playbookTopics();
 		for (const tool of entries) {
 			const ownTopics = topics.get(tool.name) ?? [];
 			const pointers = ownTopics.map(topic => `- \`xd://${tool.name}/${topic.name}\` — ${topic.when}`);
 			const definition = {
-				name: tool.name, label: tool.label, parameters: tool.parameters, defaultInactive: true,
+				name: tool.name, label: tool.label, parameters: tool.parameters, loadMode: "discoverable",
 				description: tool.description + (pointers.length ? `\n\nTopics — read the one a call needs before making it:\n${pointers.join("\n")}` : ""),
 				docTopics: () => Object.fromEntries(ownTopics.map(topic => [topic.name, topic.read()])),
 				async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -393,16 +401,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		}
 	}
 
-	// Tools register synchronously, before any await, and stay inactive until session_start activates them for the main session.
-	registerTools(tools);
 	const ternState = await ensureTernPlugin();
-
-	/** Activates this extension's tools in the main session: the active set plus these tools, in canonical order. */
-	async function activateTools(): Promise<void> {
-		const ours = new Set(tools.map(tool => tool.name));
-		const active = new Set(pi.getActiveTools());
-		await applyActiveTools(pi, pi.getAllTools().map(tool => tool.name).filter(name => ours.has(name) || active.has(name)));
-	}
 
 	const header = tr("This is a Playbook document service notice, not a user message", "这是 Playbook 文档服务的通知，不是用户消息");
 
@@ -422,7 +421,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		const runArg = data.run === undefined ? "" : `, run: "${data.run}"`;
 		const call = `{ doc: ${docLiteral}${runArg}, blocks: ${blocks} }`;
 		return orchestration
-					? tr(`A person requested launching orchestration blocks ${blocks}. Next: call playbook_launch {doc: ${docLiteral}, op: "launch"${runArg}, blocks: ${blocks}} to get l<n>, then send a separate eval whose code is only \`await playbook.exec("l<n>")\`.`, `人请求启动编排块 ${blocks}。下一步：调用 playbook_launch {doc: ${docLiteral}, op: "launch"${runArg}, blocks: ${blocks}} 得到 l<n>，再单独发一个 eval，代码只写 \`await playbook.exec("l<n>")\`。`)
+					? tr(`A person requested launching orchestration blocks ${blocks}. Next: call xd://playbook_launch {doc: ${docLiteral}, op: "launch"${runArg}, blocks: ${blocks}} to get l<n>, then send a separate eval whose code is only \`await playbook.exec("l<n>")\`.`, `人请求启动编排块 ${blocks}。下一步：调用 xd://playbook_launch {doc: ${docLiteral}, op: "launch"${runArg}, blocks: ${blocks}} 得到 l<n>，再单独发一个 eval，代码只写 \`await playbook.exec("l<n>")\`。`)
 					: tr(`A person requested launching blocks ${blocks} of ${where === "Playbook" ? "the Playbook" : where}. ${preset ? `${preset} ` : ""}Next, choose one: ① Non-blocking: in eval, \`var worker = await playbook.agent(${call})\` returns as soon as the subagent is started and bound; wait for it with the top-level wait tool, which still lets you handle pane notices meanwhile; after it finishes, send another eval \`await playbook.result(worker)\` to record the result and close the Launch. ② Single step: \`await playbook.run(${call})\` starts, waits, records and closes. The subagent writes the block's status and completion report into the file itself; you do not write them for it. When the default subagent is disabled and the block has no preset agent, add \`agent: "<available agent>"\` (for example "task:mid"). The extension adds the \`var playbook = …\` line at the start of an eval cell automatically; do not write it yourself.`, `人请求启动 ${where} 的块 ${blocks}。${preset}下一步二选一：① 不阻塞：在 eval 中 \`var worker = await playbook.agent(${call})\`，启动并绑定后立即返回；用顶层 wait 等它，期间仍能处理面板通知；结束后另发 eval \`await playbook.result(worker)\` 记录结果并关闭 Launch。② 单步：\`await playbook.run(${call})\` 启动、等待、记录并关闭。subagent 自己把块的状态与完成报告写进文件，你不用代写。默认 subagent 被禁用且块没有预设 agent 时加上 \`agent: "<可用的 agent>"\`（例如 "task:mid"）。eval 单元开头那行 \`var playbook = …\` 由扩展自动加入，不要自己再写。`)
 	}
 
@@ -453,14 +452,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				const launchesZh = event.data.launches.map(item => item.id).join("、");
 				const agentsEn = agents.join(", ");
 				const agentsZh = agents.join("、");
-				next = tr(`A person requested stopping execution of block ${event.data.block} (Launch ${launchesEn}${agents.length ? `, subagent ${agentsEn}` : ""}). Next: execute ${stopsEn} in eval: this cancels the subagents this session started for these Launches and sets blocks still running back to todo; any waiting playbook.result calls then record the failure and close the Launch. If a subagent was not started in this session through playbook.agent / playbook.spawn, stop it your own way first, then use playbook_edit {op: "status", block: "${event.data.block}", value: "todo"${event.data.run === undefined ? "" : `, run: "${event.data.run}"`}} to set it back to todo.`, `人请求打断块 ${event.data.block} 的执行（Launch ${launchesZh}${agents.length ? `，subagent ${agentsZh}` : ""}）。下一步：在 eval 中执行 ${stopsZh}：它取消本会话为这些 Launch 启动的 subagent，并把仍在执行中的块改回 todo；等着的 playbook.result 随后记录失败并关闭 Launch。若 subagent 不是本会话通过 playbook.agent / playbook.spawn 启动的，先用你自己的方式停止它，再用 playbook_edit {op: "status", block: "${event.data.block}", value: "todo"${event.data.run === undefined ? "" : `, run: "${event.data.run}"`}} 改回 todo。`);
+				next = tr(`A person requested stopping execution of block ${event.data.block} (Launch ${launchesEn}${agents.length ? `, subagent ${agentsEn}` : ""}). Next: execute ${stopsEn} in eval: this cancels the subagents this session started for these Launches and sets blocks still running back to todo; any waiting playbook.result calls then record the failure and close the Launch. If a subagent was not started in this session through playbook.agent / playbook.spawn, stop it your own way first, then use xd://playbook_edit {op: "status", block: "${event.data.block}", value: "todo"${event.data.run === undefined ? "" : `, run: "${event.data.run}"`}} to set it back to todo.`, `人请求打断块 ${event.data.block} 的执行（Launch ${launchesZh}${agents.length ? `，subagent ${agentsZh}` : ""}）。下一步：在 eval 中执行 ${stopsZh}：它取消本会话为这些 Launch 启动的 subagent，并把仍在执行中的块改回 todo；等着的 playbook.result 随后记录失败并关闭 Launch。若 subagent 不是本会话通过 playbook.agent / playbook.spawn 启动的，先用你自己的方式停止它，再用 xd://playbook_edit {op: "status", block: "${event.data.block}", value: "todo"${event.data.run === undefined ? "" : `, run: "${event.data.run}"`}} 改回 todo。`);
 				break;
 			}
 			case "block_changed":
-				next = tr(`A person changed block ${JSON.stringify(event.data.changed)}, on which Launch ${event.data.launch.id} depends (see the diff below). You can: call playbook_launch {op: "rebase", launch: "${event.data.launch.id}"} to accept the current text as the new baseline (then playbook.spawn and playbook.exec use it); notify the subagent that is still running; or do nothing.`, `人修改了 Launch ${event.data.launch.id} 依赖的块 ${JSON.stringify(event.data.changed)}（diff 见下）。可以：调用 playbook_launch {op: "rebase", launch: "${event.data.launch.id}"} 接受当前文本为新基线（之后 playbook.spawn 与 playbook.exec 使用它）；告诉仍在运行的 subagent；或不处理。`);
+				next = tr(`A person changed block ${JSON.stringify(event.data.changed)}, on which Launch ${event.data.launch.id} depends (see the diff below). You can: call xd://playbook_launch {op: "rebase", launch: "${event.data.launch.id}"} to accept the current text as the new baseline (then playbook.spawn and playbook.exec use it); notify the subagent that is still running; or do nothing.`, `人修改了 Launch ${event.data.launch.id} 依赖的块 ${JSON.stringify(event.data.changed)}（diff 见下）。可以：调用 xd://playbook_launch {op: "rebase", launch: "${event.data.launch.id}"} 接受当前文本为新基线（之后 playbook.spawn 与 playbook.exec 使用它）；告诉仍在运行的 subagent；或不处理。`);
 				break;
 			case "update_due":
-				next = tr(`The status update for Run ${event.data.run} is due. Next: playbook_timeline {op: "post", run: "${event.data.run}", kind: "update", text: ...} writes the update, or {op: "snooze"} postpones it.`, `Run ${event.data.run} 的状态更新到期。下一步：playbook_timeline {op: "post", run: "${event.data.run}", kind: "update", text: ...} 写更新，或 {op: "snooze"} 推迟。`);
+				next = tr(`The status update for Run ${event.data.run} is due. Next: xd://playbook_timeline {op: "post", run: "${event.data.run}", kind: "update", text: ...} writes the update, or {op: "snooze"} postpones it.`, `Run ${event.data.run} 的状态更新到期。下一步：xd://playbook_timeline {op: "post", run: "${event.data.run}", kind: "update", text: ...} 写更新，或 {op: "snooze"} 推迟。`);
 				break;
 			case "revision_requested": {
 				const where = event.data.run === undefined ? "Playbook" : `Run ${event.data.run}`;
@@ -468,8 +467,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				const answer = await clients.get(absolute)?.request({ op: "revisions", args: { ...scoped(event.data.run), block: event.data.block, after: event.data.revision - 1 } });
 				const found = answer?.ok ? revisionsResult.safeParse(answer.result) : undefined;
 				const prompt = found?.success ? found.data.revisions.find(item => item.seq === event.data.revision)?.prompt : undefined;
-				const history = `playbook_read {doc: ${docLiteral}, ${scope}op: "revisions", block: "${event.data.block}"}`;
-				next = tr(`A person submitted change request #${event.data.revision} for the ${where} design block ${event.data.block}${prompt === undefined ? `(failed to read; query with ${history})` : `:\n<prompt>\n${prompt}\n</prompt>`}\nNext: read the requirement and current design with playbook_read {doc: ${docLiteral}, ${scope}block: "${event.data.block}"}, then revise the design according to the change request: use playbook_edit write, replace, or panel to change design; do not change requirement. Keep the revised design in the Where/What/How panel structure. When the prompt selects a value for a slot, change that slot fence's \`= \` line to that value; when the original value is not in the options, add a \`~ <original value>\` line. To retrieve previous change requests, use ${history}.`, `人对${where}的设计块 ${event.data.block} 提交了修改 prompt #${event.data.revision}${prompt === undefined ? `（读取失败，用 ${history} 查询）` : `：\n<prompt>\n${prompt}\n</prompt>`}\n下一步：playbook_read {doc: ${docLiteral}, ${scope}block: "${event.data.block}"} 读需求与当前设计稿，按 prompt 修订设计：用 playbook_edit 的 write、replace 或 panel 改 design；不要改 requirement。修订后的设计稿保持 Where/What/How 面板结构。prompt 选定了某个槽位的取值时，把那个 slot 围栏的 \`= \` 行改成该值；原来的值不在选项里时补一行 \`~ <原值>\`。需要以前的修改要求时用 ${history}。`);
+				const history = `xd://playbook_read {doc: ${docLiteral}, ${scope}op: "revisions", block: "${event.data.block}"}`;
+				next = tr(`A person submitted change request #${event.data.revision} for the ${where} design block ${event.data.block}${prompt === undefined ? `(failed to read; query with ${history})` : `:\n<prompt>\n${prompt}\n</prompt>`}\nNext: read the requirement and current design with xd://playbook_read {doc: ${docLiteral}, ${scope}block: "${event.data.block}"}, then revise the design according to the change request: use xd://playbook_edit write, replace, or panel to change design; do not change requirement. Keep the revised design in the Where/What/How panel structure. When the prompt selects a value for a slot, change that slot fence's \`= \` line to that value; when the original value is not in the options, add a \`~ <original value>\` line. To retrieve previous change requests, use ${history}.`, `人对${where}的设计块 ${event.data.block} 提交了修改 prompt #${event.data.revision}${prompt === undefined ? `（读取失败，用 ${history} 查询）` : `：\n<prompt>\n${prompt}\n</prompt>`}\n下一步：xd://playbook_read {doc: ${docLiteral}, ${scope}block: "${event.data.block}"} 读需求与当前设计稿，按 prompt 修订设计：用 xd://playbook_edit 的 write、replace 或 panel 改 design；不要改 requirement。修订后的设计稿保持 Where/What/How 面板结构。prompt 选定了某个槽位的取值时，把那个 slot 围栏的 \`= \` 行改成该值；原来的值不在选项里时补一行 \`~ <原值>\`。需要以前的修改要求时用 ${history}。`);
 				break;
 			}
 			case "status_changed":
@@ -533,7 +532,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		catch { return { ok: false, error: { code: "NoService", message: tr(`cannot resolve Playbook ${request.doc}`, `无法解析 Playbook ${request.doc}`) } }; }
 		const ready = await (await clientFor(absolute, ctx)).connect();
 		if (!ready.ok) return { ok: false, error: { code: ready.error.code, message: ready.error.message } };
-		pi.sendMessage({ customType: "playbook-event", content: tr(`This is a Playbook document service notice, not a user message\nA person designated this session as the coordinator for ${absolute} in the Playbook pane; the extension is connected (equivalent to playbook_open). Use playbook_read {doc: ${JSON.stringify(absolute)}} to learn it; then follow the next step in each Playbook notice.`, `这是 Playbook 文档服务的通知，不是用户消息\n人在 Playbook 面板里指定本会话为 ${absolute} 的协调者，扩展已经连接（等同 playbook_open）。用 playbook_read {doc: ${JSON.stringify(absolute)}} 了解它；之后每收到 Playbook 通知，按通知里的下一步做。`), display: true });
+		pi.sendMessage({ customType: "playbook-event", content: tr(`This is a Playbook document service notice, not a user message\nA person designated this session as the coordinator for ${absolute} in the Playbook pane; the extension is connected (equivalent to xd://playbook_open). Use xd://playbook_read {doc: ${JSON.stringify(absolute)}} to learn it; then follow the next step in each Playbook notice.`, `这是 Playbook 文档服务的通知，不是用户消息\n人在 Playbook 面板里指定本会话为 ${absolute} 的协调者，扩展已经连接（等同 xd://playbook_open）。用 xd://playbook_read {doc: ${JSON.stringify(absolute)}} 了解它；之后每收到 Playbook 通知，按通知里的下一步做。`), display: true });
 		return here;
 	}
 	let paneListener: PaneListener | null = null;
@@ -541,7 +540,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
 	pi.on("session_start", async (_event, ctx) => {
 		if (ctx.agent.kind !== "main") return;
-		try { await activateTools(); } catch (error) { ctx.ui.notify(tr(`Playbook tools could not be activated: ${error instanceof Error ? error.message : String(error)}`, `Playbook 工具激活失败：${error instanceof Error ? error.message : String(error)}`), "error"); }
+		registerTools(tools);
 		registerCommands();
 		const notice = ternNotice(ternState);
 		if (notice) ctx.ui.notify(notice.text, notice.level);

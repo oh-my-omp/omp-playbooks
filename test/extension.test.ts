@@ -119,8 +119,7 @@ type Tool = { name: string; description: string; docTopics(): Readonly<Record<st
 type ToolCallResult = { input: { language: "js" | "py"; code: string; title?: string; timeout?: number; reset?: boolean } } | { block: true; reason: string } | undefined;
 type Handler = (event: unknown, ctx: ExtensionContext) => unknown | Promise<unknown>;
 async function harness(kind: "main" | "sub" = "main") {
-	const tools = new Map<string, Tool & { defaultInactive?: boolean }>();
-	const active = new Set<string>();
+	const tools = new Map<string, Tool & { loadMode?: string; defaultInactive?: boolean }>();
 	const handlers = new Map<string, Handler>();
 	const commands = new Map<string, { handler(args: string, ctx: ExtensionCommandContext): Promise<void> }>();
 	const messages: { message: { customType: string; content: string; display: boolean }; options: unknown }[] = [];
@@ -152,10 +151,8 @@ async function harness(kind: "main" | "sub" = "main") {
 	const waiting: (() => void)[] = [];
 	const warnings: string[] = [];
 	const api = {
-		zod, registerTool: (value: Tool & { defaultInactive?: boolean }) => { tools.set(value.name, value); if (value.defaultInactive !== true) active.add(value.name); },
-		getActiveTools: () => [...active],
+		zod, registerTool: (value: Tool & { loadMode?: string; defaultInactive?: boolean }) => { tools.set(value.name, value); },
 		getAllTools: () => [...tools.keys()].map(name => ({ name, sourceInfo: { source: "extension" } })),
-		setActiveTools: async (names: string[]) => { active.clear(); for (const name of names) active.add(name); },
 		on: (event: string, handler: Handler) => { handlers.set(event, handler); },
 		registerCommand: (name: string, value: { handler(args: string, ctx: ExtensionCommandContext): Promise<void> }) => { commands.set(name, value); },
 		sendMessage: (message: { customType: string; content: string; display: boolean }, options: unknown) => { messages.push({ message, options }); sent.resolve(); for (const resolve of waiting.splice(0)) resolve(); },
@@ -174,7 +171,7 @@ async function harness(kind: "main" | "sub" = "main") {
 	cleanup.push(async () => { await event("session_shutdown"); });
 	return {
 		ctx, messages, notices, menus, choices, event, tools, warnings, messageSent: sent.promise,
-		get aborted() { return aborted; }, get registered() { return { tools: [...tools.keys()], commands: [...commands.keys()] }; }, get active() { return [...active]; },
+		get aborted() { return aborted; }, get registered() { return { tools: [...tools.keys()], commands: [...commands.keys()] }; },
 		set idle(value: boolean) { idle = value; },
 		nextMessage: (): Promise<void> => { const next = Promise.withResolvers<void>(); waiting.push(next.resolve); return next.promise; },
 		set branch(value: Entry[]) { branch = value; }, set selectHook(value: typeof selectHook) { selectHook = value; },
@@ -334,7 +331,7 @@ for (const run of [undefined, "r1"] as const) {
 		const instruction = lines.slice(1, -1).join("\n");
 		expect(instruction).toContain("playbook_read");
 		expect(instruction).toContain('block: "b3"');
-		const history = `playbook_read {doc: ${JSON.stringify(await realpath(s.doc))}, ${run === undefined ? "" : `run: "${run}", `}op: "revisions", block: "b3"}`;
+		const history = `xd://playbook_read {doc: ${JSON.stringify(await realpath(s.doc))}, ${run === undefined ? "" : `run: "${run}", `}op: "revisions", block: "b3"}`;
 		expect(instruction).toContain(`需要以前的修改要求时用 ${history}。`);
 		expect(instruction).toContain("修订设计");
 		expect(instruction).toContain("playbook_edit");
@@ -359,7 +356,7 @@ for (const run of [undefined, "r1"] as const) {
 		expect(options).toEqual({ deliverAs: "aside", triggerTurn: true });
 		const lines = message.content.split("\n");
 		const instruction = lines.slice(1, -1).join("\n");
-		const history = `playbook_read {doc: ${JSON.stringify(await realpath(s.doc))}, ${run === undefined ? "" : `run: "${run}", `}op: "revisions", block: "b3"}`;
+		const history = `xd://playbook_read {doc: ${JSON.stringify(await realpath(s.doc))}, ${run === undefined ? "" : `run: "${run}", `}op: "revisions", block: "b3"}`;
 		expect(instruction).toContain(`（读取失败，用 ${history} 查询）`);
 		expect(instruction).toContain(`需要以前的修改要求时用 ${history}。`);
 		expect(instruction).not.toContain("<prompt>");
@@ -430,10 +427,10 @@ test("open reuses a running service without tern", async () => {
 	expect(s.frames.map(frame => frame.op)).toEqual(["hello"]);
 });
 
-test("a child session activates no tool and registers no command, and never connects (R4)", async () => {
+test("a child session registers no tool or command, and never connects (R4)", async () => {
 	const s = await service();
 	const h = await harness("sub"); await h.event("session_start");
-	expect(h.active).toEqual([]); expect(h.registered.commands).toEqual([]);
+	expect(h.registered).toEqual({ tools: [], commands: [] });
 	expect(s.frames).toHaveLength(0);
 });
 
@@ -450,10 +447,13 @@ for (const value of [undefined, "coordinator-pane"]) {
 	});
 }
 
-test("a session in a daemon Tern pane registers all eight tools inactive, and session_start activates them", async () => {
-	const h = await harness(); expect(h.active).toEqual([]); await h.event("session_start");
+test("a main session in a daemon Tern pane registers all eight tools as xd:// devices only at session_start, once", async () => {
+	const h = await harness(); expect(h.registered.tools).toEqual([]); await h.event("session_start");
 	expect(h.registered.tools).toEqual(["playbook_open", ...documentToolNames]);
-	expect(h.active).toEqual(["playbook_check", "playbook_compile", "playbook_edit", "playbook_launch", "playbook_open", "playbook_read", "playbook_run", "playbook_timeline"]);
+	for (const tool of h.tools.values()) { expect(tool.loadMode).toBe("discoverable"); expect(tool.defaultInactive).toBeUndefined(); }
+	const first = [...h.tools.values()];
+	await h.event("session_start");
+	[...h.tools.values()].forEach((tool, index) => expect(tool).toBe(first[index]!));
 });
 
 test("every tool keeps its short purpose before any topic pointers", async () => {

@@ -4,10 +4,10 @@ when: before running a block with a subagent, or answering a launch or stop requ
 ---
 # Running blocks
 
-Order: write the YAML, `playbook_open` it, `playbook_read`/`playbook_edit` blocks, then run blocks from eval.
+Order: write the YAML, `xd://playbook_open` it, `xd://playbook_read`/`xd://playbook_edit` blocks, then run blocks from eval.
 
 - **Prompt block:** `var worker = await playbook.agent({ blocks: ["b2"] })` returns once the subagent is started and bound. After it finishes, `await playbook.result(worker)` in a later eval records its final message on the block and closes the Launch. Or, in one blocking call, `await playbook.run({ blocks: ["b2"] })`.
-- **Orchestration block:** `playbook_launch {op: "launch"}`, then an eval whose whole code is `await playbook.exec("l<n>")`.
+- **Orchestration block:** `xd://playbook_launch {op: "launch"}`, then an eval whose whole code is `await playbook.exec("l<n>")`.
 
 In eval, `playbook` is provided automatically: the extension adds the `var playbook = …` first line to any JS cell that uses it, so do not write that line yourself.
 

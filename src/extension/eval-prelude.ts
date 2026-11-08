@@ -160,7 +160,7 @@ export function createPlaybook(deps: PlaybookDeps) {
 		const launch = created(await call("playbook_launch", { ...target, op: "launch", blocks: [...request.blocks] }));
 		if (launch.kind === "orchestration") {
 			await call("playbook_launch", { ...docArg(target.doc), op: "close", launch: launch.launch });
-			throw new PlaybookError(tr(`${request.blocks.join(", ")} is an orchestration block (Launch ${launch.launch} closed): start it with playbook_launch {op: "launch"} and run \`await playbook.exec("l<n>")\` as its own eval call`, `${request.blocks.join("、")} 是编排块（Launch ${launch.launch} 已关闭）：请用 playbook_launch {op: "launch"} 启动，然后单独发一个 eval 执行 \`await playbook.exec("l<n>")\``));
+			throw new PlaybookError(tr(`${request.blocks.join(", ")} is an orchestration block (Launch ${launch.launch} closed): start it with xd://playbook_launch {op: "launch"} and run \`await playbook.exec("l<n>")\` as its own eval call`, `${request.blocks.join("、")} 是编排块（Launch ${launch.launch} 已关闭）：请用 xd://playbook_launch {op: "launch"} 启动，然后单独发一个 eval 执行 \`await playbook.exec("l<n>")\``));
 		}
 		const defaults: AgentOptions = { ...(launch.agent !== undefined ? { agent: launch.agent } : {}), ...(launch.isolated !== undefined ? { isolated: launch.isolated } : {}) };
 		return start(target, launch.launch, request.blocks, launch.text, { ...defaults, ...agentOptions(request) }, true);
@@ -209,7 +209,7 @@ export function createPlaybook(deps: PlaybookDeps) {
 		 */
 		async stop(launch: string, request: { readonly doc?: string } = {}): Promise<{ readonly cancelled: readonly string[] }> {
 			const workers = started.get(launch) ?? [];
-			if (workers.length === 0) throw new PlaybookError(tr(`No subagent of ${launch} was started in this session; stop it where it runs, then set its blocks back to todo with playbook_edit {op: "status"}`, `本会话没有启动 ${launch} 的 subagent；请在其运行处停止它，然后用 playbook_edit {op: "status"} 将其块改回 todo`));
+			if (workers.length === 0) throw new PlaybookError(tr(`No subagent of ${launch} was started in this session; stop it where it runs, then set its blocks back to todo with xd://playbook_edit {op: "status"}`, `本会话没有启动 ${launch} 的 subagent；请在其运行处停止它，然后用 xd://playbook_edit {op: "status"} 将其块改回 todo`));
 			for (const worker of workers) await worker.handle.cancel();
 			started.delete(launch);
 			const info = launchInfo(await call("playbook_launch", { ...docArg(request.doc), op: "info", launch }));

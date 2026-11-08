@@ -100,6 +100,8 @@ bun src/service/main.ts /绝对路径/playbook.yaml
 
 这些命令和 `playbook_*` 工具只对运行于 Tern pane 的主会话可用，subagent 看不到它们。
 
+`playbook_*` 工具是 `xd://` 设备：模型读 `xd://playbook_<name>` 获取说明和参数结构，把 JSON 参数写入它来调用；eval 里用 `tool.playbook_<name>` 调用。扩展在主会话的 `session_start` 里、omp 建好会话之后才注册它们，omp 随下一条 prompt 以隐藏的挂载通知挂上这些设备，而不是写进系统提示词或工具列表。因此加入这些工具不会改变 provider 缓存的提示词前缀；subagent 会话从不注册它们，也就不带任何一个。
+
 ## 语言
 
 面板及其提示和组件诊断、协调者收到的通知和工具错误、subagent 读到的启动 prompt 尾注、Tern 命令，都可以是英文或中文。每个进程在使用界面文字时解析语言；只接受字符串的注册元数据（Tern 命令面板标题）在插件加载时解析：
@@ -349,7 +351,7 @@ subagent 收到的是冻结文本，不是 UI、实时设计页或隐式 Playboo
 
 下面是工具参数，不是 shell 命令。只有恰好连接了一份文档时才能省略 `doc`；省略 `run` 即作用于 Playbook 文件本身。所有输入严格校验，不接受额外字段。普通 `playbook_read` **不写 `op: "read"`**。
 
-模型读到的工具说明分两层。omp 只在提示词里显示插件工具说明的前 200 个字符，所以说明先用简短文字交代用途和参数结构表达不了的语义，完整说明末尾逐行列出 `xd://` topic 指针及什么时候读。调用细节按需读取：`playbook_open` 有 `format`、`outline`、`slots`、`references`、`execution`、`runs`、`language`；`playbook_edit` 有 `text`、`blocks`、`state`；`playbook_read` 有 `revisions`，`playbook_launch` 有 `lifecycle`，`playbook_timeline` 有 `records`，`playbook_check` 有 `judge`。`read xd://playbook_open` 读取完整说明和指针；`read xd://playbook_open/format` 返回该 topic 的 Markdown 正文，不含文件头。topics 写在 `src/extension/topics/`；`language` 在每次读取时按会话当前语言生成。
+模型读到的工具说明分两层。omp 列出设备时只显示其说明的前 200 个字符，所以说明先用简短文字交代用途和参数结构表达不了的语义，完整说明末尾逐行列出 `xd://` topic 指针及什么时候读。调用细节按需读取：`playbook_open` 有 `format`、`outline`、`slots`、`references`、`execution`、`runs`、`language`；`playbook_edit` 有 `text`、`blocks`、`state`；`playbook_read` 有 `revisions`，`playbook_launch` 有 `lifecycle`，`playbook_timeline` 有 `records`，`playbook_check` 有 `judge`。`read xd://playbook_open` 读取完整说明和指针；`read xd://playbook_open/format` 返回该 topic 的 Markdown 正文，不含文件头。topics 写在 `src/extension/topics/`；`language` 在每次读取时按会话当前语言生成。
 
 每个工具在自己的工具定义上通过 `docTopics()` 提供 topics，由 omp 原生的 `xd://` 协议读取，不依赖 omp-config 扩展或共享 topic 注册表。
 
