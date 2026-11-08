@@ -414,6 +414,31 @@ describe("Finished Runs leave memory and are read back per request (#26 §2)", (
 		expect(refetched.text).toContain("Replacement");
 		expect(f.fetchCount()).toBe(2);
 	});
+
+	test("a finished Run loaded by a new Core keeps the fetch of its first post-restart compile (#34)", async () => {
+		const f = fixture();
+		await f.connect();
+		expectOk(await f.request({ op: "start_run", args: { name: "Before the restart" } }));
+		const inserted = expectOk(await f.request({ op: "insert", args: { run: "r1", title: "External", content: { kind: "task", body: "Read ((file:notes.md))" } } })) as { readonly block: BlockId };
+		expectOk(await f.request({ op: "finish_run", args: { run: "r1" } }));
+
+		// A new Core on the same store is a restart: it starts with an empty fetch table.
+		const restarted = f.newCore();
+		await f.connect(restarted, "session-two");
+		const baseline = f.fetchCount();
+		const first = expectOk(await f.request({ op: "compile", args: { run: "r1", blocks: [inserted.block] } }, restarted)) as CompileResult;
+		if (first.kind !== "Ok") throw new Error("post-restart compile failed");
+		expect(first.text).toContain("External instruction");
+		expect(f.fetchCount() - baseline).toBe(1);
+
+		expectOk(await f.request({ op: "start_run", args: { name: "After the restart" } }, restarted));
+		f.setFetched({ ok: true, at: BASE_TIME + 1, value: { kind: "file", text: "Changed after the restart" } });
+		expectOk(await f.request({ op: "finish_run", args: { run: "r2" } }, restarted));
+		const afterEviction = expectOk(await f.request({ op: "compile", args: { run: "r1", blocks: [inserted.block] } }, restarted)) as CompileResult;
+		if (afterEviction.kind !== "Ok") throw new Error("post-restart Run recompiled after another Run was evicted");
+		expect(afterEviction.text).toContain("External instruction");
+		expect(f.fetchCount() - baseline).toBe(1);
+	});
 });
 
 describe("document-level errors keep the latest window (#26 §8)", () => {
