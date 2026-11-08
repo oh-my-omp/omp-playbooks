@@ -376,7 +376,7 @@ describe("Finished Runs leave memory and are read back per request (#26 §2)", (
 		expect(fresh.runs()[0]!.retrospective).toBe(true);
 	});
 
-	test("a finished Run keeps the fetches of its last live compile; only refetch replaces them (#34)", async () => {
+	test("a finished Run keeps the fetches of its last live compile across later evictions; only refetch replaces them (#34)", async () => {
 		const f = fixture();
 		await f.connect();
 		expectOk(await f.request({ op: "start_run", args: { name: "Fetched once" } }));
@@ -392,6 +392,13 @@ describe("Finished Runs leave memory and are read back per request (#26 §2)", (
 		const unchanged = expectOk(await f.request({ op: "compile", args: { run: "r1", blocks: [inserted.block] } })) as CompileResult;
 		if (unchanged.kind !== "Ok") throw new Error("finished Run recompiled from a changed source");
 		expect(unchanged.text).toContain("External instruction");
+		expect(f.fetchCount()).toBe(1);
+
+		// A later Run finishing evicts again: r1's retained targets must survive that cleanup too.
+		expectOk(await f.request({ op: "finish_run", args: { run: "r2" } }));
+		const afterSecondFinish = expectOk(await f.request({ op: "compile", args: { run: "r1", blocks: [inserted.block] } })) as CompileResult;
+		if (afterSecondFinish.kind !== "Ok") throw new Error("finished Run recompiled after another Run was evicted");
+		expect(afterSecondFinish.text).toContain("External instruction");
 		expect(f.fetchCount()).toBe(1);
 
 		f.setFetched({ ok: false, at: BASE_TIME + 2, error: "gone" });

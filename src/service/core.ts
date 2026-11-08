@@ -286,6 +286,11 @@ export class Core implements CoreApi, K1Handler {
 	readonly #finishedLaunches = new Map<LaunchId, RunId>();
 	/** Document fetch table (references.md §5); not persisted. */
 	readonly #fetches = new Map<TargetKey, FetchOutcome>();
+	/**
+	 * External targets a finished Run still reads. Their fetch entries stay in `#fetches` for the process's
+	 * lifetime, so no later eviction drops them (#34); only the keys are kept, never the Run's document.
+	 */
+	readonly #finishedTargets = new Set<TargetKey>();
 	readonly #inflight = new Map<TargetKey, Promise<FetchOutcome>>();
 	readonly #listeners = new Set<(ref: DocRef | null) => void>();
 	readonly #reminders = new Map<RunId, Timer>();
@@ -399,9 +404,10 @@ export class Core implements CoreApi, K1Handler {
 
 	/**
 	 * #26 §2: a finished Run leaves memory. Its Launches (all closed by now) and its document go; what `runs()`
-	 * reports stays. The fetch entries of the Run's own external targets stay too: a closed Run's `compile` and
-	 * `inspect` answer from the fetches of the moment it finished, and only an explicit `refetch` replaces one
-	 * (#34). Fetch entries no document references — the finished Run included — go with it (R9).
+	 * reports stays. The external targets it reads are remembered in `#finishedTargets`, and the fetch entries for
+	 * every remembered target stay in the table: a closed Run's `compile` and `inspect` answer from the fetches of
+	 * the moment it finished, no matter how many later Runs are evicted, and only an explicit `refetch` replaces
+	 * one (#34). Fetch entries no document references go with it (R9).
 	 */
 	#evict(doc: DocState, meta: RunMeta): void {
 		for (const [id, launch] of this.#launches) {
@@ -411,9 +417,10 @@ export class Core implements CoreApi, K1Handler {
 		}
 		this.#docs.delete(meta.id);
 		this.#finished.set(meta.id, { meta, ...progressCounts(doc.blocks), retrospective: doc.log.retrospective, inspections: doc.inspections });
-		const referenced = new Set<TargetKey>();
-		for (const source of [doc, ...this.#docs.values()]) {
-			for (const target of this.#refs.externalTargets([...source.contents.keys()], source.contents)) referenced.add(this.#refs.targetKey(target));
+		for (const target of this.#refs.externalTargets([...doc.contents.keys()], doc.contents)) this.#finishedTargets.add(this.#refs.targetKey(target));
+		const referenced = new Set(this.#finishedTargets);
+		for (const live of this.#docs.values()) {
+			for (const target of this.#refs.externalTargets([...live.contents.keys()], live.contents)) referenced.add(this.#refs.targetKey(target));
 		}
 		for (const key of this.#fetches.keys()) if (!referenced.has(key)) this.#fetches.delete(key);
 	}
