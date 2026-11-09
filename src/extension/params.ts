@@ -163,7 +163,7 @@ export function toolParameters(z: Zod) {
   }).strict();
 
   const readParams = z.object({
-    op: z.enum(["read", "revisions"]).describe("`revisions` lists the person's change requests for design blocks; `read` or omit for a normal read.").optional(),
+    op: z.enum(["read", "revisions"]).optional().describe("`revisions` lists the person's change requests for design blocks; `read` or omit for a normal read."),
     doc: docField,
     run: runField,
     block: blockField.describe("Block id `b<n>` (for example `b3`). Omit to read all blocks.").optional(),
@@ -176,7 +176,7 @@ export function toolParameters(z: Zod) {
     run: runField,
     block: blockField.describe("Block id `b<n>` (for example `b3`): the block to change (`title`, `status`, `task`, `replace`, `write`, `panel`, `delete`, `move`, `agent`, `isolated`); not used by `insert` or `insert_design`.").optional(),
     after: z.string().regex(BLOCK_ID).describe("Block id `b<n>`: insert the new block after it (`insert`, `insert_design`; omit to append at the end) or place the moved block after it (`move` with `position: \"after\"`).").optional(),
-    position: z.enum(["top", "after"]).describe("Where to put the moved block: `top` for the beginning, `after` to follow `after`. `move` only.").optional(),
+    position: z.enum(["top", "after"]).optional().describe("Where to put the moved block: `top` for the beginning, `after` to follow `after`. `move` only."),
     title: z.string().describe("Title text: the new title (`title`), or the title of the new block (`insert`, `insert_design`).").optional(),
     body: z.string().describe("Body of the new task block, in Markdown; `insert` only.").optional(),
     design: z.string().describe("Initial design of the new design block, in draft format; `insert_design` only.").optional(),
@@ -186,8 +186,8 @@ export function toolParameters(z: Zod) {
     panel: z.string().regex(PANEL_ID).describe("Panel letter id `A`, `A1`, … as written in the panel heading; `panel` only.").optional(),
     agent: z.string().describe("Task block's default subagent name: the new default (`agent`) or the new block's default (`insert`). Omit for `insert` to use the session default; `agent` with `clear` is rejected.").optional(),
     isolated: z.boolean().describe("Whether that default subagent works in its own worktree; `insert` only. Use `isolation` to change an existing block.").optional(),
-    isolation: z.enum(["isolated", "shared", "default"]).describe("New isolated setting of an existing task block: own worktree, shared worktree, or no preset. `isolated` only.").optional(),
-    status: z.enum(["todo", "running", "done"]).describe("New status; `status` only. The subagent that runs a block writes its own status; set it only to correct one.").optional(),
+    isolation: z.enum(["isolated", "shared", "default"]).optional().describe("New isolated setting of an existing task block: own worktree, shared worktree, or no preset. `isolated` only."),
+    status: z.enum(["todo", "running", "done"]).optional().describe("New status; `status` only. The subagent that runs a block writes its own status; set it only to correct one."),
     tracked: z.boolean().describe("`false` makes a task block untracked (no status, not launchable, not counted); `true` tracks it again from `todo`. `task` only.").optional(),
     clear: z.boolean().describe("`true` clears the task block's default agent; `agent` only. Do not combine it with `agent`; `false` alone is ignored.").optional(),
   }).strict();
@@ -206,7 +206,7 @@ export function toolParameters(z: Zod) {
     run: runField,
     blocks: blocksField.describe("Block ids `b<n>` to check, for example `[\"b1\", \"b3\"]`; `inspect` and `report`.").optional(),
     version: z.string().describe("The `version` the matching `inspect` returned; `report` only.").optional(),
-    result: z.enum(["answers", "judge_unavailable"]).describe("`answers` reports judged questions in `answers`; `judge_unavailable` marks them not judged. `report` only.").optional(),
+    result: z.enum(["answers", "judge_unavailable"]).optional().describe("`answers` reports judged questions in `answers`; `judge_unavailable` marks them not judged. `report` only."),
     answers: z.array(z.object({
       question: z.string().describe("Question id, as returned by `inspect`."),
       probability: z.number().describe("Probability 0–1 that the answer is yes; 0.5 or more counts as failed."),
@@ -227,7 +227,7 @@ export function toolParameters(z: Zod) {
     run: z.string().regex(RUN_ID).describe("Run id `r<n>` (for example `r2`) to read or post in; required for `snooze`. Omit otherwise to work in the Playbook itself.").optional(),
     after: z.number().int().nonnegative().describe("Entry sequence number: for `read`, return entries with a larger `seq` (pass `next_after` from the last page); for `snooze`, postpone the reminder by this many seconds.").optional(),
     limit: z.number().int().positive().describe("Maximum entries to return; `read` only. A truncated page returns `next_after`.").optional(),
-    kind: z.enum(["update", "result", "failure", "retrospective"]).describe("Record kind; `post` only.").optional(),
+    kind: z.enum(["update", "result", "failure", "retrospective"]).optional().describe("Record kind; `post` only."),
     text: z.string().describe("Record text; `post` only.").optional(),
     block: blockField.describe("Block id `b<n>` the record is about; `post` only.").optional(),
     launch: launchField.describe("Launch id `l<n>` the record is about; `post` only.").optional(),
