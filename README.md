@@ -248,7 +248,7 @@ A subagent receives the frozen text, not the UI, a live design page or any impli
 
 ### Stopping
 
-"Stop" sends `stop_requested` with the block's open Launches and their bound agents. The coordinator runs `await playbook.stop("l3")` in JS eval: it cancels every subagent this session started for that Launch with `playbook.agent`/`playbook.spawn` and sets the Launch's blocks that are still `running` back to `todo`; a pending `playbook.result` then records the failure and closes the Launch. A worker started some other way is stopped by the coordinator its own way, followed by `playbook_edit {op:"status", block, value:"todo"}`.
+"Stop" sends `stop_requested` with the block's open Launches and their bound agents. The coordinator runs `await playbook.stop("l3")` in JS eval: it cancels every subagent this session started for that Launch with `playbook.agent`/`playbook.spawn` and sets the Launch's blocks that are still `running` back to `todo`; a pending `playbook.result` then records the failure and closes the Launch. A worker started some other way is stopped by the coordinator its own way, followed by `playbook_edit {op:"status", block, status:"todo"}`.
 
 ### Changes during execution
 
@@ -359,9 +359,9 @@ Each tool provides its topics through `docTopics()` on its own tool definition. 
 |---|---|
 | `playbook_open` | `{doc}` |
 | `playbook_read` | `{doc?, run?, block?}`; history `{doc?, run?, op:"revisions", block?, after?}`. Blocks carry `status` and `report`, or `task: false` |
-| `playbook_edit` | `{doc?, run?, op:"title", block, value}`; `status` takes `{block, value}` with `todo`, `running` or `done`; `task` takes `{block, value}` with `false` (untracked) or `true` (tracked, `todo`); `replace` takes `{block, find, replace}`; `write` takes `{block, text}`; `panel` takes `{block, panel, text}`; `insert` takes `{after?, title, body, agent?, isolated?}`; `insert_design` takes `{after?, title, design}`; `delete` takes `{block}`; `move` takes `{block, after}` with `after` a block ID or `null` (to the top); `agent` takes `{block, value}` with a string or `null` (clear); `isolated` takes `{block, value}` with a boolean or `null`; each also passes `op` |
+| `playbook_edit` | `op` selects the change; `doc`, `run`, `block` apply as usual. `title` takes `title`; `status` takes `status` (`todo`, `running` or `done`); `task` takes `tracked` (`false` untracked, `true` tracked again from `todo`); `replace` takes `find` and `replace`; `write` takes `text`; `panel` takes `panel` and `text`; `insert` takes `title`, `body`, optional `after`, `agent` and `isolated`; `insert_design` takes `title` and `design`, optional `after`; `delete` takes only `block`; `move` takes `position` (`"top"`, or `"after"` with `after`); `agent` takes `agent` or `clear: true`; `isolated` takes `isolation` (`isolated`, `shared` or `default`) |
 | `playbook_compile` | `{doc?, run?, op:"compile", blocks:[…]}`; refetch `{doc?, run?, op:"refetch", targets:[…]}` |
-| `playbook_check` | `{doc?, run?, op:"inspect", blocks:[…]}`; report `{doc?, run?, op:"report", blocks:[…], version, result}` |
+| `playbook_check` | `{doc?, run?, op:"inspect", blocks:[…]}`; report `{doc?, run?, op:"report", blocks:[…], version, result}` — `result:"answers"` with one `answers` entry per question (`{question, probability}`), or `result:"judge_unavailable"` |
 | `playbook_run` | `{doc?, op:"start", name, update_every?}`, `{doc?, op:"finish", run}`, `{doc?, op:"list"}` |
 | `playbook_timeline` | `{doc?, op:"read", run?, after?, limit?}` → `{entries}`, plus `next_after` (the next `after`) when `limit` truncated the page; `{doc?, op:"post", run?, kind, text, block?, launch?, next?, quote?}`; `{doc?, op:"snooze", run, after}` |
 | `playbook_launch` | `{doc?, op:"launch", run?, blocks:[…]}` → `{launch, kind, text, agent?, isolated?}`; `{doc?, op:"bind", launch, agent}`; `{doc?, op:"info" or "rebase" or "close", launch}` |
@@ -408,7 +408,7 @@ The `playbook` object in JS eval is injected by the extension; do not add an imp
 | `playbook.timeline({run?, after?})` | Reads the timeline |
 | `playbook.context` | `{doc, run?, launch}` during orchestration (no `run` for the Playbook itself); empty in an ordinary eval |
 
-The helpers never set `status` or finish a Run on their own; the subagent writes its own status. For parallel work, start workers with several `playbook.agent` calls, keep each in a top-level variable and `result` each one later; for several workers on one Launch, add them with `playbook.spawn` and pass `{close: true}` to the one that finishes up, or call `playbook_launch {op:"close"}`. A cell containing `playbook.run/result` with no explicit `timeout` gets `timeout: 0`.
+The helpers never set `status` or finish a Run on their own; the subagent writes its own status. For parallel work, start workers with several `playbook.agent` calls, keep each in a top-level variable and `result` each one later; for several workers on one Launch, add them with `playbook.spawn` and pass `{close: true}` to the one that finishes up, or call `playbook_launch {op:"close", launch:"l<n>"}`. A cell containing `playbook.run/result` with no explicit `timeout` gets `timeout: 0`.
 
 ### Orchestration blocks
 
@@ -445,7 +445,7 @@ Python orchestration sets the **Python variables** `PLAYBOOK_DOC`, `PLAYBOOK_RUN
 
 - `playbook_check inspect` returns `{blocks, source, compiled, view, findings, version}` and **currently returns no question definitions**.
 - The current fixed question is `missing`: does the full compiled prompt mention logs, discussions, files or earlier results whose content it does not include? The main session can answer it in eval with an available `judge`.
-- The report shape is `result: {kind:"answers", answers:{missing: P(yes)}}`, with the probability in 0–1; `P(yes) >= 0.5` counts as failed. With no judge available, report `{kind:"judge_unavailable"}`, which counts as not judged, not as passed.
+- The report is `result: "answers"` with `answers: [{question: "missing", probability: P(yes)}]`, the probability in 0–1; `P(yes) >= 0.5` counts as failed. With no judge available, report `result: "judge_unavailable"`, which counts as not judged, not as passed.
 - The report must carry the latest `version` for the same document, the same Run and the same ordered block list. Stale reports are ignored; a change to the input invalidates the old judgment.
 
 There is no design-approval state and no automatic transition from checks to `done`.

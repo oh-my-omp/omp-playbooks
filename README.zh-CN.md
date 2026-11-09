@@ -248,7 +248,7 @@ subagent 收到的是冻结文本，不是 UI、实时设计页或隐式 Playboo
 
 ### 打断执行
 
-“打断执行”发送 `stop_requested`，带上这个块未关闭的 Launch 及其绑定的 agent。协调者在 JS eval 中执行 `await playbook.stop("l3")`：它取消本会话用 `playbook.agent`/`playbook.spawn` 为该 Launch 启动的所有 subagent，并把该 Launch 中仍是 `running` 的块改回 `todo`；正在等待的 `playbook.result` 随后记录失败并关闭 Launch。用别的方式启动的 worker 由协调者用自己的方式停止，再调用 `playbook_edit {op:"status", block, value:"todo"}`。
+“打断执行”发送 `stop_requested`，带上这个块未关闭的 Launch 及其绑定的 agent。协调者在 JS eval 中执行 `await playbook.stop("l3")`：它取消本会话用 `playbook.agent`/`playbook.spawn` 为该 Launch 启动的所有 subagent，并把该 Launch 中仍是 `running` 的块改回 `todo`；正在等待的 `playbook.result` 随后记录失败并关闭 Launch。用别的方式启动的 worker 由协调者用自己的方式停止，再调用 `playbook_edit {op:"status", block, status:"todo"}`。
 
 ### 执行中的变更
 
@@ -359,9 +359,9 @@ subagent 收到的是冻结文本，不是 UI、实时设计页或隐式 Playboo
 |---|---|
 | `playbook_open` | `{doc}` |
 | `playbook_read` | `{doc?, run?, block?}`；历史 `{doc?, run?, op:"revisions", block?, after?}`。块带 `status` 和 `report`，或 `task: false` |
-| `playbook_edit` | `{doc?, run?, op:"title", block, value}`；`status` 用 `{block, value}`，值为 `todo`、`running` 或 `done`；`task` 用 `{block, value}`，`false` 为不跟踪、`true` 为跟踪（`todo`）；`replace` 用 `{block, find, replace}`；`write` 用 `{block, text}`；`panel` 用 `{block, panel, text}`；`insert` 用 `{after?, title, body, agent?, isolated?}`；`insert_design` 用 `{after?, title, design}`；`delete` 用 `{block}`；`move` 用 `{block, after}`，`after` 为块 ID 或 `null`（移到最前）；`agent` 用 `{block, value}`，值为字符串或 `null`（清除）；`isolated` 用 `{block, value}`，值为布尔或 `null`；以上都另传 `op` |
+| `playbook_edit` | `op` 选择变更；`doc`、`run`、`block` 照常传。`title` 传 `title`；`status` 传 `status`（`todo`、`running` 或 `done`）；`task` 传 `tracked`（`false` 不跟踪，`true` 从 `todo` 重新跟踪）；`replace` 传 `find` 和 `replace`；`write` 传 `text`；`panel` 传 `panel` 和 `text`；`insert` 传 `title`、`body`，可选 `after`、`agent`、`isolated`；`insert_design` 传 `title` 和 `design`，可选 `after`；`delete` 只传 `block`；`move` 传 `position`（`"top"`，或 `"after"` 加 `after`）；`agent` 传 `agent` 或 `clear: true`；`isolated` 传 `isolation`（`isolated`、`shared` 或 `default`） |
 | `playbook_compile` | `{doc?, run?, op:"compile", blocks:[…]}`；重新取回 `{doc?, run?, op:"refetch", targets:[…]}` |
-| `playbook_check` | `{doc?, run?, op:"inspect", blocks:[…]}`；报告 `{doc?, run?, op:"report", blocks:[…], version, result}` |
+| `playbook_check` | `{doc?, run?, op:"inspect", blocks:[…]}`；报告 `{doc?, run?, op:"report", blocks:[…], version, result}`——`result:"answers"` 时每个问题一条 `answers`（`{question, probability}`），或 `result:"judge_unavailable"` |
 | `playbook_run` | `{doc?, op:"start", name, update_every?}`、`{doc?, op:"finish", run}`、`{doc?, op:"list"}` |
 | `playbook_timeline` | `{doc?, op:"read", run?, after?, limit?}` → `{entries}`，`limit` 截断时另带 `next_after`（下一页的 `after`）；`{doc?, op:"post", run?, kind, text, block?, launch?, next?, quote?}`；`{doc?, op:"snooze", run, after}` |
 | `playbook_launch` | `{doc?, op:"launch", run?, blocks:[…]}` → `{launch, kind, text, agent?, isolated?}`；`{doc?, op:"bind", launch, agent}`；`{doc?, op:"info" 或 "rebase" 或 "close", launch}` |
@@ -408,7 +408,7 @@ JS eval 的 `playbook` 由扩展注入，不要自行加导入行。辅助方法
 | `playbook.timeline({run?, after?})` | 读时间线 |
 | `playbook.context` | 编排执行时的 `{doc, run?, launch}`（Playbook 本身没有 `run`）；普通 eval 中为空 |
 
-辅助方法不会自动设 `status` 或结束 Run；状态由 subagent 自己写。并行时用多个 `playbook.agent` 启动 worker，各自存进顶层变量，之后分别 `result`；多个 worker 共用一个 Launch 时用 `playbook.spawn` 加入，最后收尾的那个传 `{close: true}`，或调用 `playbook_launch {op:"close"}`。含 `playbook.run/result` 且未显式给 `timeout` 的单元会设置 `timeout: 0`。
+辅助方法不会自动设 `status` 或结束 Run；状态由 subagent 自己写。并行时用多个 `playbook.agent` 启动 worker，各自存进顶层变量，之后分别 `result`；多个 worker 共用一个 Launch 时用 `playbook.spawn` 加入，最后收尾的那个传 `{close: true}`，或调用 `playbook_launch {op:"close", launch:"l<n>"}`。含 `playbook.run/result` 且未显式给 `timeout` 的单元会设置 `timeout: 0`。
 
 ### 编排块
 
@@ -445,7 +445,7 @@ Python 编排会设置 **Python 变量** `PLAYBOOK_DOC`、`PLAYBOOK_RUN`（Playb
 
 - `playbook_check inspect` 返回 `{blocks, source, compiled, view, findings, version}`，**当前不返回问题定义**。
 - 当前固定问题 `missing`：完整编译 prompt 是否提到未包含其中的日志、讨论、文件或先前结果内容？主会话可以在 eval 中用可用的 `judge` 回答。
-- 报告形状为 `result: {kind:"answers", answers:{missing: P(yes)}}`，概率必须在 0–1；`P(yes) >= 0.5` 记为不通过。judge 不可用时报告 `{kind:"judge_unavailable"}`，记为未判定，不当作通过。
+- 报告为 `result: "answers"` 加 `answers: [{question: "missing", probability: P(yes)}]`，概率必须在 0–1；`P(yes) >= 0.5` 记为不通过。judge 不可用时报告 `result: "judge_unavailable"`，记为未判定，不当作通过。
 - 报告须带同一文档、同一 Run、同一顺序块列表的最新 `version`。过期报告会被忽略；输入变化使旧判定失效。
 
 没有设计认可状态，没有从检查到 `done` 的自动转换。

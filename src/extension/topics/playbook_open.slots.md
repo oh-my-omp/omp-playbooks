@@ -1,6 +1,6 @@
 ---
 title: Slots
-when: before writing a value the person picks, or a {{name}} or {{bN.name}} use
+when: before writing a value the person picks, or a {{…}} slot use
 ---
 # Slots
 

@@ -209,14 +209,14 @@ export function createPlaybook(deps: PlaybookDeps) {
 		 */
 		async stop(launch: string, request: { readonly doc?: string } = {}): Promise<{ readonly cancelled: readonly string[] }> {
 			const workers = started.get(launch) ?? [];
-			if (workers.length === 0) throw new PlaybookError(tr(`No subagent of ${launch} was started in this session; stop it where it runs, then set its blocks back to todo with xd://playbook_edit {op: "status"}`, `本会话没有启动 ${launch} 的 subagent；请在其运行处停止它，然后用 xd://playbook_edit {op: "status"} 将其块改回 todo`));
+			if (workers.length === 0) throw new PlaybookError(tr(`No subagent of ${launch} was started in this session; stop it where it runs, then set its blocks back to todo with xd://playbook_edit {op: "status", status: "todo"}`, `本会话没有启动 ${launch} 的 subagent；请在其运行处停止它，然后用 xd://playbook_edit {op: "status", status: "todo"} 将其块改回 todo`));
 			for (const worker of workers) await worker.handle.cancel();
 			started.delete(launch);
 			const info = launchInfo(await call("playbook_launch", { ...docArg(request.doc), op: "info", launch }));
 			const where = { ...docArg(request.doc), ...(info.run === null ? {} : { run: info.run }) };
 			for (const block of info.blocks) {
 				const current = objectOf(await call("playbook_read", { ...where, block }));
-				if ("status" in current && current.status === "running") await call("playbook_edit", { ...where, op: "status", block, value: "todo" });
+				if ("status" in current && current.status === "running") await call("playbook_edit", { ...where, op: "status", block, status: "todo" });
 			}
 			return { cancelled: workers.map(worker => worker.id) };
 		},
