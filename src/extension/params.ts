@@ -184,12 +184,12 @@ export function toolParameters(z: Zod) {
     find: z.string().describe("Text that must occur exactly once in the block's body or design; `replace` only.").optional(),
     replace: z.string().describe("Replacement for `find`; `replace` only.").optional(),
     panel: z.string().regex(PANEL_ID).describe("Panel letter id `A`, `A1`, … as written in the panel heading; `panel` only.").optional(),
-    agent: z.string().describe("Task block's default subagent name: the new default (`agent`) or the new block's default (`insert`). Omit for `insert` to use the session default; `agent` with `clear` is rejected.").optional(),
+    agent: z.string().describe("Task block's default subagent name: the new default (`agent`) or the new block's default (`insert`). Omit for `insert` to use the session default; `agent` with `clear: true` is rejected.").optional(),
     isolated: z.boolean().describe("Whether that default subagent works in its own worktree; `insert` only. Use `isolation` to change an existing block.").optional(),
     isolation: z.enum(["isolated", "shared", "default"]).optional().describe("New isolated setting of an existing task block: own worktree, shared worktree, or no preset. `isolated` only."),
     status: z.enum(["todo", "running", "done"]).optional().describe("New status; `status` only. The subagent that runs a block writes its own status; set it only to correct one."),
     tracked: z.boolean().describe("`false` makes a task block untracked (no status, not launchable, not counted); `true` tracks it again from `todo`. `task` only.").optional(),
-    clear: z.boolean().describe("`true` clears the task block's default agent; `agent` only. Do not combine it with `agent`; `false` alone is ignored.").optional(),
+    clear: z.boolean().describe("`true` clears the task block's default agent; `agent` only, and not together with `agent`. `false` is the same as omitting it.").optional(),
   }).strict();
 
   const compileParams = z.object({
@@ -303,21 +303,26 @@ export function toolParameters(z: Zod) {
 
   function checkToInternal(flat: ReturnType<typeof checkParams.parse>): ReturnType<typeof checkInternal.parse> {
     const candidate: Record<string, unknown> = { ...flat };
-    if (flat.result !== undefined) {
-      if (flat.result === "answers") {
-        const answers = new Map<string, number>();
-        for (const item of flat.answers ?? []) {
-          if (answers.has(item.question)) {
-            throw new Error(tr(`Duplicate answer for question ${item.question}`, `问题 ${item.question} 有重复回答`));
-          }
-          answers.set(item.question, item.probability);
-        }
-        candidate.result = { kind: "answers", answers: Object.fromEntries(answers) };
-        delete candidate.answers;
-      } else {
-        candidate.result = { kind: "judge_unavailable" };
-        delete candidate.answers;
+    delete candidate.answers;
+    if (flat.result === "answers") {
+      if (flat.answers === undefined) {
+        throw new Error(tr("playbook_check op report with result answers requires answers", "playbook_check 的 report 在 result 为 answers 时需要 answers"));
       }
+      const answers = new Map<string, number>();
+      for (const item of flat.answers) {
+        if (answers.has(item.question)) {
+          throw new Error(tr(`Duplicate answer for question ${item.question}`, `问题 ${item.question} 有重复回答`));
+        }
+        answers.set(item.question, item.probability);
+      }
+      candidate.result = { kind: "answers", answers: Object.fromEntries(answers) };
+    } else if (flat.result === "judge_unavailable") {
+      if (flat.answers !== undefined) {
+        throw new Error(tr("playbook_check result judge_unavailable takes no answers", "playbook_check 的 judge_unavailable 不接受 answers"));
+      }
+      candidate.result = { kind: "judge_unavailable" };
+    } else if (flat.answers !== undefined) {
+      throw new Error(tr("playbook_check answers needs result answers", "playbook_check 的 answers 需要 result 为 answers"));
     }
     return checkBranches[flat.op].parse(candidate);
   }

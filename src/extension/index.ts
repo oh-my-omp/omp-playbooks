@@ -285,12 +285,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				description: tool.description + (pointers.length ? `\n\nTopics — read the one a call needs before making it:\n${pointers.join("\n")}` : ""),
 				docTopics: () => Object.fromEntries(ownTopics.map(topic => [topic.name, topic.read()])),
 				async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+					// Each entry pairs its own schema with its own runner. A call that does not parse is the caller's
+					// error (BadValue), not a service state; only the run itself can fail as NoService or Disconnected.
+					const parse = tool.parameters.parse as (value: unknown) => unknown;
+					const toInternal = tool.toInternal as (value: unknown) => unknown;
+					let internal: unknown;
+					try { internal = toInternal(parse(params)); } catch (thrown) {
+						return reply({ id: "", ok: false, error: { code: "BadValue", message: thrown instanceof Error ? thrown.message : String(thrown) } });
+					}
 					try {
-						// Each entry pairs its own schema with its own runner.
 						const run = tool.run as (value: unknown, context: ExtensionContext) => Promise<Reply>;
-						const parse = tool.parameters.parse as (value: unknown) => unknown;
-						const toInternal = tool.toInternal as (value: unknown) => unknown;
-						return reply(await run(toInternal(parse(params)), ctx));
+						return reply(await run(internal, ctx));
 					} catch (thrown) { return failure(thrown); }
 				},
 			} satisfies ToolDefinition<typeof tool.parameters> & { docTopics(): Readonly<Record<string, string>> };

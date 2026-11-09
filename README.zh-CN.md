@@ -349,7 +349,7 @@ subagent 收到的是冻结文本，不是 UI、实时设计页或隐式 Playboo
 
 ## 协调者工具
 
-下面是工具参数，不是 shell 命令。只有恰好连接了一份文档时才能省略 `doc`；省略 `run` 即作用于 Playbook 文件本身。所有输入严格校验，不接受额外字段。普通 `playbook_read` **不写 `op: "read"`**。
+下面是工具参数，不是 shell 命令。只有恰好连接了一份文档时才能省略 `doc`；省略 `run` 即作用于 Playbook 文件本身。输入严格校验：设备未声明的字段在调用前由宿主删除；已声明、但所选 `op` 不使用的字段会被拒绝。普通 `playbook_read` **不写 `op: "read"`**。
 
 模型读到的工具说明分两层。omp 列出设备时只显示其说明的前 200 个字符，所以说明先用简短文字交代用途和参数结构表达不了的语义，完整说明末尾逐行列出 `xd://` topic 指针及什么时候读。调用细节按需读取：`playbook_open` 有 `format`、`outline`、`slots`、`references`、`execution`、`runs`、`language`；`playbook_edit` 有 `text`、`blocks`、`state`；`playbook_read` 有 `revisions`，`playbook_launch` 有 `lifecycle`，`playbook_timeline` 有 `records`，`playbook_check` 有 `judge`。`read xd://playbook_open` 读取完整说明和指针；`read xd://playbook_open/format` 返回该 topic 的 Markdown 正文，不含文件头。topics 写在 `src/extension/topics/`；`language` 在每次读取时按会话当前语言生成。
 

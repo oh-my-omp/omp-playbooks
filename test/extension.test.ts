@@ -231,6 +231,14 @@ for (const [op, fields, mutation, args] of [
 	});
 }
 
+test("a call whose parameters do not parse fails as BadValue, not NoService, before any request", async () => {
+	const s = await service(); const h = await harness(); await h.execute("playbook_open", { doc: s.doc });
+	const result = await h.execute("playbook_read", { doc: s.doc, op: "read", after: 3 });
+	expect(result.isError).toBe(true);
+	expect(JSON.parse(result.content[0]!.text!).error.code).toBe("BadValue");
+	expect(s.frames.map(frame => frame.op)).toEqual(["hello"]);
+});
+
 test("playbook_edit rejects a blank agent, a design-block contract field and a move without a target before any request", async () => {
 	const s = await service(); const h = await harness(); await h.execute("playbook_open", { doc: s.doc });
 	for (const params of [

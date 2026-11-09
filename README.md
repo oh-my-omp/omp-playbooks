@@ -349,7 +349,7 @@ Execution bodies and designs are drawn with the same component parser. The compo
 
 ## Coordinator tools
 
-These are tool arguments, not shell commands. `doc` can be omitted only when exactly one document is connected; `run` is omitted to act on the Playbook file itself. All input is strictly validated and extra fields are rejected. A plain `playbook_read` **has no `op: "read"`**.
+These are tool arguments, not shell commands. `doc` can be omitted only when exactly one document is connected; `run` is omitted to act on the Playbook file itself. Input is strictly validated: a field the device does not declare is removed by the host before the call runs, and a declared field that the chosen `op` does not use is rejected. A plain `playbook_read` **has no `op: "read"`**.
 
 What the model reads of these tools comes in two layers. omp lists a device with only the first 200 characters of its description, so each description starts with a short purpose and the semantics its schema cannot carry. The full description ends with `xd://` topic pointers and when to read each. The call instructions are read on demand: `playbook_open` has `format`, `outline`, `slots`, `references`, `execution`, `runs` and `language`; `playbook_edit` has `text`, `blocks` and `state`; `playbook_read` has `revisions`, `playbook_launch` `lifecycle`, `playbook_timeline` `records` and `playbook_check` `judge`. `read xd://playbook_open` reads the full description and pointers; `read xd://playbook_open/format` returns that topic's Markdown body without its file header. The topics live in `src/extension/topics/`; `language` is generated on every read in the session's current language.
 

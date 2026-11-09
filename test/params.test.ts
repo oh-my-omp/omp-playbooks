@@ -125,3 +125,21 @@ for (const [name, params] of [
 		rejects(name, params);
 	});
 }
+test("playbook_check rejects answers with result judge_unavailable", () => {
+	rejects("playbook_check", { op: "report", doc: "/b.yaml", blocks: ["b1"], version: "v1", result: "judge_unavailable", answers: [{ question: "q1", probability: 0.8 }] });
+});
+
+test("playbook_check report with result answers rejects a call without answers", () => {
+	rejects("playbook_check", { op: "report", doc: "/b.yaml", blocks: ["b1"], version: "v1", result: "answers" });
+});
+
+test("playbook_check rejects answers unless result is answers", () => {
+	rejects("playbook_check", { op: "inspect", doc: "/b.yaml", blocks: ["b1"], answers: [{ question: "q1", probability: 0.8 }] });
+	rejects("playbook_check", { op: "report", doc: "/b.yaml", blocks: ["b1"], version: "v1", answers: [{ question: "q1", probability: 0.8 }] });
+});
+
+test("playbook_edit op agent treats clear false as omitted", () => {
+	rejects("playbook_edit", { op: "agent", doc: "/b.yaml", block: "b1", clear: false });
+	expect(call("playbook_edit", { op: "agent", doc: "/b.yaml", block: "b1", agent: "task:mid", clear: false }))
+		.toEqual(call("playbook_edit", { op: "agent", doc: "/b.yaml", block: "b1", agent: "task:mid" }));
+});
