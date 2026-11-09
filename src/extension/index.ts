@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import { ptree } from "@oh-my-pi/pi-utils";
-import { parseBlockId, parseLaunchId, parseRunId, type BlockId, type LaunchId, type RunId, type RecordKind } from "../domain/model";
+import { parseLaunchId, type BlockId, type RunId, type RecordKind } from "../domain/model";
 import { paneSocketPath, socketPath, type EventPayload, type PaneReply, type PaneRequest, type Request, type ServerFrame } from "../domain/protocol";
 import { K1Client, type Reply } from "./client";
 import { splitPane } from "../service/panes";
@@ -13,6 +13,7 @@ import { availableAgents } from "./agents";
 import { tr, withLanguage } from "../i18n";
 import { listenPane, type PaneListener } from "./pane-listener";
 import { playbookTopics } from "./topics";
+import { toolParameters } from "./params";
 
 /** A block body that is one fenced js/py code block is an orchestration block (launch-events.md §1). */
 const ORCHESTRATION = /^\s*```(js|py)\s*\n([\s\S]*)\n```\s*$/;
@@ -44,117 +45,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const inTern = ternPane();
 	if (inTern === null) { await ensureTernPlugin(); return; }
 	const pane: string = inTern;
-	const z = pi.zod;
-	const block = z.string().regex(/^b[1-9][0-9]*$/).transform(value => {
-		const id = parseBlockId(value); if (id === null) throw new Error(tr("Invalid block id", "块 id 无效")); return id;
-	});
-	const run = z.string().regex(/^r[1-9][0-9]*$/).transform(value => {
-		const id = parseRunId(value); if (id === null) throw new Error(tr("Invalid Run id", "Run id 无效")); return id;
-	});
-	const launch = z.string().regex(/^l[1-9][0-9]*$/).transform(value => {
-		const id = parseLaunchId(value); if (id === null) throw new Error(tr("Invalid Launch id", "Launch id 无效")); return id;
-	});
-	const kind = z.enum(["update", "result", "failure", "retrospective"]);
-	/** A task block's default agent, as K1 stores it: trimmed and not blank. */
-	const agentName = z.string().trim().min(1);
-	const positive = z.number().int().positive();
-	const doc = z.string().optional();
-	const report = z.union([
-		z.object({ kind: z.literal("answers"), answers: z.record(z.string(), z.number()) }).strict(),
-		z.object({ kind: z.literal("judge_unavailable") }).strict(),
-	]);
-
-	// K2 tools: one per authoritative object, each a closed `op` union with flat fields.
-	const openParams = z.object({ doc: z.string() }).strict();
-	const readParams = z.union([
-		z.object({ doc, run: run.optional(), block: block.optional() }).strict(),
-		z.object({ doc, run: run.optional(), op: z.literal("revisions"), block: block.optional(), after: z.number().int().nonnegative().optional() }).strict(),
-	]);
-	const editParams = z.union([
-		z.object({ doc, run: run.optional(), op: z.literal("title"), block, value: z.string() }).strict(),
-		z.object({ doc, run: run.optional(), op: z.literal("status"), block, value: z.enum(["todo", "running", "done"]) }).strict(),
-		z.object({ doc, run: run.optional(), op: z.literal("task"), block, value: z.boolean() }).strict(),
-		z.object({ doc, run: run.optional(), op: z.literal("replace"), block, find: z.string(), replace: z.string() }).strict(),
-		z.object({ doc, run: run.optional(), op: z.literal("write"), block, text: z.string() }).strict(),
-		z.object({ doc, run: run.optional(), op: z.literal("panel"), block, panel: z.string().regex(/^[A-Z][0-9]*$/), text: z.string() }).strict(),
-		z.object({ doc, run: run.optional(), op: z.literal("insert"), after: block.optional(), title: z.string(), body: z.string(), agent: agentName.optional(), isolated: z.boolean().optional() }).strict(),
-		z.object({ doc, run: run.optional(), op: z.literal("insert_design"), after: block.optional(), title: z.string(), design: z.string() }).strict(),
-		z.object({ doc, run: run.optional(), op: z.literal("delete"), block }).strict(),
-		z.object({ doc, run: run.optional(), op: z.literal("move"), block, after: block.nullable() }).strict(),
-		z.object({ doc, run: run.optional(), op: z.literal("agent"), block, value: agentName.nullable() }).strict(),
-		z.object({ doc, run: run.optional(), op: z.literal("isolated"), block, value: z.boolean().nullable() }).strict(),
-	]);
-	const compileParams = z.union([
-		z.object({ doc, run: run.optional(), op: z.literal("compile"), blocks: z.array(block) }).strict(),
-		z.object({ doc, run: run.optional(), op: z.literal("refetch"), targets: z.array(z.string()) }).strict(),
-	]);
-	const checkParams = z.union([
-		z.object({ doc, run: run.optional(), op: z.literal("inspect"), blocks: z.array(block) }).strict(),
-		z.object({ doc, run: run.optional(), op: z.literal("report"), blocks: z.array(block), version: z.string(), result: report }).strict(),
-	]);
-	const runParams = z.union([
-		z.object({ doc, op: z.literal("start"), name: z.string(), update_every: positive.optional() }).strict(),
-		z.object({ doc, op: z.literal("finish"), run }).strict(),
-		z.object({ doc, op: z.literal("list") }).strict(),
-	]);
-	const timelineParams = z.union([
-		z.object({ doc, op: z.literal("read"), run: run.optional(), after: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional() }).strict(),
-		z.object({ doc, op: z.literal("post"), run: run.optional(), kind, text: z.string(), block: block.optional(), launch: launch.optional(), next: positive.optional(), quote: z.string().optional() }).strict(),
-		z.object({ doc, op: z.literal("snooze"), run, after: positive }).strict(),
-	]);
-	const launchParams = z.union([
-		z.object({ doc, op: z.literal("launch"), run: run.optional(), blocks: z.array(block) }).strict(),
-		z.object({ doc, op: z.literal("bind"), launch, agent: z.string() }).strict(),
-		z.object({ doc, op: z.literal("info"), launch }).strict(),
-		z.object({ doc, op: z.literal("rebase"), launch }).strict(),
-		z.object({ doc, op: z.literal("close"), launch }).strict(),
-	]);
-
-	const site = z.object({ block, reference: z.string() });
-	const compileError = z.union([
-		z.object({ kind: z.literal("UnknownBlock"), block, at: site }),
-		z.object({ kind: z.literal("UnknownTarget"), at: site }),
-		z.object({ kind: z.literal("BadExpression"), reason: z.string(), at: site }),
-		z.object({ kind: z.literal("Cycle"), path: z.array(block), at: site }),
-		z.object({ kind: z.literal("TooDeep"), at: site }),
-		z.object({ kind: z.literal("NoResult"), block, at: site }),
-		z.object({ kind: z.literal("FetchFailed"), target: z.string(), error: z.string(), at: site }),
-		z.object({ kind: z.literal("UnknownSlot"), block, slot: z.string(), at: site }),
-	]);
-	const sourceFields = { target: z.string(), expression: z.string().nullable() };
-	const source = z.union([
-		z.object({ kind: z.literal("block"), ...sourceFields }),
-		z.object({ kind: z.literal("result"), ...sourceFields, seq: z.number(), origin: z.enum(["human", "coordinator", "disk", "service"]), launch: launch.nullable() }),
-		z.object({ kind: z.literal("external"), ...sourceFields, fetchedAt: z.number() }),
-	]);
-	const events = z.union([
-		z.object({ event: z.literal("block_changed"), data: z.object({ id: z.string(), launch: z.object({ id: launch, kind: z.enum(["prompt", "orchestration"]), run: run.optional() }), agents: z.array(z.string()), changed: z.array(block), diff: z.string(), current: z.union([
-			z.object({ kind: z.literal("Ok"), text: z.string(), sources: z.array(source) }),
-			z.object({ kind: z.literal("Err"), error: compileError }),
-		]) }) }),
-		z.object({ event: z.literal("launch_requested"), data: z.object({ run: run.optional(), blocks: z.array(block) }) }),
-		z.object({ event: z.literal("stop_requested"), data: z.object({ run: run.optional(), block, launches: z.array(z.object({ id: launch, agents: z.array(z.string()) })) }) }),
-		z.object({ event: z.literal("status_changed"), data: z.object({ run: run.optional(), block, status: z.enum(["todo", "running", "done"]) }) }),
-		z.object({ event: z.literal("update_due"), data: z.object({ run, due: z.number(), last_update: z.number().nullable() }) }),
-		z.object({ event: z.literal("interrupted"), data: z.object({ run: run.optional(), block, request: z.string() }) }),
-		z.object({ event: z.literal("revision_requested"), data: z.object({ run: run.optional(), block, revision: positive }) }),
-		z.object({ event: z.literal("agents_requested"), data: z.object({}).strict() }),
-	]);
-	const error = z.object({ code: z.enum(["Busy", "NotHello", "Locked", "NotLocked", "UnknownBlock", "UnknownRun", "RunFinished", "BadValue", "NotFound", "Ambiguous", "BadLaunch", "CompileError", "UnknownTarget", "BadReport", "UnknownLaunch", "NotOwner", "UnknownEvent", "RevealFailed"]), message: z.string(), detail: z.unknown().optional() });
-	const frames = z.union([events, z.object({ id: z.string(), ok: z.literal(true), result: z.unknown().optional() }).strict(), z.object({ id: z.string(), ok: z.literal(false), error }).strict()]);
-	const summary = z.object({ id: run, name: z.string(), status: z.enum(["running", "finished"]), started_at: z.number(), finished_at: z.number().nullable(), done: z.number(), total: z.number(), update_due: z.number().nullable(), update_overdue: z.boolean(), retrospective: z.boolean() });
-	const runsResult = z.object({ runs: z.array(summary) });
-	const helloResult = z.object({ blocks: z.array(block), runs: z.array(summary), pane: z.string().optional() });
-	const progressFields = { status: z.enum(["todo", "running", "done"]).optional(), report: z.string().optional(), task: z.literal(false).optional() };
-	const wireBlock = z.union([
-		z.object({ id: block, kind: z.literal("task"), title: z.string(), body: z.string(), agent: z.string().optional(), isolated: z.boolean().optional(), ...progressFields }),
-		z.object({ id: block, kind: z.literal("design"), title: z.string(), requirement: z.string(), design: z.string(), ...progressFields }),
-	]);
-	const readResult = z.object({ title: z.string(), blocks: z.array(wireBlock) });
-	const revisionsResult = z.object({ revisions: z.array(z.object({ seq: positive, at: z.number(), block, prompt: z.string() })) });
-	const postResult = z.object({ seq: positive });
-	const launchRecord = z.object({ id: launch, run: run.nullable(), session: z.string(), kind: z.enum(["prompt", "orchestration"]), snapshot: z.object({ result: z.object({ text: z.string() }) }), baselines: z.array(z.string()).optional() });
-	const evalInput = z.object({ language: z.enum(["js", "py"]), code: z.string(), title: z.string().optional(), timeout: z.number().optional(), reset: z.boolean().optional() });
+	const schemas = toolParameters(pi.zod);
+	const { frames, readResult, revisionsResult, runsResult, helloResult, postResult, launchRecord, evalInput } = schemas.wire;
+	/** The eight device schemas; `wire` holds the frames and results they are not. */
+	type Tools = Omit<typeof schemas, "wire">;
+	type InternalOf<K extends keyof Tools> = ReturnType<Tools[K]["toInternal"]>;
 
 	const clients = new Map<string, K1Client>();
 	let session: string | undefined;
@@ -282,23 +177,23 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
 	// Model-facing text starts with the short purpose omp shows of a plugin device;
 	// full descriptions end with pointers to the tool's own xd:// topics (./topics.ts).
-	type Tool<T> = { readonly name: string; readonly label: string; readonly description: string; readonly parameters: { parse(value: unknown): T }; run(params: T, ctx: ExtensionContext): Promise<Reply> };
+	type Tool<K extends keyof Tools> = { readonly name: K; readonly label: string; readonly description: string; readonly parameters: Tools[K]["parameters"]; readonly toInternal: Tools[K]["toInternal"]; run(params: InternalOf<K>, ctx: ExtensionContext): Promise<Reply> };
 	const tools = [
 		{
-			name: "playbook_open", label: tr("Playbook: open", "Playbook: 打开"), parameters: openParams,
-			description: "Connect this session to a Playbook YAML as its coordinator, opening its Tern pane when none runs. Use to write, review or run multi-step agent work. {doc} → block ids, Runs.",
+			name: "playbook_open", label: tr("Playbook: open", "Playbook: 打开"), parameters: schemas.playbook_open.parameters, toInternal: schemas.playbook_open.toInternal,
+			description: "Connect this session to a Playbook YAML as its coordinator, opening its Tern pane when none runs. Use to write, review or run multi-step agent work. → block ids, Runs.",
 			run: (params, ctx) => open(params.doc, ctx),
-		} satisfies Tool<{ doc: string }>,
+		} satisfies Tool<"playbook_open">,
 		{
-			name: "playbook_read", label: tr("Playbook: read", "Playbook: 读取"), parameters: readParams,
-			description: "Read committed blocks of the Playbook (or Run `run`): all, or one `block`. op revisions {block?, after?} lists the person's design change requests, not part of a read.",
+			name: "playbook_read", label: tr("Playbook: read", "Playbook: 读取"), parameters: schemas.playbook_read.parameters, toInternal: schemas.playbook_read.toInternal,
+			description: "Read committed blocks of the Playbook (or one Run): all blocks or one block; the revisions op lists a design block's change requests instead.",
 			run: (params, ctx) => "op" in params
 				? request(params.doc, ctx, { op: "revisions", args: { ...scoped(params.run), ...(params.block ? { block: params.block } : {}), ...(params.after !== undefined ? { after: params.after } : {}) } })
 				: request(params.doc, ctx, { op: "read", args: { ...scoped(params.run), ...(params.block ? { block: params.block } : {}) } }),
-		} satisfies Tool<ReturnType<typeof readParams.parse>>,
+		} satisfies Tool<"playbook_read">,
 		{
-			name: "playbook_edit", label: tr("Playbook: edit", "Playbook: 编辑"), parameters: editParams,
-			description: "Change one block of the Playbook (or Run `run`) by `op`. Each call locks the block; NotLocked means nothing was applied, so read it again. A design's requirement is the person's.",
+			name: "playbook_edit", label: tr("Playbook: edit", "Playbook: 编辑"), parameters: schemas.playbook_edit.parameters, toInternal: schemas.playbook_edit.toInternal,
+			description: "Change one block of the Playbook (or one Run). Each call locks the block; NotLocked means nothing was applied, so read it again. A design's requirement is the person's.",
 			run: (params, ctx) => {
 				switch (params.op) {
 					case "insert": return request(params.doc, ctx, { op: "insert", args: { ...scoped(params.run), ...(params.after ? { after: params.after } : {}), title: params.title, content: { kind: "task", body: params.body, ...(params.agent !== undefined ? { agent: params.agent } : {}), ...(params.isolated !== undefined ? { isolated: params.isolated } : {}) } } });
@@ -315,24 +210,24 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					case "isolated": return editBlock(params.doc, ctx, { ...scoped(params.run), block: params.block }, { op: "set", args: { ...scoped(params.run), block: params.block, field: "isolated", value: params.value } });
 				}
 			},
-		} satisfies Tool<ReturnType<typeof editParams.parse>>,
+		} satisfies Tool<"playbook_edit">,
 		{
-			name: "playbook_compile", label: tr("Playbook: compile", "Playbook: 编译"), parameters: compileParams,
-			description: "compile {blocks} returns the exact prompt the blocks produce (references expanded), without starting anything; refetch {targets} fetches external references (GitHub, URLs) again.",
+			name: "playbook_compile", label: tr("Playbook: compile", "Playbook: 编译"), parameters: schemas.playbook_compile.parameters, toInternal: schemas.playbook_compile.toInternal,
+			description: "Render the exact prompt the blocks compile to without starting anything, or fetch their external references (files, GitHub, URLs) again.",
 			run: (params, ctx) => params.op === "compile"
 				? request(params.doc, ctx, { op: "compile", args: { ...scoped(params.run), blocks: params.blocks } })
 				: request(params.doc, ctx, { op: "refetch", args: { ...scoped(params.run), targets: params.targets } }),
-		} satisfies Tool<ReturnType<typeof compileParams.parse>>,
+		} satisfies Tool<"playbook_compile">,
 		{
-			name: "playbook_check", label: tr("Playbook: check", "Playbook: 检查"), parameters: checkParams,
-			description: "inspect {blocks} → deterministic findings, judge questions and a `version`; answer with `judge` in eval, then report {blocks, version, result}. Checks never gate a launch.",
+			name: "playbook_check", label: tr("Playbook: check", "Playbook: 检查"), parameters: schemas.playbook_check.parameters, toInternal: schemas.playbook_check.toInternal,
+			description: "Inspect blocks for deterministic findings and judge questions, then report the judge's answers. Checks never gate a launch.",
 			run: (params, ctx) => params.op === "inspect"
 				? request(params.doc, ctx, { op: "inspect", args: { ...scoped(params.run), blocks: params.blocks } })
 				: request(params.doc, ctx, { op: "report", args: { ...scoped(params.run), blocks: params.blocks, version: params.version, result: params.result } }),
-		} satisfies Tool<ReturnType<typeof checkParams.parse>>,
+		} satisfies Tool<"playbook_check">,
 		{
-			name: "playbook_run", label: tr("Playbook: Run", "Playbook: 运行"), parameters: runParams,
-			description: "start {name, update_every?} copies the Playbook into a new Run (all todo, no reports; starts no agent) → its id; finish {run} ends the Run; list → Run summaries.",
+			name: "playbook_run", label: tr("Playbook: Run", "Playbook: 运行"), parameters: schemas.playbook_run.parameters, toInternal: schemas.playbook_run.toInternal,
+			description: "Start, finish or list Runs. A Run is a clean copy of the Playbook for one execution; starting one starts no agent.",
 			run: (params, ctx) => {
 				switch (params.op) {
 					case "start": return request(params.doc, ctx, { op: "start_run", args: { name: params.name, ...(params.update_every !== undefined ? { update_every: params.update_every } : {}) } });
@@ -340,10 +235,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					case "list": return request(params.doc, ctx, { op: "runs", args: {} });
 				}
 			},
-		} satisfies Tool<ReturnType<typeof runParams.parse>>,
+		} satisfies Tool<"playbook_run">,
 		{
-			name: "playbook_timeline", label: tr("Playbook: timeline", "Playbook: 时间线"), parameters: timelineParams,
-			description: "Execution log of the Playbook (or Run `run`): read {after?, limit?} entries via `next_after`; post {kind, text, …} a record, which closes no Launch; snooze {run, after} its update reminder.",
+			name: "playbook_timeline", label: tr("Playbook: timeline", "Playbook: 时间线"), parameters: schemas.playbook_timeline.parameters, toInternal: schemas.playbook_timeline.toInternal,
+			description: "Read or append the Playbook's execution log (or one Run's), and postpone a Run's update reminder.",
 			run: (params, ctx) => {
 				switch (params.op) {
 					case "read": return request(params.doc, ctx, { op: "timeline", args: { ...scoped(params.run), ...(params.after !== undefined ? { after: params.after } : {}), ...(params.limit !== undefined ? { limit: params.limit } : {}) } });
@@ -354,10 +249,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					case "snooze": return request(params.doc, ctx, { op: "snooze", args: { run: params.run, after: params.after } });
 				}
 			},
-		} satisfies Tool<ReturnType<typeof timelineParams.parse>>,
+		} satisfies Tool<"playbook_timeline">,
 		{
-			name: "playbook_launch", label: tr("Playbook: Launch", "Playbook: 启动"), parameters: launchParams,
-			description: "A Launch freezes blocks' prompt for subagents: launch {blocks} → {launch, text}; bind, info, rebase, close. It starts no subagent; prefer playbook.agent/playbook.run in eval.",
+			name: "playbook_launch", label: tr("Playbook: Launch", "Playbook: 启动"), parameters: schemas.playbook_launch.parameters, toInternal: schemas.playbook_launch.toInternal,
+			description: "Freeze blocks' prompt into a Launch that subagents work from: create, bind, inspect, rebase or close one. It starts no subagent; prefer playbook.agent/playbook.run in eval.",
 			run: (params, ctx) => {
 				switch (params.op) {
 					case "launch": return request(params.doc, ctx, { op: "launch", args: { ...scoped(params.run), blocks: params.blocks } });
@@ -367,7 +262,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					case "close": return request(params.doc, ctx, { op: "close", args: { launch: params.launch } });
 				}
 			},
-		} satisfies Tool<ReturnType<typeof launchParams.parse>>,
+		} satisfies Tool<"playbook_launch">,
 	] as const;
 	type AnyTool = (typeof tools)[number];
 
@@ -390,10 +285,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				description: tool.description + (pointers.length ? `\n\nTopics — read the one a call needs before making it:\n${pointers.join("\n")}` : ""),
 				docTopics: () => Object.fromEntries(ownTopics.map(topic => [topic.name, topic.read()])),
 				async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+					// Each entry pairs its own schema with its own runner. A call that does not parse is the caller's
+					// error (BadValue), not a service state; only the run itself can fail as NoService or Disconnected.
+					const parse = tool.parameters.parse as (value: unknown) => unknown;
+					const toInternal = tool.toInternal as (value: unknown) => unknown;
+					let internal: unknown;
+					try { internal = toInternal(parse(params)); } catch (thrown) {
+						return reply({ id: "", ok: false, error: { code: "BadValue", message: thrown instanceof Error ? thrown.message : String(thrown) } });
+					}
 					try {
-						// Each entry pairs its own schema with its own runner.
 						const run = tool.run as (value: unknown, context: ExtensionContext) => Promise<Reply>;
-						return reply(await run(tool.parameters.parse(params), ctx));
+						return reply(await run(internal, ctx));
 					} catch (thrown) { return failure(thrown); }
 				},
 			} satisfies ToolDefinition<typeof tool.parameters> & { docTopics(): Readonly<Record<string, string>> };
@@ -452,14 +354,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				const launchesZh = event.data.launches.map(item => item.id).join("、");
 				const agentsEn = agents.join(", ");
 				const agentsZh = agents.join("、");
-				next = tr(`A person requested stopping execution of block ${event.data.block} (Launch ${launchesEn}${agents.length ? `, subagent ${agentsEn}` : ""}). Next: execute ${stopsEn} in eval: this cancels the subagents this session started for these Launches and sets blocks still running back to todo; any waiting playbook.result calls then record the failure and close the Launch. If a subagent was not started in this session through playbook.agent / playbook.spawn, stop it your own way first, then use xd://playbook_edit {op: "status", block: "${event.data.block}", value: "todo"${event.data.run === undefined ? "" : `, run: "${event.data.run}"`}} to set it back to todo.`, `人请求打断块 ${event.data.block} 的执行（Launch ${launchesZh}${agents.length ? `，subagent ${agentsZh}` : ""}）。下一步：在 eval 中执行 ${stopsZh}：它取消本会话为这些 Launch 启动的 subagent，并把仍在执行中的块改回 todo；等着的 playbook.result 随后记录失败并关闭 Launch。若 subagent 不是本会话通过 playbook.agent / playbook.spawn 启动的，先用你自己的方式停止它，再用 xd://playbook_edit {op: "status", block: "${event.data.block}", value: "todo"${event.data.run === undefined ? "" : `, run: "${event.data.run}"`}} 改回 todo。`);
+				next = tr(`A person requested stopping execution of block ${event.data.block} (Launch ${launchesEn}${agents.length ? `, subagent ${agentsEn}` : ""}). Next: execute ${stopsEn} in eval: this cancels the subagents this session started for these Launches and sets blocks still running back to todo; any waiting playbook.result calls then record the failure and close the Launch. If a subagent was not started in this session through playbook.agent / playbook.spawn, stop it your own way first, then use xd://playbook_edit {op: "status", block: "${event.data.block}", status: "todo"${event.data.run === undefined ? "" : `, run: "${event.data.run}"`}} to set it back to todo.`, `人请求打断块 ${event.data.block} 的执行（Launch ${launchesZh}${agents.length ? `，subagent ${agentsZh}` : ""}）。下一步：在 eval 中执行 ${stopsZh}：它取消本会话为这些 Launch 启动的 subagent，并把仍在执行中的块改回 todo；等着的 playbook.result 随后记录失败并关闭 Launch。若 subagent 不是本会话通过 playbook.agent / playbook.spawn 启动的，先用你自己的方式停止它，再用 xd://playbook_edit {op: "status", block: "${event.data.block}", status: "todo"${event.data.run === undefined ? "" : `, run: "${event.data.run}"`}} 改回 todo。`);
 				break;
 			}
 			case "block_changed":
 				next = tr(`A person changed block ${JSON.stringify(event.data.changed)}, on which Launch ${event.data.launch.id} depends (see the diff below). You can: call xd://playbook_launch {op: "rebase", launch: "${event.data.launch.id}"} to accept the current text as the new baseline (then playbook.spawn and playbook.exec use it); notify the subagent that is still running; or do nothing.`, `人修改了 Launch ${event.data.launch.id} 依赖的块 ${JSON.stringify(event.data.changed)}（diff 见下）。可以：调用 xd://playbook_launch {op: "rebase", launch: "${event.data.launch.id}"} 接受当前文本为新基线（之后 playbook.spawn 与 playbook.exec 使用它）；告诉仍在运行的 subagent；或不处理。`);
 				break;
 			case "update_due":
-				next = tr(`The status update for Run ${event.data.run} is due. Next: xd://playbook_timeline {op: "post", run: "${event.data.run}", kind: "update", text: ...} writes the update, or {op: "snooze"} postpones it.`, `Run ${event.data.run} 的状态更新到期。下一步：xd://playbook_timeline {op: "post", run: "${event.data.run}", kind: "update", text: ...} 写更新，或 {op: "snooze"} 推迟。`);
+				next = tr(`The status update for Run ${event.data.run} is due. Next: xd://playbook_timeline {op: "post", run: "${event.data.run}", kind: "update", text: ...} writes the update, or {op: "snooze", run: "${event.data.run}", after: <seconds>} postpones it.`, `Run ${event.data.run} 的状态更新到期。下一步：xd://playbook_timeline {op: "post", run: "${event.data.run}", kind: "update", text: ...} 写更新，或 {op: "snooze", run: "${event.data.run}", after: <秒数>} 推迟。`);
 				break;
 			case "revision_requested": {
 				const where = event.data.run === undefined ? "Playbook" : `Run ${event.data.run}`;

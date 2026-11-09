@@ -204,18 +204,18 @@ function client(path: string): K1Client {
 const runId = parseRunId("r1")!;
 
 for (const [op, fields, mutation, args] of [
-	["title", { value: "Renamed" }, "set", { field: "title", value: "Renamed" }],
-	["status", { value: "done" }, "set", { field: "status", value: "done" }],
+	["title", { title: "Renamed" }, "set", { field: "title", value: "Renamed" }],
+	["status", { status: "done" }, "set", { field: "status", value: "done" }],
 	["replace", { find: "Body", replace: "New" }, "edit", { find: "Body", replace: "New" }],
 	["write", { text: "New design" }, "write", { text: "New design" }],
 	["panel", { panel: "A", text: "## A Revised\nNew design" }, "panel", { panel: "A", text: "## A Revised\nNew design" }],
 	["delete", {}, "delete", {}],
-	["move", { after: null }, "move", { after: null }],
-	["move", { after: "b2" }, "move", { after: "b2" }],
-	["agent", { value: " task:mid " }, "set", { field: "agent", value: "task:mid" }],
-	["agent", { value: null }, "set", { field: "agent", value: null }],
-	["isolated", { value: false }, "set", { field: "isolated", value: false }],
-	["isolated", { value: null }, "set", { field: "isolated", value: null }],
+	["move", { position: "top" }, "move", { after: null }],
+	["move", { position: "after", after: "b2" }, "move", { after: "b2" }],
+	["agent", { agent: " task:mid " }, "set", { field: "agent", value: "task:mid" }],
+	["agent", { clear: true }, "set", { field: "agent", value: null }],
+	["isolated", { isolation: "shared" }, "set", { field: "isolated", value: false }],
+	["isolated", { isolation: "default" }, "set", { field: "isolated", value: null }],
 ] as const) {
 	test(`edit ${op} ${JSON.stringify(fields)} locks, changes and releases only its own lock`, async () => {
 		const s = await service(); const h = await harness(); await h.execute("playbook_open", { doc: s.doc });
@@ -231,12 +231,22 @@ for (const [op, fields, mutation, args] of [
 	});
 }
 
+test("a call whose parameters do not parse fails as BadValue, not NoService, before any request", async () => {
+	const s = await service(); const h = await harness(); await h.execute("playbook_open", { doc: s.doc });
+	const result = await h.execute("playbook_read", { doc: s.doc, op: "read", after: 3 });
+	expect(result.isError).toBe(true);
+	expect(JSON.parse(result.content[0]!.text!).error.code).toBe("BadValue");
+	expect(s.frames.map(frame => frame.op)).toEqual(["hello"]);
+});
+
 test("playbook_edit rejects a blank agent, a design-block contract field and a move without a target before any request", async () => {
 	const s = await service(); const h = await harness(); await h.execute("playbook_open", { doc: s.doc });
 	for (const params of [
-		{ op: "agent", block: "b1", value: "   " },
-		{ op: "isolated", block: "b1", value: "yes" },
+		{ op: "agent", block: "b1", agent: "   " },
+		{ op: "agent", block: "b1", agent: "task:mid", clear: true },
+		{ op: "isolated", block: "b1", isolation: "yes" },
 		{ op: "move", block: "b1" },
+		{ op: "move", block: "b1", position: "top", after: "b2" },
 		{ op: "insert", title: "T", body: "B", agent: "" },
 		{ op: "insert_design", title: "T", design: "D", agent: "task:mid" },
 	]) {
@@ -267,7 +277,7 @@ test("interruption revokes an in-flight edit without aborting the coordinator; L
 			socket.write(JSON.stringify({ id: frame.id, ok: false, error: { code: "NotLocked", message: "lock revoked" } }) + "\n");
 		} else respond(socket, frame);
 	};
-	const changed = await h.execute("playbook_edit", { op: "title", run: "r1", block: "b1", value: "New" });
+	const changed = await h.execute("playbook_edit", { op: "title", run: "r1", block: "b1", title: "New" });
 	expect(changed.isError).toBe(true);
 	expect(structuredClone(JSON.parse(changed.content[0]!.text!).error)).toMatchObject({ code: "NotLocked", message: expect.stringContaining("人在变更生效前通过打断收回了此块") });
 	expect(s.frames.map(frame => frame.op)).toEqual(["hello", "lock", "set", "unlock"]);
@@ -610,7 +620,7 @@ for (const [tool, params, request] of [
 	["playbook_compile", { op: "compile", run: "r1", blocks: ["b1"] }, { op: "compile", args: { run: "r1", blocks: ["b1"] } }],
 	["playbook_compile", { op: "refetch", targets: ["file:book.md"] }, { op: "refetch", args: { targets: ["file:book.md"] } }],
 	["playbook_check", { op: "inspect", blocks: ["b1"] }, { op: "inspect", args: { blocks: ["b1"] } }],
-	["playbook_check", { op: "report", run: "r1", blocks: ["b1"], version: "v", result: { kind: "answers", answers: { q1: 0.8 } } }, { op: "report", args: { run: "r1", blocks: ["b1"], version: "v", result: { kind: "answers", answers: { q1: 0.8 } } } }],
+	["playbook_check", { op: "report", run: "r1", blocks: ["b1"], version: "v", result: "answers", answers: [{ question: "q1", probability: 0.8 }] }, { op: "report", args: { run: "r1", blocks: ["b1"], version: "v", result: { kind: "answers", answers: { q1: 0.8 } } } }],
 	["playbook_run", { op: "start", name: "Run", update_every: 30 }, { op: "start_run", args: { name: "Run", update_every: 30 } }],
 	["playbook_run", { op: "finish", run: "r1" }, { op: "finish_run", args: { run: "r1" } }],
 	["playbook_run", { op: "list" }, { op: "runs", args: {} }],
@@ -842,7 +852,7 @@ test("a rejected edit still releases its lock and the next call receives a fresh
 	};
 	const rejected = await h.execute("playbook_edit", { op: "replace", block: "b1", find: "Body", replace: "New" });
 	expect(JSON.parse(rejected.content[0]!.text!)).toEqual({ error: { code: "BadValue", message: "find is not unique" } });
-	await h.execute("playbook_edit", { op: "status", block: "b1", value: "done" });
+	await h.execute("playbook_edit", { op: "status", block: "b1", status: "done" });
 	expect(s.frames.map(frame => frame.op)).toEqual(["hello", "lock", "edit", "unlock", "lock", "set", "unlock"]);
 	expect(s.frames[1]!.args).toEqual({ block: "b1" });
 	expect(s.frames[4]!.id).not.toBe(s.frames[1]!.id);

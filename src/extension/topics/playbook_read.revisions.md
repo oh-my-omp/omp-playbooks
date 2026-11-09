@@ -4,7 +4,7 @@ when: when a revision_requested notice arrives, or before revising a design
 ---
 # Change requests
 
-`xd://playbook_read {op: "revisions", block?, after?}` returns the person's change requests for design blocks as `{revisions: [{seq, at, block, prompt}]}`. They are not part of a normal read.
+`xd://playbook_read {op: "revisions"}` returns the person's change requests for design blocks as `{revisions: [{seq, at, block, prompt}]}`. They are not part of a normal read.
 
 - `block` limits the list to one design block; `after` returns only requests with a larger `seq`.
 - Add `run` to read a Run's requests; a new Run does not inherit the Playbook's.

@@ -277,7 +277,7 @@ test("template helper calls omit run and stop cancels handles before resetting o
 	const laterCell = createPlaybook(deps);
 	expect(await laterCell.stop("l999")).toEqual({ cancelled: ["stop-worker"] });
 	expect(calls.map(call => call.op)).toEqual(["cancel", "launch", "read", "edit", "read"]);
-	expect(calls[3]).toEqual({ op: "edit", args: { doc: "/template.yaml", op: "status", block: "b1", value: "todo" } });
+	expect(calls[3]).toEqual({ op: "edit", args: { doc: "/template.yaml", op: "status", block: "b1", status: "todo" } });
 	expect(calls.every(call => call.args === undefined || !("run" in call.args))).toBe(true);
 	await expect(laterCell.stop("l999")).rejects.toThrow();
 });
