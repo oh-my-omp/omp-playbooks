@@ -58,7 +58,7 @@ https://github.com/user-attachments/assets/ce277db5-505a-42c0-9ea1-23aa870b757f
 仓库是 [oh-my-omp/omp-playbooks](https://github.com/oh-my-omp/omp-playbooks)；安装后的 omp 包名和 Tern 插件 ID 都是 `omp-playbooks`，下文的升级、卸载命令都用这个名字。
 
 ```sh
-omp plugin install 'https://github.com/oh-my-omp/omp-playbooks.git#main'
+omp plugin install 'https://github.com/oh-my-omp/omp-playbooks#release'
 ```
 
 扩展加载时若在 `PATH` 找到 `tern`，就把包内的 `tern-plugin/` 链接到 Tern；已链接到同一目录时跳过。找不到 `tern` 时不链接，安装照样成功，因此没装 Tern 的机器也能装上插件；运行于 Tern pane、但 omp 的 `PATH` 里没有 `tern` 的主会话会收到警告，之后找到 `tern` 的那次扩展加载会补上链接。链接的就是 omp 安装目录本身。Tern 守护进程会自己重新加载原地修改的插件文件，但升级会整个替换安装目录，守护进程会停在“链接目标不存在”或旧版本上。所以扩展随后比较 `tern-plugin/plugin.toml` 的版本和守护进程已加载的版本，不同时执行 `tern plugin reload`，并在下一个运行于 Tern pane 的主会话提示结果。重新加载后版本仍不一致时只警告、不中断安装，下次加载扩展会再比较。
@@ -71,7 +71,7 @@ omp plugin install 'https://github.com/oh-my-omp/omp-playbooks.git#main'
 omp plugin upgrade omp-playbooks
 ```
 
-更新后启动新的 omp 会话；已运行的扩展和文档服务不会热替换。先妥善结束正在执行的工作，再关闭旧文档服务 pane，由新会话重新打开。`playbook_open` 会复用已有服务，不能借它强制换成新服务。每次推到 `main` 后，CI 把 `package.json` 和 `tern-plugin/plugin.toml` 的版本最后一位同时加一，所以版本号可以区分新旧代码。
+更新后启动新的 omp 会话；已运行的扩展和文档服务不会热替换。先妥善结束正在执行的工作，再关闭旧文档服务 pane，由新会话重新打开。`playbook_open` 会复用已有服务，不能借它强制换成新服务。插件经 `release` 分支更新：PR 提交时由 lgit 把条目写进 `CHANGELOG.md` 的 `## [Unreleased]`，插件每天从那里发布一次，版本号也在这时才变，扩展据此区分新旧代码。
 
 卸载时分别移除两侧：
 

@@ -9,6 +9,9 @@
 	"omp": {
 		"extensions": ["./src/extension/index.ts"]
 	},
+	"omomp": {
+		"changelog": "CHANGELOG.md"
+	},
 	"scripts": {
 		"check": "tsc --noEmit -p tsconfig.json",
 		"test": "bun test"
