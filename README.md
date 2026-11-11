@@ -58,7 +58,7 @@ You need [Bun](https://bun.sh), omp and Tern. The process that loads the extensi
 The repository is [oh-my-omp/omp-playbooks](https://github.com/oh-my-omp/omp-playbooks); the installed omp package name and the Tern plugin ID are both `omp-playbooks`, which the upgrade and uninstall commands below use.
 
 ```sh
-omp plugin install 'https://github.com/oh-my-omp/omp-playbooks.git#main'
+omp plugin install 'https://github.com/oh-my-omp/omp-playbooks#release'
 ```
 
 When the extension loads and finds `tern` on `PATH`, it links the package's `tern-plugin/` into Tern; it skips this when the same directory is already linked. Without `tern` it links nothing and the install still succeeds, so a machine without Tern can carry the plugin; a main session in a Tern pane whose omp has no `tern` on `PATH` gets a warning, and the next extension load that finds `tern` links the plugin. The link points at the omp install directory itself. The Tern daemon reloads plugin files edited in place, but an upgrade replaces the whole install directory, which leaves the daemon on a missing link target or an old version. The extension therefore compares the version in `tern-plugin/plugin.toml` with the version the daemon loaded, runs `tern plugin reload` when they differ, and reports the outcome in the next main session that runs in a Tern pane. If the versions still differ after the reload it only warns and does not abort the install; the next extension load compares again.
@@ -71,7 +71,7 @@ Beyond that link, the extension acts only when omp runs in a Tern pane managed b
 omp plugin upgrade omp-playbooks
 ```
 
-After updating, start a new omp session; running extensions and document services are not hot-swapped. Wind down any work in progress, then close the old document-service pane and let the new session open it again. `playbook_open` reuses an existing service, so it cannot be used to force a switch to the new one. After every push to `main`, CI increments the last version component in both `package.json` and `tern-plugin/plugin.toml`, so the version tells old and new code apart.
+After updating, start a new omp session; running extensions and document services are not hot-swapped. Wind down any work in progress, then close the old document-service pane and let the new session open it again. `playbook_open` reuses an existing service, so it cannot be used to force a switch to the new one. Changes reach the plugin through the `release` branch: a pull request writes its entry under `## [Unreleased]` in `CHANGELOG.md` with lgit when it commits, and the plugin is released from there once a day, which is when the version changes and the extension can tell old and new code apart.
 
 To uninstall, remove both sides:
 
