@@ -206,80 +206,134 @@ function listening(path: string): Promise<boolean> {
 	return promise;
 }
 
-/** What occupies a socket path: nothing, a Unix socket file, or anything else (never removed). */
+/**
+ * Claims the document's socket path for this process (I1): a live listener makes this process
+ * refuse with ServiceRunning, a socket file nobody listens on is replaced, any other file is
+ * never removed.
+ */
+async function claim(path: string, listen: () => { close(): void }): Promise<{ close(): void }> {
+	mkdirSync(dirname(path), { recursive: true });
+	return process.platform === "win32" ? claimWindows(path, listen) : claimPosix(path, listen);
+}
+
+/**
+ * The bind itself arbitrates: a socket file nobody listens on is moved aside by an atomic rename
+ * of exactly that inode, so concurrent starters cannot both win.
+ */
+async function claimPosix(path: string, listen: () => { close(): void }): Promise<{ close(): void }> {
+	for (;;) {
+		const existing = lstatSync(path, { throwIfNoEntry: false });
+		if (existing) {
+			if (!existing.isSocket()) throw new Error(`Refusing to remove a non-socket file: ${path}`);
+			if (await listening(path)) throw new ServiceRunning(`A document service is already listening at ${path}`);
+			const aside = `${path}.stale-${randomUUID()}`;
+			try { renameSync(path, aside); } catch (error) { if (errorCode(error) === "ENOENT") continue; throw error; }
+			if (lstatSync(aside).ino !== existing.ino) { renameSync(aside, path); continue; }
+			unlinkSync(aside);
+			continue;
+		}
+		// A concurrent starter bound first; Bun reports that as EADDRINUSE or, on POSIX, EEXIST.
+		try { return listen(); } catch (error) { const code = errorCode(error); if (code === "EADDRINUSE" || code === "EEXIST") continue; throw error; }
+	}
+}
+
+/**
+ * Windows denies `lstat`, `stat` and `open` of a socket file (EACCES, alive or not), so there is
+ * no inode to pin a rename to, and a rename there follows whichever file a concurrent starter
+ * left at the path. Starters instead take turns under an exclusive lock on `<path>.lock`; the
+ * holder alone looks at the path, removes a socket nobody answers on, and binds. The system
+ * drops the lock with its handle or its process, so a killed starter never blocks the next.
+ */
+async function claimWindows(path: string, listen: () => { close(): void }): Promise<{ close(): void }> {
+	const release = await lockWindows(`${path}.lock`);
+	try {
+		switch (windowsPathKind(path)) {
+			case "other":
+				throw new Error(`Refusing to remove a non-socket file: ${path}`);
+			case "socket":
+				if (await listening(path)) throw new ServiceRunning(`A document service is already listening at ${path}`);
+				unlinkSync(path);
+				break;
+			case "absent":
+				break;
+		}
+		return listen();
+	} finally {
+		release();
+	}
+}
+
+/** What occupies a socket path on Windows: nothing, a Unix socket file, or anything else (never removed). */
 type PathKind = "absent" | "socket" | "other";
 
 const FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
 const IO_REPARSE_TAG_AF_UNIX = 0x80000023;
 /** sizeof(WIN32_FIND_DATAW); dwFileAttributes at offset 0, dwReserved0 (the reparse tag) at 36. */
 const FIND_DATA_SIZE = 592;
+const INVALID_HANDLE_VALUE = -1n;
+const GENERIC_READ_WRITE = 0xc0000000;
+const FILE_SHARE_ALL = 7;
+const OPEN_ALWAYS = 4;
+const FILE_ATTRIBUTE_NORMAL = 0x80;
+const LOCKFILE_FAIL_IMMEDIATELY = 1;
+const LOCKFILE_EXCLUSIVE_LOCK = 2;
+const OVERLAPPED_SIZE = 32;
+const LOCK_RETRY_MS = 20;
 
-interface FindFile {
-	first(path: string, data: Buffer): bigint;
-	close(handle: bigint): void;
+interface Kernel32 {
+	findFirst(path: string, data: Buffer): bigint;
+	findClose(handle: bigint): void;
+	createFile(path: string): bigint;
+	tryLock(handle: bigint): boolean;
+	closeHandle(handle: bigint): void;
 }
 
-let findFile: FindFile | undefined;
+let kernel32Symbols: Kernel32 | undefined;
 
-function kernel32(): FindFile {
-	if (findFile !== undefined) return findFile;
+function kernel32(): Kernel32 {
+	if (kernel32Symbols !== undefined) return kernel32Symbols;
 	const { symbols } = dlopen("kernel32.dll", {
 		FindFirstFileW: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i64 },
 		FindClose: { args: [FFIType.i64], returns: FFIType.i32 },
+		CreateFileW: { args: [FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr], returns: FFIType.i64 },
+		LockFileEx: { args: [FFIType.i64, FFIType.u32, FFIType.u32, FFIType.u32, FFIType.u32, FFIType.ptr], returns: FFIType.i32 },
+		CloseHandle: { args: [FFIType.i64], returns: FFIType.i32 },
 	});
-	findFile = {
-		first: (path, data) => BigInt(symbols.FindFirstFileW(Buffer.from(`${path}\0`, "utf16le"), data)),
-		close: handle => { symbols.FindClose(handle); },
+	const wide = (path: string) => Buffer.from(`${path}\0`, "utf16le");
+	kernel32Symbols = {
+		findFirst: (path, data) => BigInt(symbols.FindFirstFileW(wide(path), data)),
+		findClose: handle => { symbols.FindClose(handle); },
+		createFile: path => BigInt(symbols.CreateFileW(wide(path), GENERIC_READ_WRITE, FILE_SHARE_ALL, null, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, null)),
+		tryLock: handle => symbols.LockFileEx(handle, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, new Uint8Array(OVERLAPPED_SIZE)) !== 0,
+		closeHandle: handle => { symbols.CloseHandle(handle); },
 	};
-	return findFile;
+	return kernel32Symbols;
+}
+
+/** LockFileEx on the first byte of `path`; the returned function closes the handle, which releases it. */
+async function lockWindows(path: string): Promise<() => void> {
+	const system = kernel32();
+	const handle = system.createFile(path);
+	if (handle === INVALID_HANDLE_VALUE) throw new Error(`Cannot lock ${path}: CreateFileW could not open it`);
+	// A waiting LockFileEx would block this process's event loop, and with it a claim of the same
+	// path already holding the lock in this process. On this valid handle an immediate exclusive
+	// lock fails only while another handle holds the byte.
+	while (!system.tryLock(handle)) await Bun.sleep(LOCK_RETRY_MS);
+	return () => system.closeHandle(handle);
 }
 
 /**
- * Windows answers `lstat`, `stat` and `open` of a Unix socket file with EACCES, alive or not, so
- * the kind comes from the directory entry: FindFirstFileW reports a socket file as a reparse
- * point tagged IO_REPARSE_TAG_AF_UNIX without opening it.
+ * FindFirstFileW reads the directory entry without opening the file: a socket file is a reparse
+ * point tagged IO_REPARSE_TAG_AF_UNIX.
  */
 function windowsPathKind(path: string): PathKind {
-	const find = kernel32();
+	const system = kernel32();
 	const data = Buffer.alloc(FIND_DATA_SIZE);
-	const handle = find.first(path, data);
-	// INVALID_HANDLE_VALUE: no entry at this path.
-	if (handle === -1n) return "absent";
-	find.close(handle);
+	const handle = system.findFirst(path, data);
+	// No entry at this path.
+	if (handle === INVALID_HANDLE_VALUE) return "absent";
+	system.findClose(handle);
 	return (data.readUInt32LE(0) & FILE_ATTRIBUTE_REPARSE_POINT) !== 0 && data.readUInt32LE(36) === IO_REPARSE_TAG_AF_UNIX ? "socket" : "other";
-}
-
-function pathKind(path: string): PathKind {
-	if (process.platform === "win32") return windowsPathKind(path);
-	const existing = lstatSync(path, { throwIfNoEntry: false });
-	return existing === undefined ? "absent" : existing.isSocket() ? "socket" : "other";
-}
-
-/**
- * Claims the document's socket path for this process. The bind itself arbitrates: a live
- * listener makes this process refuse; a socket file nobody listens on is moved aside by an
- * atomic rename and removed only if nothing answers at its new name, so a socket a concurrent
- * starter bound in between is put back and concurrent starters cannot both win (I1). Liveness
- * is decided by connecting alone, because Windows denies every stat of a socket file.
- */
-async function claim(path: string, listen: () => { close(): void }): Promise<{ close(): void }> {
-	mkdirSync(dirname(path), { recursive: true });
-	for (;;) {
-		switch (pathKind(path)) {
-			case "other":
-				throw new Error(`Refusing to remove a non-socket file: ${path}`);
-			case "socket": {
-				if (await listening(path)) throw new ServiceRunning(`A document service is already listening at ${path}`);
-				const aside = `${path}.stale-${randomUUID()}`;
-				try { renameSync(path, aside); } catch (error) { if (errorCode(error) === "ENOENT") continue; throw error; }
-				if (await listening(aside)) { renameSync(aside, path); continue; }
-				unlinkSync(aside);
-				continue;
-			}
-			case "absent":
-				try { return listen(); } catch (error) { if (errorCode(error) === "EADDRINUSE") continue; throw error; }
-		}
-	}
 }
 
 /** A newline JSON adapter. Core owns hello admission and all document state. */

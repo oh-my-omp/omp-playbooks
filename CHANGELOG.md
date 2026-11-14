@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed opening an already open Playbook again on Windows: the second document service now shows the existing pane instead of exiting with `EACCES`, and a socket file left by a killed service no longer blocks every later start
+- Fixed opening an already open Playbook again on Windows: the second document service now shows the existing pane instead of exiting with `EACCES`, and a socket file left by a killed service no longer blocks every later start. Of two document services started for one Playbook at the same moment, exactly one serves and the other shows its pane, on Windows and on macOS/Linux (where the second used to exit with `EEXIST`)
 
 ## [0.1.50] - 2026-11-12
 
