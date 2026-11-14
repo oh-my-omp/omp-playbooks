@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { IpcConnection, ipcEndpoint } from "@oh-my-pi/pi-natives";
 import { listenPane, type PaneListener } from "../src/extension/pane-listener";
+
+const POSIX = process.platform !== "win32";
 
 const dirs: string[] = [];
 const listeners: PaneListener[] = [];
@@ -9,46 +11,44 @@ afterEach(() => {
 	for (const listener of listeners.splice(0)) listener.close();
 	for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
-function socketIn(): string {
+function endpointIn(): string {
 	const dir = mkdtempSync("/tmp/pb-pane-");
 	dirs.push(dir);
-	return join(dir, "pane-1.sock");
+	return ipcEndpoint(dir, "pane-1");
 }
-async function ask(path: string, line: string): Promise<unknown> {
+async function ask(endpoint: string, line: string): Promise<unknown> {
+	const connection = await IpcConnection.connect(endpoint, { framing: "lines" });
 	const { promise, resolve, reject } = Promise.withResolvers<unknown>();
-	let text = "";
-	await Bun.connect({
-		unix: path,
-		socket: {
-			open(socket) { socket.write(line); },
-			data(_socket, chunk) { text += new TextDecoder().decode(chunk); },
-			close() { try { resolve(JSON.parse(text)); } catch (error) { reject(error); } },
-			error(_socket, error) { reject(error); },
-		},
-	});
+	connection.start(text => resolve(JSON.parse(text)), () => connection.destroy());
+	connection.send(line);
 	return promise;
 }
 
-describe("pane socket", () => {
-	test("answers requests, refuses malformed ones, and a second process never takes a live path", async () => {
-		const path = socketIn();
-		const first = await listenPane(path, async request => request.op === "ping" ? { ok: true, session: "s1", cwd: "/w" } : { ok: false, error: { code: "Busy", message: request.doc } });
+describe("pane endpoint", () => {
+	test("answers requests, refuses malformed ones, and a second listener never takes a live endpoint", async () => {
+		const endpoint = endpointIn();
+		const first = await listenPane(endpoint, async request => request.op === "ping" ? { ok: true, session: "s1", cwd: "/w" } : { ok: false, error: { code: "Busy", message: request.doc } });
 		expect(first).not.toBeNull();
 		listeners.push(first!);
-		expect(await ask(path, `${JSON.stringify({ op: "ping" })}\n`)).toEqual({ ok: true, session: "s1", cwd: "/w" });
-		expect(await ask(path, `${JSON.stringify({ op: "attach", doc: "/p.yaml" })}\n`)).toEqual({ ok: false, error: { code: "Busy", message: "/p.yaml" } });
-		expect(await ask(path, "{\"op\":\"nope\"}\n")).toMatchObject({ ok: false, error: { code: "BadRequest" } });
-		expect(await listenPane(path, async () => ({ ok: true, session: "s2", cwd: "/x" }))).toBeNull();
+		expect(await ask(endpoint, JSON.stringify({ op: "ping" }))).toEqual({ ok: true, session: "s1", cwd: "/w" });
+		expect(await ask(endpoint, JSON.stringify({ op: "attach", doc: "/p.yaml" }))).toEqual({ ok: false, error: { code: "Busy", message: "/p.yaml" } });
+		expect(await ask(endpoint, JSON.stringify({ op: "nope" }))).toMatchObject({ ok: false, error: { code: "BadRequest" } });
+		expect(await listenPane(endpoint, async () => ({ ok: true, session: "s2", cwd: "/x" }))).toBeNull();
 		first!.close();
 		listeners.length = 0;
-		expect(existsSync(path)).toBe(false);
+		if (POSIX) expect(existsSync(endpoint)).toBe(false);
 	});
-	test("a stale socket file left by a dead process is replaced", async () => {
-		const path = socketIn();
-		writeFileSync(path, "");
-		const listener = await listenPane(path, async () => ({ ok: true, session: "s3", cwd: "/y" }));
+	test("takes over the endpoint a killed session left behind", async () => {
+		const endpoint = endpointIn();
+		const child = Bun.spawn([process.execPath, "-e", `import { IpcServer } from "@oh-my-pi/pi-natives"; await IpcServer.listen(${JSON.stringify(endpoint)}, { framing: "lines" }, () => {}); console.log("ready")`], { stdout: "pipe", stderr: "inherit" });
+		const reader = child.stdout.getReader();
+		expect(new TextDecoder().decode((await reader.read()).value)).toContain("ready");
+		reader.releaseLock();
+		child.kill("SIGKILL");
+		await child.exited;
+		const listener = await listenPane(endpoint, async () => ({ ok: true, session: "s3", cwd: "/y" }));
 		expect(listener).not.toBeNull();
 		listeners.push(listener!);
-		expect(await ask(path, `${JSON.stringify({ op: "ping" })}\n`)).toEqual({ ok: true, session: "s3", cwd: "/y" });
+		expect(await ask(endpoint, JSON.stringify({ op: "ping" }))).toEqual({ ok: true, session: "s3", cwd: "/y" });
 	});
 });

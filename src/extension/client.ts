@@ -1,13 +1,21 @@
 import { randomUUID } from "node:crypto";
-import { createConnection, type Socket } from "node:net";
+import { IpcConnection } from "@oh-my-pi/pi-natives";
 import { tr } from "../i18n";
 import type { EventPayload, ProtocolError, Request, ServerFrame } from "../domain/protocol";
 
 export type ClientError = ProtocolError | { readonly code: "NoService" | "Disconnected" | "StartFailed"; readonly message: string };
 export type Reply = { readonly id: string; readonly ok: true; readonly result: unknown; readonly raw?: string } | { readonly id: string; readonly ok: false; readonly error: ClientError };
 type Pending = { readonly resolve: (reply: Reply) => void };
-type Link = { readonly socket: Socket; readonly pending: Map<string, Pending> };
-type State = { readonly kind: "disconnected" } | { readonly kind: "connecting"; readonly link: Link; readonly ready: Promise<Reply> } | { readonly kind: "connected"; readonly link: Link; readonly hello: unknown } | { readonly kind: "closed" };
+type Deferred = { readonly promise: Promise<Reply>; readonly resolve: (reply: Reply) => void };
+type Link = { readonly connection: IpcConnection; readonly ready: Deferred; readonly pending: Map<string, Pending>; dead: boolean };
+type State =
+	| { readonly kind: "disconnected" }
+	/** Dialing the endpoint; no connection exists yet. */
+	| { readonly kind: "dialing"; readonly ready: Deferred }
+	/** Connected, hello in flight. */
+	| { readonly kind: "connecting"; readonly link: Link }
+	| { readonly kind: "connected"; readonly link: Link; readonly hello: unknown }
+	| { readonly kind: "closed" };
 
 /**
  * The `result` field's already-serialized text inside an ok-reply line, or undefined when the line
@@ -23,7 +31,7 @@ export class K1Client {
 	private state: State = { kind: "disconnected" };
 	private reconnect: NodeJS.Timeout | undefined;
 	constructor(
-		readonly path: string,
+		readonly endpoint: string,
 		private readonly helloArgs: Extract<Request, { op: "hello" }>["args"],
 		private readonly parseFrame: (input: unknown) => ServerFrame,
 		private readonly onEvent: (event: EventPayload) => void | Promise<void>,
@@ -36,52 +44,39 @@ export class K1Client {
 		switch (this.state.kind) {
 			case "closed": return this.failure("", "Disconnected");
 			case "connected": return { id: "", ok: true, result: this.state.hello };
-			case "connecting": return this.state.ready;
+			case "dialing": return this.state.ready.promise;
+			case "connecting": return this.state.link.ready.promise;
 			case "disconnected": break;
 		}
 		if (this.reconnect !== undefined) { clearTimeout(this.reconnect); this.reconnect = undefined; }
-		const socket = createConnection(this.path);
-		const link: Link = { socket, pending: new Map() };
-		const ready = Promise.withResolvers<Reply>();
-		this.state = { kind: "connecting", link, ready: ready.promise };
-		const parts: string[] = [];
-		socket.setEncoding("utf8");
-		socket.on("connect", async () => {
-			const reply = await this.sendOn(link, { op: "hello", args: this.helloArgs });
-			if (this.owns(link) && reply.ok) this.state = { kind: "connected", link, hello: reply.result };
-			else if (this.owns(link)) socket.destroy();
-			ready.resolve(!reply.ok && reply.error.code === "Disconnected" ? this.failure("", "NoService") : reply);
-		});
-		socket.on("data", (chunk: string) => {
-			let start = 0;
-			for (;;) {
-				const newline = chunk.indexOf("\n", start);
-				if (newline < 0) { parts.push(chunk.slice(start)); return; }
-				parts.push(chunk.slice(start, newline));
-				const line = parts.join("");
-				parts.length = 0;
-				start = newline + 1;
-				try {
-					const frame = this.parseFrame(JSON.parse(line));
-					if ("event" in frame) {
-						void this.deliver(link, frame).catch(() => socket.destroy());
-					} else {
-						const pending = link.pending.get(frame.id);
-						if (pending) { link.pending.delete(frame.id); pending.resolve(frame.ok ? { ...frame, raw: rawResult(line, frame.id) } : frame); }
-					}
-				} catch { socket.destroy(); return; }
+		const ready: Deferred = Promise.withResolvers<Reply>();
+		this.state = { kind: "dialing", ready };
+		let connection: IpcConnection;
+		try {
+			connection = await IpcConnection.connect(this.endpoint, { framing: "lines" });
+		} catch {
+			// No endpoint, or nobody listening on it: the same answer as a connection that ended first.
+			if (this.state.kind === "dialing" && this.state.ready === ready) {
+				this.state = { kind: "disconnected" };
+				this.scheduleReconnect();
 			}
-		});
-		const disconnect = () => {
-			for (const [id, item] of link.pending) item.resolve(this.failure(id, "Disconnected"));
-			link.pending.clear();
 			ready.resolve(this.failure("", "NoService"));
-			if (!this.owns(link)) return;
-			this.state = { kind: "disconnected" };
-			this.scheduleReconnect();
-		};
-		socket.on("error", disconnect);
-		socket.on("close", disconnect);
+			return ready.promise;
+		}
+		const link: Link = { connection, ready, pending: new Map(), dead: false };
+		// close() ran while this dial was in flight: this connection is nobody's now.
+		const state = this.state as State;
+		if (state.kind !== "dialing" || state.ready !== ready) {
+			connection.destroy();
+			ready.resolve(this.failure("", state.kind === "closed" ? "Disconnected" : "NoService"));
+			return ready.promise;
+		}
+		this.state = { kind: "connecting", link };
+		connection.start(line => this.receive(link, line), () => this.disconnect(link));
+		const reply = await this.sendOn(link, { op: "hello", args: this.helloArgs });
+		if (this.owns(link) && reply.ok) this.state = { kind: "connected", link, hello: reply.result };
+		else if (this.owns(link)) connection.destroy();
+		ready.resolve(!reply.ok && reply.error.code === "Disconnected" ? this.failure("", "NoService") : reply);
 		return ready.promise;
 	}
 
@@ -96,20 +91,45 @@ export class K1Client {
 		if (this.reconnect !== undefined) { clearTimeout(this.reconnect); this.reconnect = undefined; }
 		const state = this.state;
 		this.state = { kind: "closed" };
-		if (state.kind === "connecting" || state.kind === "connected") state.link.socket.destroy();
+		if (state.kind === "connecting" || state.kind === "connected") state.link.connection.destroy();
+		if (state.kind === "dialing") state.ready.resolve(this.failure("", "Disconnected"));
 	}
 
 	private owns(link: Link): boolean {
 		return (this.state.kind === "connecting" || this.state.kind === "connected") && this.state.link === link;
 	}
 	private failure(id: string, code: "NoService" | "Disconnected"): Reply {
-		return { id, ok: false, error: { code, message: code === "NoService" ? tr("No Playbook document service is listening at this socket", "此 socket 没有 Playbook 文档服务在监听") : tr("Connection ended before a response; the operation may have been applied", "连接在收到响应前结束；操作可能已经应用") } };
+		return { id, ok: false, error: { code, message: code === "NoService" ? tr("No Playbook document service is listening at this endpoint", "此端点没有 Playbook 文档服务在监听") : tr("Connection ended before a response; the operation may have been applied", "连接在收到响应前结束；操作可能已经应用") } };
+	}
+	/** Frames arrive in order; a frame the parser rejects ends the connection like any other framing error. */
+	private receive(link: Link, line: string): void {
+		if (link.dead) return;
+		try {
+			const frame = this.parseFrame(JSON.parse(line));
+			if ("event" in frame) {
+				void this.deliver(link, frame).catch(() => link.connection.destroy());
+				return;
+			}
+			const pending = link.pending.get(frame.id);
+			if (pending) { link.pending.delete(frame.id); pending.resolve(frame.ok ? { ...frame, raw: rawResult(line, frame.id) } : frame); }
+		} catch {
+			link.dead = true;
+			link.connection.destroy();
+		}
+	}
+	private disconnect(link: Link): void {
+		for (const [id, item] of link.pending) item.resolve(this.failure(id, "Disconnected"));
+		link.pending.clear();
+		link.ready.resolve(this.failure("", "NoService"));
+		if (!this.owns(link)) return;
+		this.state = { kind: "disconnected" };
+		this.scheduleReconnect();
 	}
 	private sendOn(link: Link, request: Request, id = randomUUID()): Promise<Reply> {
-		if (!this.owns(link) || link.socket.destroyed) return Promise.resolve(this.failure(id, "Disconnected"));
+		if (!this.owns(link) || link.connection.closed) return Promise.resolve(this.failure(id, "Disconnected"));
 		const pending = Promise.withResolvers<Reply>();
 		link.pending.set(id, { resolve: pending.resolve });
-		link.socket.write(JSON.stringify({ id, op: request.op, args: request.args }) + "\n");
+		link.connection.send(JSON.stringify({ id, op: request.op, args: request.args }));
 		return pending.promise;
 	}
 	private async deliver(link: Link, event: EventPayload): Promise<void> {

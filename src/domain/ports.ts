@@ -222,7 +222,7 @@ export interface Connection {
 	close(): void;
 }
 
-/** Implemented by the core; called by the socket server for each request in arrival order. */
+/** Implemented by the core; called by the K1 server for each request in arrival order. */
 export interface K1Handler {
 	connected(conn: Connection): void;
 	disconnected(conn: Connection): void;

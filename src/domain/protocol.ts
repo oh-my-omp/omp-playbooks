@@ -1,4 +1,7 @@
 // K1 document service ⇄ coordinator extension (contracts.md §K1).
+import { mkdirSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { ipcEndpoint } from "@oh-my-pi/pi-natives";
 import type { BlockId, CompileResult, EventName, JudgeReport, LaunchId, LaunchKind, RecordKind, RunId, RunStatus, Status } from "./model";
 
 /** Requests, closed. `run` absent = template. */
@@ -157,15 +160,32 @@ void _eventsCovered;
 export type ClientFrame = { readonly id: string; readonly op: string; readonly args: unknown };
 export type ServerFrame = { readonly id: string; readonly ok: true; readonly result: unknown } | { readonly id: string; readonly ok: false; readonly error: ProtocolError } | EventPayload;
 
-/** Socket path (contracts.md K1 交换). */
-export function socketPath(tmpdir: string, playbookAbsPath: string): string {
-	const hash = new Bun.CryptoHasher("sha256").update(playbookAbsPath).digest("hex");
-	return `${tmpdir.replace(/\/$/, "")}/omp-playbooks/${hash}.sock`;
+/**
+ * The directory every endpoint below is scoped to: the temp directory's `omp-playbooks`, as its real
+ * path. The host treats the directory string as the endpoint's identity, so every process must derive
+ * the same characters (on macOS `/var` and `/tmp` are symbolic links into `/private`).
+ */
+function endpointDirectory(): string {
+	const directory = `${tmpdir().replace(/\/$/, "")}/omp-playbooks`;
+	mkdirSync(directory, { recursive: true });
+	return realpathSync.native(directory);
 }
 
-// Pane socket: a main omp session running in Tern pane P listens at `paneSocketPath(tmpdir, P)` while it
-// lives, so a document service can ask that session to become a Playbook's coordinator. One JSON line
-// each way; the session closes the connection after its reply.
+/**
+ * The document service's endpoint for a Playbook (contracts.md K1 交换): one per absolute path, named by
+ * its SHA-256. The host (`@oh-my-pi/pi-natives`) decides what an endpoint is on this platform — a named
+ * pipe on Windows, a socket file on POSIX, moved under `/tmp/omp-<euid>` when that path is too long
+ * for a socket address — and owns claiming it, so this derivation is all the extension and the
+ * service share.
+ */
+export function documentEndpoint(playbookAbsPath: string): string {
+	const hash = new Bun.CryptoHasher("sha256").update(playbookAbsPath).digest("hex");
+	return ipcEndpoint(endpointDirectory(), hash);
+}
+
+// Pane endpoint: a main omp session running in Tern pane P listens at `paneEndpoint(P)` while it lives,
+// so a document service can ask that session to become a Playbook's coordinator. One JSON line each way;
+// the session closes the connection after its reply.
 
 export type PaneRequest =
 	/** Is a session with omp-playbooks here? */
@@ -177,6 +197,6 @@ export type PaneReply =
 	| { readonly ok: true; readonly session: string; readonly cwd: string }
 	| { readonly ok: false; readonly error: { readonly code: string; readonly message: string } };
 
-export function paneSocketPath(tmpdir: string, pane: string): string {
-	return `${tmpdir.replace(/\/$/, "")}/omp-playbooks/pane-${pane}.sock`;
+export function paneEndpoint(pane: string): string {
+	return ipcEndpoint(endpointDirectory(), `pane-${pane}`);
 }

@@ -205,7 +205,7 @@ blocks:
 - **启动按钮：** “启动”为这个块发出 `launch_requested`；在协调者从这个块建立 Launch 之前，按钮显示“已请求启动”且不能再点。协调者会话空闲时立即收到请求；正在一轮对话中（包括用 wait 等 worker）时，请求等到这一轮结束才送达，这一轮里点过的所有启动合并成一条通知送达，每个仍是独立的 Launch。块在 `running` 时按钮变成“打断执行”：有未关闭的 Launch 时向协调者发 `stop_requested`；没有时说明并没有在执行，块直接改回 `todo`。
 - **一起启动多块：** ⌘ 点卡片标题选中跟踪的执行块；dock 显示“一起启动 N 块”和“取消”。这些块按文档顺序合成一个 Launch；编排块只能单独启动。
 - **dock 状态栏：** “协调者在线”（点击转到协调者的 pane）或“协调者离线 · 选择协调者”，以及“N / M 已完成”（跟踪块中的完成数）。
-- **选择协调者：** 离线时点状态栏，列出这个 Tern 窗口里（窗口包含的所有会话）运行 omp 的 pane；每次打开都重新向 Tern（`tern inspect`）读取。运行本版本 omp-playbooks 的 omp 会话可以选；其他 omp pane 也会列出但不能选，升级 omp-playbooks 之前就已在运行的 omp 会话需要先重启。选中后，扩展通过它为自己 pane 保留的 socket 让该会话立即连接这份 Playbook，效果等同 `playbook_open`，并在它的对话里留一条通知（不开始新的一轮）；一个会话可以同时协调多份 Playbook。随后 Playbook pane 被移到那个 omp pane 的右半边（`tern move … right-of …`），无论两者原来嵌套多深。“新建会话”在 Playbook pane 左侧新开一个 omp pane，启动时带一条初始化提示，让它 `playbook_open` 这份文件；它连上后状态栏变为在线。连接失败和移动失败分开提示：连接失败时什么都不移动；只有移动失败时，协调者仍然在线。
+- **选择协调者：** 离线时点状态栏，列出这个 Tern 窗口里（窗口包含的所有会话）运行 omp 的 pane；每次打开都重新向 Tern（`tern inspect`）读取。运行本版本 omp-playbooks 的 omp 会话可以选；其他 omp pane 也会列出但不能选，升级 omp-playbooks 之前就已在运行的 omp 会话需要先重启。选中后，扩展让该会话立即连接这份 Playbook，效果等同 `playbook_open`，并在它的对话里留一条通知（不开始新的一轮）；一个会话可以同时协调多份 Playbook。随后 Playbook pane 被移到那个 omp pane 的右半边（`tern move … right-of …`），无论两者原来嵌套多深。“新建会话”在 Playbook pane 左侧新开一个 omp pane，启动时带一条初始化提示，让它 `playbook_open` 这份文件；它连上后状态栏变为在线。连接失败和移动失败分开提示：连接失败时什么都不移动；只有移动失败时，协调者仍然在线。
 
 需要协调者的请求（启动、有 Launch 时的打断、修改要求、在设计上选选项）在协调者离线时会被拒绝并提示。
 

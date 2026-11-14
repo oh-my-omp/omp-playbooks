@@ -14,8 +14,8 @@
 // fixture. The fixture is written through the Store API both versions share (serialize, write, appendEntry,
 // appendLaunch, appendServiceRecord), so either version reads it.
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createConnection, createServer } from "node:net";
 import { join, resolve } from "node:path";
+import { IpcConnection, IpcServer, ipcEndpoint } from "@oh-my-pi/pi-natives";
 import type { Block, BlockId, DocRef, EntryData, Launch, LaunchId, PlaybookDoc, RunId, RunMeta, TimelineEntry } from "../../src/domain/model";
 import type { Store } from "../../src/domain/ports";
 
@@ -151,37 +151,28 @@ class LineClient {
 	readonly #pending = new Map<string, (frame: Record<string, unknown>) => void>();
 	/** Event frames, in arrival order. */
 	readonly events: Record<string, unknown>[] = [];
-	readonly #socket;
-	#buffer = "";
+	readonly #connection: IpcConnection;
 	#next = 0;
-	private constructor(path: string, ready: () => void) {
-		this.#socket = createConnection(path, ready);
-		this.#socket.setEncoding("utf8");
-		this.#socket.on("data", (chunk: string) => {
-			this.#buffer += chunk;
-			let newline: number;
-			while ((newline = this.#buffer.indexOf("\n")) >= 0) {
-				const frame: Record<string, unknown> = JSON.parse(this.#buffer.slice(0, newline));
-				this.#buffer = this.#buffer.slice(newline + 1);
-				const id = frame.id;
-				if (typeof id === "string") this.#pending.get(id)?.(frame);
-				else this.events.push(frame);
-			}
-		});
+	private constructor(connection: IpcConnection) {
+		this.#connection = connection;
+		connection.start(line => {
+			const frame: Record<string, unknown> = JSON.parse(line);
+			const id = frame.id;
+			if (typeof id === "string") this.#pending.get(id)?.(frame);
+			else this.events.push(frame);
+		}, () => {});
 	}
-	static connect(path: string): Promise<LineClient> {
-		const { promise, resolve } = Promise.withResolvers<LineClient>();
-		const client: LineClient = new LineClient(path, () => resolve(client));
-		return promise;
+	static async connect(endpoint: string): Promise<LineClient> {
+		return new LineClient(await IpcConnection.connect(endpoint, { framing: "lines" }));
 	}
 	request(op: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
 		const id = `q${++this.#next}`;
 		const { promise, resolve } = Promise.withResolvers<Record<string, unknown>>();
 		this.#pending.set(id, frame => { this.#pending.delete(id); resolve(frame); });
-		this.#socket.write(`${JSON.stringify({ id, op, args })}\n`);
+		this.#connection.send(JSON.stringify({ id, op, args }));
 		return promise;
 	}
-	close(): void { this.#socket.end(); }
+	close(): void { this.#connection.end(); }
 }
 
 // ---------------------------------------------------------------- measure
@@ -241,8 +232,9 @@ async function startService(src: string, fixture: string, counts: Map<string, nu
 	const loadMs = performance.now() - loadStarted;
 	await sleep(50);
 	const rssAfterLoad = rss();
-	const server = await serveK1(join(directory, "k1.sock"), core);
-	const client = await LineClient.connect(join(directory, "k1.sock"));
+	const endpoint = ipcEndpoint(directory, "k1");
+	const server = await serveK1(endpoint, core);
+	const client = await LineClient.connect(endpoint);
 	await client.request("hello", { session: "bench" });
 	const stop = (): void => {
 		client.close();
@@ -363,30 +355,19 @@ async function transport(args: readonly string[]): Promise<void> {
 	// The checkout under test is chosen at run time (base or HEAD), so this import cannot be static.
 	const { K1Client }: typeof ClientModule = await import(join(src, "src/extension/client.ts"));
 	const directory = mkdtempSync("/tmp/opb-bench-");
-	const path = join(directory, "frame.sock");
+	const path = ipcEndpoint(directory, "frame");
 	const big = JSON.stringify({ entries: Array.from({ length: Math.ceil(frameMB * 1024 * 1024 / 1000) }, (_, index) => ({ seq: index + 1, text: filler(index, 970) })) });
 	let sentAt = 0;
-	// node:net buffers what the kernel does not take yet, so every chunk arrives whole and in order.
-	const server = createServer(socket => {
-		let buffer = "";
-		socket.setEncoding("utf8");
-		socket.on("data", (text: string) => {
-			buffer += text;
-			let newline: number;
-			while ((newline = buffer.indexOf("\n")) >= 0) {
-				const frame: Record<string, unknown> = JSON.parse(buffer.slice(0, newline));
-				buffer = buffer.slice(newline + 1);
-				const id = String(frame.id);
-				if (frame.op === "hello") { socket.write(`${JSON.stringify({ id, ok: true, result: { blocks: [], runs: [] } })}\n`); continue; }
-				const line = Buffer.from(`{"id":${JSON.stringify(id)},"ok":true,"result":${big}}\n`);
-				sentAt = performance.now();
-				for (let offset = 0; offset < line.length; offset += 16 * 1024) socket.write(line.subarray(offset, offset + 16 * 1024));
-			}
-		});
+	// One reply frame of the host's `lines` framing: a frame is one line, so it leaves in one `send`.
+	const server = await IpcServer.listen(path, { framing: "lines" }, connection => {
+		connection.start(line => {
+			const frame: Record<string, unknown> = JSON.parse(line);
+			const id = String(frame.id);
+			if (frame.op === "hello") { connection.send(JSON.stringify({ id, ok: true, result: { blocks: [], runs: [] } })); return; }
+			sentAt = performance.now();
+			connection.send(`{"id":${JSON.stringify(id)},"ok":true,"result":${big}}`);
+		}, () => {});
 	});
-	const listening = Promise.withResolvers<void>();
-	server.listen(path, () => listening.resolve());
-	await listening.promise;
 	const k1 = new K1Client(path, { session: "bench" }, input => {
 		if (typeof input !== "object" || input === null || !("id" in input) || typeof input.id !== "string") throw new Error("bad frame");
 		return { id: input.id, ok: true, result: "result" in input ? input.result : null };
@@ -396,9 +377,9 @@ async function transport(args: readonly string[]): Promise<void> {
 	const frameMs = performance.now() - sentAt;
 	if (!reply.ok) console.error(JSON.stringify(reply));
 	k1.close();
-	server.close();
+	void server.close();
 	rmSync(directory, { recursive: true, force: true });
-	console.log(JSON.stringify({ src, timeline: { whole, page, tail }, frame: { mb: Math.round(big.length / 1024 / 1024 * 10) / 10, chunks: Math.ceil(big.length / 16384), ok: reply.ok, ms: Math.round(frameMs) } }));
+	console.log(JSON.stringify({ src, timeline: { whole, page, tail }, frame: { mb: Math.round(big.length / 1024 / 1024 * 10) / 10, bytes: big.length, ok: reply.ok, ms: Math.round(frameMs) } }));
 	process.exit(0);
 }
 
