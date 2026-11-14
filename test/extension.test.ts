@@ -1,16 +1,14 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { existsSync, watch } from "node:fs";
-import { once } from "node:events";
-import { chmod, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { chmod, mkdtemp, realpath, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { createServer, type Socket } from "node:net";
-import { tmpdir } from "node:os";
+import { IpcServer, type IpcConnection } from "@oh-my-pi/pi-natives";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { z as zod } from "@oh-my-pi/omptype/zod";
 import { language } from "../src/i18n";
 import { parseRunId } from "../src/domain/model";
-import { socketPath, type EventPayload, type Request, type ServerFrame } from "../src/domain/protocol";
+import { documentEndpoint, type EventPayload, type Request, type ServerFrame } from "../src/domain/protocol";
 import extension from "../src/extension/index";
 import { K1Client } from "../src/extension/client";
 import { ensureTernPlugin } from "../src/extension/tern-setup";
@@ -32,7 +30,7 @@ beforeAll(async () => {
 	await ensureTernPlugin();
 });
 afterAll(() => rm(ternConfig, { recursive: true, force: true }));
-/** This test's Tern pane: numeric like the daemon's, unique so each session's pane socket is its own. */
+/** This test's Tern pane: numeric like the daemon's, unique so each session's pane endpoint is its own. */
 let pane: string;
 beforeEach(() => {
 	const original = { PATH: process.env.PATH, TERN_PANE: process.env.TERN_PANE };
@@ -51,57 +49,47 @@ async function temporaryDirectory(): Promise<string> {
 	cleanup.push(() => rm(dir, { recursive: true, force: true }));
 	return dir;
 }
-function respond(socket: Socket, frame: Frame, result?: unknown): void {
-	socket.write(JSON.stringify({ id: frame.id, ok: true, result }) + "\n");
+function respond(connection: IpcConnection, frame: Frame, result?: unknown): void {
+	connection.send(JSON.stringify({ id: frame.id, ok: true, result }));
 }
+/** A fake document service on the extension's real endpoint: it records requests and answers from `handler`. */
 async function service(pane: string | undefined = "document-pane", existingDoc?: string) {
 	const doc = existingDoc ?? (await temporaryDirectory()) + "/book.yaml";
 	if (!existingDoc) await Bun.write(doc, "title: Book\nblocks: []\n");
-	await mkdir(tmpdir() + "/omp-playbooks", { recursive: true });
-	const path = socketPath(tmpdir(), await realpath(doc));
+	const endpoint = documentEndpoint(await realpath(doc));
 	const frames: Frame[] = [];
-	const sockets: Socket[] = [];
+	const connections: IpcConnection[] = [];
+	const closings = new Map<IpcConnection, Promise<void>>();
 	const received = new Map<Request["op"], ((frame: Frame) => void)[]>();
-	let handler = (frame: Frame, socket: Socket): void => {
+	let handler = (frame: Frame, connection: IpcConnection): void => {
 		const result = frame.op === "hello" ? { blocks: ["b1"], runs: [summary], ...(pane ? { pane } : {}) }
 			: frame.op === "lock" ? { block } : frame.op === "runs" ? { runs: [summary] }
 			: frame.op === "read" ? { title: "Book", blocks: [block] } : frame.op === "post" ? { seq: 7 } : undefined;
-		respond(socket, frame, result);
+		respond(connection, frame, result);
 	};
-	const server = createServer(socket => {
-		sockets.push(socket);
-		let buffer = "";
-		socket.setEncoding("utf8");
-		socket.on("data", chunk => {
-			buffer += chunk;
-			for (;;) {
-				const end = buffer.indexOf("\n"); if (end < 0) break;
-				const frame = JSON.parse(buffer.slice(0, end)) as Frame;
-				buffer = buffer.slice(end + 1);
-				frames.push(frame); handler(frame, socket);
-				for (const resolve of received.get(frame.op) ?? []) resolve(frame);
-				received.delete(frame.op);
-			}
-		});
+	const server = await IpcServer.listen(endpoint, { framing: "lines" }, connection => {
+		const closed = Promise.withResolvers<void>();
+		closings.set(connection, closed.promise);
+		connections.push(connection);
+		connection.start(line => {
+			const frame = JSON.parse(line) as Frame;
+			frames.push(frame); handler(frame, connection);
+			for (const resolve of received.get(frame.op) ?? []) resolve(frame);
+			received.delete(frame.op);
+		}, () => closed.resolve());
 	});
-	const listeningReady = Promise.withResolvers<void>();
-	server.once("error", listeningReady.reject);
-	server.listen(path, listeningReady.resolve);
-	await listeningReady.promise;
 	let listening = true;
 	async function stop(): Promise<void> {
-		for (const socket of sockets) socket.destroy();
+		for (const connection of connections) connection.destroy();
 		if (!listening) return;
 		listening = false;
-		const closed = Promise.withResolvers<void>();
-		server.close(error => error ? closed.reject(error) : closed.resolve());
-		await closed.promise;
+		await server.close();
 	}
 	async function disconnect(): Promise<void> {
-		const socket = sockets.at(-1)!;
-		const closed = once(socket, "close");
-		socket.end();
-		await closed;
+		const connection = connections.at(-1)!;
+		// Ending our half reaches the peer as EOF; its own close then ends ours, so this waits for it to land.
+		connection.end();
+		await closings.get(connection);
 	}
 	function nextFrame(op: Request["op"]): Promise<Frame> {
 		const next = Promise.withResolvers<Frame>();
@@ -109,7 +97,7 @@ async function service(pane: string | undefined = "document-pane", existingDoc?:
 		return next.promise;
 	}
 	cleanup.push(stop);
-	return { doc, path, frames, sockets, stop, disconnect, nextFrame, set handler(value: typeof handler) { handler = value; }, push(frame: EventPayload) { sockets.at(-1)!.write(JSON.stringify(frame) + "\n"); } };
+	return { doc, endpoint, frames, connections, stop, disconnect, nextFrame, set handler(value: typeof handler) { handler = value; }, push(frame: EventPayload) { connections.at(-1)!.send(JSON.stringify(frame)); } };
 }
 
 type TextPart = { type: "text"; text: string } | { type: "thinking"; thinking: string };
@@ -259,7 +247,7 @@ test("playbook_edit rejects a blank agent, a design-block contract field and a m
 test("playbook_read accepts task blocks carrying agent and isolated", async () => {
 	const s = await service(); const h = await harness();
 	const configured = { ...block, agent: "task:mid", isolated: true };
-	s.handler = (frame, socket) => respond(socket, frame, frame.op === "hello" ? { blocks: ["b1"], runs: [] } : { title: "Book", blocks: [configured] });
+	s.handler = (frame, connection) => respond(connection, frame, frame.op === "hello" ? { blocks: ["b1"], runs: [] } : { title: "Book", blocks: [configured] });
 	await h.execute("playbook_open", { doc: s.doc });
 	const result = await h.execute("playbook_read", { doc: s.doc });
 	expect(result.isError).toBe(false);
@@ -269,20 +257,20 @@ test("playbook_read accepts task blocks carrying agent and isolated", async () =
 test("interruption revokes an in-flight edit without aborting the coordinator; Locked never sends a mutation", async () => {
 	const s = await service(); const h = await harness();
 	await h.execute("playbook_open", { doc: s.doc });
-	s.handler = (frame, socket) => {
+	s.handler = (frame, connection) => {
 		if (frame.op === "lock") {
-			respond(socket, frame, { block });
-			socket.write(JSON.stringify({ event: "interrupted", data: { run: "r1", block: "b1", request: frame.id } }) + "\n");
+			respond(connection, frame, { block });
+			connection.send(JSON.stringify({ event: "interrupted", data: { run: "r1", block: "b1", request: frame.id } }));
 		} else if (frame.op === "set") {
-			socket.write(JSON.stringify({ id: frame.id, ok: false, error: { code: "NotLocked", message: "lock revoked" } }) + "\n");
-		} else respond(socket, frame);
+			connection.send(JSON.stringify({ id: frame.id, ok: false, error: { code: "NotLocked", message: "lock revoked" } }));
+		} else respond(connection, frame);
 	};
 	const changed = await h.execute("playbook_edit", { op: "title", run: "r1", block: "b1", title: "New" });
 	expect(changed.isError).toBe(true);
 	expect(structuredClone(JSON.parse(changed.content[0]!.text!).error)).toMatchObject({ code: "NotLocked", message: expect.stringContaining("人在变更生效前通过打断收回了此块") });
 	expect(s.frames.map(frame => frame.op)).toEqual(["hello", "lock", "set", "unlock"]);
 	expect(h.aborted).toBe(0); expect(h.messages).toEqual([]);
-	s.handler = (frame, socket) => socket.write(JSON.stringify({ id: frame.id, ok: false, error: { code: "Locked", message: "human editing", detail: { block: "b1" } } }) + "\n");
+	s.handler = (frame, connection) => connection.send(JSON.stringify({ id: frame.id, ok: false, error: { code: "Locked", message: "human editing", detail: { block: "b1" } } }));
 	const locked = await h.execute("playbook_edit", { op: "delete", block: "b1" });
 	expect(JSON.parse(locked.content[0]!.text!)).toEqual({ error: { code: "Locked", message: "human editing", detail: { block: "b1" } } });
 	expect(s.frames.map(frame => frame.op)).toEqual(["hello", "lock", "set", "unlock", "lock"]);
@@ -291,9 +279,9 @@ test("interruption revokes an in-flight edit without aborting the coordinator; L
 test("event aside precedes block_changed ack; unrelated interruption is ignored", async () => {
 	const s = await service(); const h = await harness(); await h.execute("playbook_open", { doc: s.doc });
 	let deliveredBeforeAck = false;
-	s.handler = (frame, socket) => {
+	s.handler = (frame, connection) => {
 		if (frame.op === "ack") deliveredBeforeAck = h.messages.length === 1;
-		respond(socket, frame, frame.op === "runs" ? { runs: [summary] } : undefined);
+		respond(connection, frame, frame.op === "runs" ? { runs: [summary] } : undefined);
 	};
 	const ack = s.nextFrame("ack");
 	s.push({ event: "block_changed", data: { id: "e1", launch: { id: "l1", kind: "prompt", run: "r1" }, agents: [], changed: ["b1"], diff: "diff", current: { kind: "Ok", text: "new", sources: [] } } } as EventPayload);
@@ -323,7 +311,7 @@ for (const run of [undefined, "r1"] as const) {
 		expect(frame.args).toEqual({ ...scope, block: "b3", after: 4 });
 		expect(h.messages).toEqual([]);
 		const prompt = "Keep the requirement intact.\nRevise the failure path and label it clearly.";
-		respond(s.sockets.at(-1)!, frame, { revisions: [
+		respond(s.connections.at(-1)!, frame, { revisions: [
 			{ seq: 6, at: 20, block: "b3", prompt: "A newer request, not the one submitted" },
 			{ seq: 5, at: 10, block: "b3", prompt },
 		] });
@@ -354,7 +342,7 @@ for (const run of [undefined, "r1"] as const) {
 	test(`revision_requested keeps the ${run === undefined ? "template" : "Run"} document and block scope in the lookup-failure hint and history advice`, async () => {
 		const s = await service(); const h = await harness();
 		await h.execute("playbook_open", { doc: s.doc });
-		s.handler = (frame, socket) => respond(socket, frame, { revisions: [] });
+		s.handler = (frame, connection) => respond(connection, frame, { revisions: [] });
 		const scope = run === undefined ? {} : { run };
 		s.push({ event: "revision_requested", data: { ...scope, block: "b3", revision: 5 } } as EventPayload);
 		await h.messageSent;
@@ -547,11 +535,11 @@ test("show keeps a failing tern child's exit code and stderr", async () => {
 for (const op of ["runs", "post"] as const) {
 	for (const failure of ["protocol", "Disconnected", "NoService"] as const) {
 		test(`add ${op} ${failure} notifies and stops without retry`, async () => {
-			const s = await service(); const h = await harness(); const normal = (frame: Frame, socket: Socket) => respond(socket, frame, frame.op === "hello" ? { blocks: ["b1"], runs: [summary] } : frame.op === "runs" ? { runs: [summary] } : frame.op === "read" ? { title: "Book", blocks: [block] } : { seq: 7 });
-			s.handler = (frame, socket) => {
-				if (frame.op !== op || failure === "NoService") { normal(frame, socket); return; }
-				if (failure === "Disconnected") socket.destroy();
-				else socket.write(JSON.stringify({ id: frame.id, ok: false, error: { code: "BadValue", message: "rejected " + op } }) + "\n");
+			const s = await service(); const h = await harness(); const normal = (frame: Frame, connection: IpcConnection) => respond(connection, frame, frame.op === "hello" ? { blocks: ["b1"], runs: [summary] } : frame.op === "runs" ? { runs: [summary] } : frame.op === "read" ? { title: "Book", blocks: [block] } : { seq: 7 });
+			s.handler = (frame, connection) => {
+				if (frame.op !== op || failure === "NoService") { normal(frame, connection); return; }
+				if (failure === "Disconnected") connection.destroy();
+				else connection.send(JSON.stringify({ id: frame.id, ok: false, error: { code: "BadValue", message: "rejected " + op } }));
 			};
 			if (failure === "NoService") h.selectHook = async title => {
 				if (title === (op === "runs" ? "选择会话消息" : "选择块")) { await s.disconnect(); await s.stop(); }
@@ -574,20 +562,20 @@ test("add reconnects before runs and post when transport disappears during menu 
 	expect(h.notices.at(-1)).toEqual({ message: "已写入 Playbook 时间线条目 7", type: "info" });
 });
 
-test("client missing socket returns NoService; failed hello sends no target request", async () => {
+test("client without a service returns NoService; failed hello sends no target request", async () => {
 	const missing = client("/tmp/no-pb-service-" + randomUUID()); const reply = await missing.request({ op: "runs", args: {} });
 	expect(reply.ok).toBe(false); if (!reply.ok) expect(reply.error.code).toBe("NoService");
-	const s = await service(); s.handler = (_frame, socket) => socket.destroy();
-	const c = client(s.path); const beforeHello = await c.request({ op: "post", args: { run: runId, kind: "update", text: "x" } });
+	const s = await service(); s.handler = (_frame, connection) => connection.destroy();
+	const c = client(s.endpoint); const beforeHello = await c.request({ op: "post", args: { run: runId, kind: "update", text: "x" } });
 	expect(beforeHello.ok).toBe(false); if (!beforeHello.ok) expect(beforeHello.error.code).toBe("NoService"); expect(s.frames.map(frame => frame.op)).toEqual(["hello"]);
 });
 
 test("in-flight disconnect is Disconnected; automatic reconnect sends only hello; close stops retries", async () => {
-	const s = await service(); s.handler = (frame, socket) => { if (frame.op === "hello") respond(socket, frame, { blocks: [], runs: [] }); else socket.destroy(); };
-	const c = client(s.path); const reply = await c.request({ op: "post", args: { run: runId, kind: "update", text: "x" } });
+	const s = await service(); s.handler = (frame, connection) => { if (frame.op === "hello") respond(connection, frame, { blocks: [], runs: [] }); else connection.destroy(); };
+	const c = client(s.endpoint); const reply = await c.request({ op: "post", args: { run: runId, kind: "update", text: "x" } });
 	expect(reply.ok).toBe(false); if (!reply.ok) expect(reply.error.code).toBe("Disconnected");
 	// Exercise the real platform reconnect deadline and prove close cancels that deadline.
-	// Advancing fake timers does not reproduce Unix-socket I/O across transport lifetimes.
+	// Advancing fake timers does not reproduce IPC I/O across transport lifetimes.
 	await Bun.sleep(2150); expect(s.frames.map(frame => frame.op)).toEqual(["hello", "post", "hello"]);
 	c.close(); await Bun.sleep(2150); expect(s.frames.map(frame => frame.op)).toEqual(["hello", "post", "hello"]);
 });
@@ -647,7 +635,7 @@ for (const orchestration of [false, true]) {
 	test(`launch_requested selects ${orchestration ? "orchestration execution" : "prompt subagent execution"} from the requested Run blocks`, async () => {
 		const s = await service(); const h = await harness();
 		await h.execute("playbook_open", { doc: s.doc });
-		s.handler = (frame, socket) => respond(socket, frame, {
+		s.handler = (frame, connection) => respond(connection, frame, {
 			title: "Run copy", blocks: [
 				{ ...block, body: orchestration ? "```js\nreturn 42;\n```" : "Prompt" },
 				{ ...block, id: "b2", body: "```py\nprint(42)\n```" },
@@ -676,7 +664,7 @@ for (const orchestration of [false, true]) {
 test("launch_requested names a single block's preset agent and isolated", async () => {
 	const s = await service(); const h = await harness();
 	await h.execute("playbook_open", { doc: s.doc });
-	s.handler = (frame, socket) => respond(socket, frame, { title: "Run copy", blocks: [{ ...block, body: "Prompt", agent: "task:mid", isolated: true }] });
+	s.handler = (frame, connection) => respond(connection, frame, { title: "Run copy", blocks: [{ ...block, body: "Prompt", agent: "task:mid", isolated: true }] });
 	s.push({ event: "launch_requested", data: { run: "r1", blocks: ["b1"] } } as EventPayload);
 	await h.messageSent;
 	const lines = h.messages[0]!.message.content.split("\n");
@@ -687,7 +675,7 @@ test("launch requests made during a turn wait for its end and arrive as one noti
 	const s = await service(); const h = await harness();
 	await h.execute("playbook_open", { doc: s.doc });
 	const doc = await realpath(s.doc);
-	s.handler = (frame, socket) => respond(socket, frame, frame.op === "runs" ? { runs: [summary] } : { title: "Book", blocks: [block, { ...block, id: "b2", body: "Second" }] });
+	s.handler = (frame, connection) => respond(connection, frame, frame.op === "runs" ? { runs: [summary] } : { title: "Book", blocks: [block, { ...block, id: "b2", body: "Second" }] });
 	await h.event("agent_start");
 	s.push({ event: "launch_requested", data: { blocks: ["b1"] } } as EventPayload);
 	s.push({ event: "launch_requested", data: { run: "r1", blocks: ["b2"] } } as EventPayload);
@@ -726,7 +714,7 @@ test("exec runs the latest rebased orchestration code, not the frozen snapshot",
 	await h.execute("playbook_open", { doc: s.doc });
 	const first = "```js\nreturn \"first\";\n```";
 	const rebased = "```js\nreturn \"rebased\";\n```";
-	s.handler = (frame, socket) => respond(socket, frame, { id: "l1", run: "r1", session: "session-test", kind: "orchestration", snapshot: { result: { text: first } }, baselines: [first, rebased] });
+	s.handler = (frame, connection) => respond(connection, frame, { id: "l1", run: "r1", session: "session-test", kind: "orchestration", snapshot: { result: { text: first } }, baselines: [first, rebased] });
 	const rewritten = await h.call({ language: "js", code: 'await playbook.exec("l1")' });
 	if (!rewritten || !("input" in rewritten)) throw new Error("exec was not rewritten");
 	expect(rewritten.input.code).toEndWith('return "rebased";');
@@ -735,7 +723,7 @@ test("exec runs the latest rebased orchestration code, not the frozen snapshot",
 test("launch_requested does not treat a requested design block as orchestration", async () => {
 	const s = await service(); const h = await harness();
 	await h.execute("playbook_open", { doc: s.doc });
-	s.handler = (frame, socket) => respond(socket, frame, {
+	s.handler = (frame, connection) => respond(connection, frame, {
 		title: "Run copy", blocks: [designBlock, { ...block, body: "```py\nprint(42)\n```" }],
 	});
 	s.push({ event: "launch_requested", data: { run: "r1", blocks: ["b3"] } } as EventPayload);
@@ -755,7 +743,7 @@ for (const language of ["js", "py"] as const) {
 		await h.execute("playbook_open", { doc: s.doc });
 		const doc = await realpath(s.doc);
 		const source = language === "js" ? "return playbook.context;" : "print(PLAYBOOK_DOC, PLAYBOOK_RUN, PLAYBOOK_LAUNCH)";
-		s.handler = (frame, socket) => respond(socket, frame, { id: "l1", run: "r1", session: "session-test", kind: "orchestration", snapshot: { result: { text: "```" + language + "\n" + source + "\n```" } } });
+		s.handler = (frame, connection) => respond(connection, frame, { id: "l1", run: "r1", session: "session-test", kind: "orchestration", snapshot: { result: { text: "```" + language + "\n" + source + "\n```" } } });
 		const rewritten = await h.call({ language: "js", code: language === "js" ? 'await playbook.exec("l1")' : `await playbook.exec('l1', ${JSON.stringify(s.doc)})`, title: "Execute", timeout: 99, reset: true });
 		expect(rewritten).toBeDefined();
 		if (!rewritten || !("input" in rewritten)) throw new Error("exec was not rewritten");
@@ -774,9 +762,9 @@ for (const kind of ["prompt", "unknown", "unfenced"] as const) {
 	test(`exec blocks a ${kind} Launch instead of executing arbitrary code`, async () => {
 		const s = await service(); const h = await harness();
 		await h.execute("playbook_open", { doc: s.doc });
-		s.handler = (frame, socket) => {
-			if (kind === "unknown") socket.write(JSON.stringify({ id: frame.id, ok: false, error: { code: "UnknownLaunch", message: "missing l1" } }) + "\n");
-			else respond(socket, frame, { id: "l1", run: "r1", session: "session-test", kind: kind === "prompt" ? "prompt" : "orchestration", snapshot: { result: { text: kind === "prompt" ? "Task" : "return 42;" } } });
+		s.handler = (frame, connection) => {
+			if (kind === "unknown") connection.send(JSON.stringify({ id: frame.id, ok: false, error: { code: "UnknownLaunch", message: "missing l1" } }));
+			else respond(connection, frame, { id: "l1", run: "r1", session: "session-test", kind: kind === "prompt" ? "prompt" : "orchestration", snapshot: { result: { text: kind === "prompt" ? "Task" : "return 42;" } } });
 		};
 		const result = await h.call({ language: "js", code: 'await playbook.exec("l1")' });
 		if (!result || !("reason" in result)) throw new Error("unsafe exec was not blocked");
@@ -822,7 +810,7 @@ test("eval interception leaves subagents, other tools, Python helpers and unrela
 test("eval prelude binds through the registered strict Launch tool before waiting and records the result", async () => {
 	const s = await service(); const h = await harness();
 	await h.execute("playbook_open", { doc: s.doc });
-	s.handler = (frame, socket) => respond(socket, frame, frame.op === "launch" ? { launch: "l1", kind: "prompt", text: "Frozen task", agent: "task:mid" } : frame.op === "post" ? { seq: 7 } : undefined);
+	s.handler = (frame, connection) => respond(connection, frame, frame.op === "launch" ? { launch: "l1", kind: "prompt", text: "Frozen task", agent: "task:mid" } : frame.op === "post" ? { seq: 7 } : undefined);
 	const rewritten = await h.call({ language: "js", code: 'return await playbook.run({run:"r1", blocks:["b1"]});' });
 	if (!rewritten || !("input" in rewritten)) throw new Error("run was not rewritten");
 	const tool: Record<string, (params: Record<string, unknown>) => Promise<string>> = {};
@@ -846,9 +834,9 @@ test("eval prelude binds through the registered strict Launch tool before waitin
 test("a rejected edit still releases its lock and the next call receives a fresh lock id", async () => {
 	const s = await service(); const h = await harness();
 	await h.execute("playbook_open", { doc: s.doc });
-	s.handler = (frame, socket) => {
-		if (frame.op === "edit") socket.write(JSON.stringify({ id: frame.id, ok: false, error: { code: "BadValue", message: "find is not unique" } }) + "\n");
-		else respond(socket, frame, frame.op === "lock" ? { block } : undefined);
+	s.handler = (frame, connection) => {
+		if (frame.op === "edit") connection.send(JSON.stringify({ id: frame.id, ok: false, error: { code: "BadValue", message: "find is not unique" } }));
+		else respond(connection, frame, frame.op === "lock" ? { block } : undefined);
 	};
 	const rejected = await h.execute("playbook_edit", { op: "replace", block: "b1", find: "Body", replace: "New" });
 	expect(JSON.parse(rejected.content[0]!.text!)).toEqual({ error: { code: "BadValue", message: "find is not unique" } });
@@ -863,7 +851,7 @@ test("a rejected edit still releases its lock and the next call receives a fresh
 test("playbook_timeline read forwards after and limit to the K1 request", async () => {
 	const s = await service(); const h = await harness();
 	await h.execute("playbook_open", { doc: s.doc });
-	s.handler = (frame, socket) => respond(socket, frame, { entries: [{ seq: 7 }], next_after: 7 });
+	s.handler = (frame, connection) => respond(connection, frame, { entries: [{ seq: 7 }], next_after: 7 });
 	const result = await h.execute("playbook_timeline", { doc: s.doc, op: "read", run: "r1", after: 6, limit: 200 });
 	expect(result.isError).toBe(false);
 	expect(s.frames.at(-1)).toMatchObject({ op: "timeline", args: { run: "r1", after: 6, limit: 200 } });
@@ -873,22 +861,17 @@ test("playbook_timeline read forwards after and limit to the K1 request", async 
 test("tool output passes the reply's serialized result through byte-identically, canonical or not", async () => {
 	const s = await service(); const h = await harness();
 	await h.execute("playbook_open", { doc: s.doc });
-	s.handler = (frame, socket) => socket.write(`{"id":${JSON.stringify(frame.id)},"ok":true,"result":{ "entries" : [{"seq":9}] }}\n`);
+	s.handler = (frame, connection) => connection.send(`{"id":${JSON.stringify(frame.id)},"ok":true,"result":{ "entries" : [{"seq":9}] }}`);
 	const result = await h.execute("playbook_timeline", { doc: s.doc, op: "read" });
 	expect(result.isError).toBe(false);
 	expect(result.content[0]!.text).toBe('{ "entries" : [{"seq":9}] }');
 });
 
-test("a large reply frame arriving in small chunks reassembles, split inside a multi-byte character", async () => {
+test("a large reply frame far above the host's write high-water mark reassembles", async () => {
 	const s = await service(); const h = await harness();
 	await h.execute("playbook_open", { doc: s.doc });
 	const text = `你好🌟${"x".repeat(5 * 1024 * 1024)}`;
-	s.handler = (frame, socket) => {
-		const bytes = Buffer.from(`${JSON.stringify({ id: frame.id, ok: true, result: { entries: [{ seq: 1, text }] } })}\n`);
-		const split = bytes.indexOf(Buffer.from("好")) + 1;
-		socket.write(bytes.subarray(0, split));
-		for (let at = split; at < bytes.length; at += 16384) socket.write(bytes.subarray(at, Math.min(at + 16384, bytes.length)));
-	};
+	s.handler = (frame, connection) => connection.send(JSON.stringify({ id: frame.id, ok: true, result: { entries: [{ seq: 1, text }] } }));
 	const result = await h.execute("playbook_timeline", { doc: s.doc, op: "read" });
 	expect(result.isError).toBe(false);
 	expect(result.content[0]!.text).toBe(JSON.stringify({ entries: [{ seq: 1, text }] }));
@@ -897,7 +880,7 @@ test("a large reply frame arriving in small chunks reassembles, split inside a m
 test("a bad reply line closes the connection and in-flight requests fail Disconnected", async () => {
 	const s = await service(); const h = await harness();
 	await h.execute("playbook_open", { doc: s.doc });
-	s.handler = (_frame, socket) => socket.write("not-json\n");
+	s.handler = (_frame, connection) => connection.send("not-json");
 	const result = await h.execute("playbook_timeline", { doc: s.doc, op: "read" });
 	expect(result.isError).toBe(true);
 	expect(JSON.parse(result.content[0]!.text!)).toMatchObject({ error: { code: "Disconnected" } });

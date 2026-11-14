@@ -1,13 +1,13 @@
 // Choosing a coordinator from the Playbook pane. Tern says which panes of this window run omp; the pane
-// socket of the omp session there says whether omp-playbooks is loaded and makes it connect. The service
+// endpoint of the omp session there says whether omp-playbooks is loaded and makes it connect. The service
 // itself becomes "online" only through that session's K1 hello, as with playbook_open.
-import { tmpdir } from "node:os";
+import { IpcConnection } from "@oh-my-pi/pi-natives";
 import { tr, withLanguage } from "../i18n";
-import { paneSocketPath, type PaneReply, type PaneRequest } from "../domain/protocol";
+import { paneEndpoint, type PaneReply, type PaneRequest } from "../domain/protocol";
 import { listPanes, movePane, splitPane, type TernPane } from "./panes";
 
 export interface OmpPane extends TernPane {
-	/** Whether the omp session in the pane answers on its pane socket (omp-playbooks loaded). */
+	/** Whether the omp session in the pane answers on its pane endpoint (omp-playbooks loaded). */
 	readonly loaded: boolean;
 }
 
@@ -30,33 +30,44 @@ function parseReply(line: string): PaneReply | null {
 	}
 }
 
-/** One request on a pane socket; the session replies with one line and closes. */
+/** One request on a pane endpoint; the session replies with one line and closes. */
 async function ask(pane: string, request: PaneRequest, timeoutMs: number): Promise<PaneReply> {
 	const { promise, resolve } = Promise.withResolvers<PaneReply>();
-	const fail = (code: string, message: string): void => resolve({ ok: false, error: { code, message } });
+	let settled = false;
+	let connection: IpcConnection | undefined;
+	const finish = (reply: PaneReply): void => {
+		if (settled) return;
+		settled = true;
+		clearTimeout(timer);
+		connection?.destroy();
+		resolve(reply);
+	};
+	const fail = (code: string, message: string): void => finish({ ok: false, error: { code, message } });
 	const timer = setTimeout(() => fail("Timeout", tr(`Pane ${pane} did not respond within ${timeoutMs / 1000} s`, `面板 ${pane} 在 ${timeoutMs / 1000} 秒内没有响应`)), timeoutMs);
-	let text = "";
-	Bun.connect({
-		unix: paneSocketPath(tmpdir(), pane),
-		socket: {
-			open(socket) { socket.write(`${JSON.stringify(request)}\n`); },
-			data(_socket, chunk) { text += new TextDecoder().decode(chunk); },
-			close() {
-				clearTimeout(timer);
-				const reply = parseReply(text.trim());
-				if (reply) resolve(reply);
-				else fail("BadReply", tr(`Pane ${pane} responded with ${JSON.stringify(text)}`, `面板 ${pane} 返回了 ${JSON.stringify(text)}`));
-			},
-			error(_socket, error) { clearTimeout(timer); fail("Socket", error.message); },
+	try {
+		connection = await IpcConnection.connect(paneEndpoint(pane), { framing: "lines", timeoutMs });
+	} catch (error) {
+		fail("NoListener", error instanceof Error ? error.message : String(error));
+		return promise;
+	}
+	connection.start(
+		line => {
+			const reply = parseReply(line);
+			if (reply) finish(reply);
+			else fail("BadReply", tr(`Pane ${pane} responded with ${JSON.stringify(line)}`, `面板 ${pane} 返回了 ${JSON.stringify(line)}`));
 		},
-	}).catch((error: unknown) => { clearTimeout(timer); fail("NoListener", error instanceof Error ? error.message : String(error)); });
+		reason => reason === null
+			? fail("BadReply", tr(`Pane ${pane} responded with ""`, `面板 ${pane} 返回了 ""`))
+			: fail("Socket", reason),
+	);
+	connection.send(JSON.stringify(request));
 	return promise;
 }
 
 /**
- * The omp panes of this window other than `own`: a pane whose omp session answers on its pane socket
- * (omp-playbooks loaded), or one Tern knows runs omp (its session file) without that socket. Tern's
- * session file alone misses an omp started with --no-session, so the socket is asked of every pane.
+ * The omp panes of this window other than `own`: a pane whose omp session answers on its pane endpoint
+ * (omp-playbooks loaded), or one Tern knows runs omp (its session file) without that endpoint. Tern's
+ * session file alone misses an omp started with --no-session, so the endpoint is asked of every pane.
  */
 export async function ompPanes(own: string): Promise<{ ok: true; panes: readonly OmpPane[] } | { ok: false; error: string }> {
 	const listed = await listPanes();

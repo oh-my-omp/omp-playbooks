@@ -3,9 +3,8 @@
 //   omp-playbook <playbook.yaml>           serve the document (one live service per document)
 //   omp-playbook --reveal <playbook.yaml>  show the running service's pane; exit 4 when none runs
 import { realpathSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
-import { socketPath } from "../domain/protocol";
+import { documentEndpoint } from "../domain/protocol";
 import { tr } from "../i18n";
 import { checks } from "./checks";
 import { readClipboardImage } from "./clipboard";
@@ -26,7 +25,7 @@ if (!file) {
 	process.exit(2);
 }
 const templatePath = realpathSync(resolve(file));
-const endpoint = socketPath(tmpdir(), templatePath);
+const endpoint = documentEndpoint(templatePath);
 if (reveal) {
 	const outcome = await revealService(endpoint);
 	switch (outcome.kind) {

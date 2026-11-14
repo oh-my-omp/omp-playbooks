@@ -1,11 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import { ptree } from "@oh-my-pi/pi-utils";
 import { parseLaunchId, type BlockId, type RunId, type RecordKind } from "../domain/model";
-import { paneSocketPath, socketPath, type EventPayload, type PaneReply, type PaneRequest, type Request, type ServerFrame } from "../domain/protocol";
+import { documentEndpoint, paneEndpoint, type EventPayload, type PaneReply, type PaneRequest, type Request, type ServerFrame } from "../domain/protocol";
 import { K1Client, type Reply } from "./client";
 import { splitPane } from "../service/panes";
 import { ensureTernPlugin, type TernPluginState } from "./tern-setup";
@@ -31,7 +30,7 @@ function ternNotice(state: TernPluginState): { readonly text: string; readonly l
 
 /**
  * The Tern pane this omp runs in: the session daemon sets TERN_PANE to the pane's numeric id, which
- * also names this session's pane socket. Any other value or none is not a Tern pane.
+ * also names this session's pane endpoint. Any other value or none is not a Tern pane.
  */
 function ternPane(): string | null {
 	const pane = process.env.TERN_PANE;
@@ -102,7 +101,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		session = currentSession;
 		let client = clients.get(absolute);
 		if (!client) {
-			client = new K1Client(socketPath(tmpdir(), absolute), { session: currentSession, pane }, (input): ServerFrame => frames.parse(input) as ServerFrame /* omptype marks an optional-valued key as optional; the wire ok-frame always carries result */, async (event: EventPayload) => {
+			client = new K1Client(documentEndpoint(absolute), { session: currentSession, pane }, (input): ServerFrame => frames.parse(input) as ServerFrame /* omptype marks an optional-valued key as optional; the wire ok-frame always carries result */, async (event: EventPayload) => {
 				// A human interrupt only revokes the lock of an in-flight playbook_edit, whose
 				// mutation then fails with NotLocked; nothing else in this session depends on it.
 				if (event.event === "interrupted") return;
@@ -421,7 +420,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	});
 
 	/**
-	 * A pane socket request from a document service: `attach` connects this session to that Playbook's
+	 * A pane endpoint request from a document service: `attach` connects this session to that Playbook's
 	 * service as its coordinator (what playbook_open does for an already running service), then tells the
 	 * model so in the transcript without starting a turn.
 	 */
@@ -448,7 +447,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		if (notice) ctx.ui.notify(notice.text, notice.level);
 		paneContext = ctx;
 		busy = !ctx.isIdle();
-		if (paneListener === null) paneListener = await listenPane(paneSocketPath(tmpdir(), pane), request => onPaneRequest(request, paneContext!));
+		if (paneListener === null) paneListener = await listenPane(paneEndpoint(pane), request => onPaneRequest(request, paneContext!));
 	});
 
 	pi.on("agent_start", (_event, ctx) => {

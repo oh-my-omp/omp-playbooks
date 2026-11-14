@@ -1,8 +1,4 @@
-import { dlopen, FFIType } from "bun:ffi";
-import { randomUUID } from "node:crypto";
-import { lstatSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
-import { createConnection } from "node:net";
-import { dirname } from "node:path";
+import { IpcConnection, IpcServer } from "@oh-my-pi/pi-natives";
 import { parseBlockId, parseLaunchId, parseRunId, type BlockId, type JudgeReport } from "../domain/model";
 import type { Connection, K1Handler } from "../domain/ports";
 import type { ProtocolError, Request, ServerFrame } from "../domain/protocol";
@@ -181,16 +177,6 @@ export function parseRequest(op: string, args: unknown): Request | ProtocolError
 	}
 }
 
-interface SocketState {
-	readonly conn: Connection;
-	readonly decoder: TextDecoder;
-	parts: string[];
-	tail: Promise<void>;
-	closed: boolean;
-	readonly outgoing: Uint8Array[];
-	offset: number;
-}
-
 /** Another document service already listens for this document (design/README.md I1). */
 export class ServiceRunning extends Error {}
 
@@ -198,223 +184,56 @@ function errorCode(error: unknown): string | undefined {
 	return typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : undefined;
 }
 
-function listening(path: string): Promise<boolean> {
-	const { promise, resolve } = Promise.withResolvers<boolean>();
-	const probe = createConnection(path);
-	probe.once("connect", () => { probe.destroy(); resolve(true); });
-	probe.once("error", () => resolve(false));
-	return promise;
+/** One accepted connection plus the little state its framing needs. */
+interface Link {
+	readonly conn: Connection;
+	readonly connection: IpcConnection;
+	/** Frames waiting for the host's write queue to fall back under its 1 MiB high-water mark. */
+	readonly queued: string[];
+	/** Requests are handled one at a time, in arrival order. */
+	tail: Promise<void>;
+	writing: boolean;
+	closed: boolean;
 }
 
 /**
- * Claims the document's socket path for this process (I1): a live listener makes this process
- * refuse with ServiceRunning, a socket file nobody listens on is replaced, any other file is
- * never removed.
+ * A newline JSON adapter on the host's IPC endpoint. Core owns hello admission and all document state;
+ * the host owns what the endpoint is on this platform (named pipe or socket file), claiming it, and
+ * taking over one nobody listens on, so a second live service is refused here as `ServiceRunning`.
  */
-async function claim(path: string, listen: () => { close(): void }): Promise<{ close(): void }> {
-	mkdirSync(dirname(path), { recursive: true });
-	return process.platform === "win32" ? claimWindows(path, listen) : claimPosix(path, listen);
-}
-
-/**
- * The bind itself arbitrates: a socket file nobody listens on is moved aside by an atomic rename
- * of exactly that inode, so concurrent starters cannot both win.
- */
-async function claimPosix(path: string, listen: () => { close(): void }): Promise<{ close(): void }> {
-	for (;;) {
-		const existing = lstatSync(path, { throwIfNoEntry: false });
-		if (existing) {
-			if (!existing.isSocket()) throw new Error(`Refusing to remove a non-socket file: ${path}`);
-			if (await listening(path)) throw new ServiceRunning(`A document service is already listening at ${path}`);
-			const aside = `${path}.stale-${randomUUID()}`;
-			try { renameSync(path, aside); } catch (error) { if (errorCode(error) === "ENOENT") continue; throw error; }
-			if (lstatSync(aside).ino !== existing.ino) { renameSync(aside, path); continue; }
-			unlinkSync(aside);
-			continue;
-		}
-		// A concurrent starter bound first; Bun reports that as EADDRINUSE or, on POSIX, EEXIST.
-		try { return listen(); } catch (error) { const code = errorCode(error); if (code === "EADDRINUSE" || code === "EEXIST") continue; throw error; }
-	}
-}
-
-/**
- * Windows denies `lstat`, `stat` and `open` of a socket file (EACCES, alive or not), so there is
- * no inode to pin a rename to, and a rename there follows whichever file a concurrent starter
- * left at the path. Starters instead take turns under an exclusive lock on `<path>.lock`; the
- * holder alone looks at the path, removes a socket nobody answers on, and binds. The system
- * drops the lock with its handle or its process, so a killed starter never blocks the next.
- */
-async function claimWindows(path: string, listen: () => { close(): void }): Promise<{ close(): void }> {
-	const release = await lockWindows(`${path}.lock`);
-	try {
-		switch (windowsPathKind(path)) {
-			case "other":
-				throw new Error(`Refusing to remove a non-socket file: ${path}`);
-			case "socket":
-				if (await listening(path)) throw new ServiceRunning(`A document service is already listening at ${path}`);
-				unlinkSync(path);
-				break;
-			case "absent":
-				break;
-		}
-		return listen();
-	} finally {
-		release();
-	}
-}
-
-/** What occupies a socket path on Windows: nothing, a Unix socket file, or anything else (never removed). */
-type PathKind = "absent" | "socket" | "other";
-
-const FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
-const IO_REPARSE_TAG_AF_UNIX = 0x80000023;
-/** sizeof(WIN32_FIND_DATAW); dwFileAttributes at offset 0, dwReserved0 (the reparse tag) at 36. */
-const FIND_DATA_SIZE = 592;
-const INVALID_HANDLE_VALUE = -1n;
-const GENERIC_READ_WRITE = 0xc0000000;
-const FILE_SHARE_ALL = 7;
-const OPEN_ALWAYS = 4;
-const FILE_ATTRIBUTE_NORMAL = 0x80;
-const LOCKFILE_FAIL_IMMEDIATELY = 1;
-const LOCKFILE_EXCLUSIVE_LOCK = 2;
-const OVERLAPPED_SIZE = 32;
-const LOCK_RETRY_MS = 20;
-
-interface Kernel32 {
-	findFirst(path: string, data: Buffer): bigint;
-	findClose(handle: bigint): void;
-	createFile(path: string): bigint;
-	tryLock(handle: bigint): boolean;
-	closeHandle(handle: bigint): void;
-}
-
-let kernel32Symbols: Kernel32 | undefined;
-
-function kernel32(): Kernel32 {
-	if (kernel32Symbols !== undefined) return kernel32Symbols;
-	const { symbols } = dlopen("kernel32.dll", {
-		FindFirstFileW: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i64 },
-		FindClose: { args: [FFIType.i64], returns: FFIType.i32 },
-		CreateFileW: { args: [FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr], returns: FFIType.i64 },
-		LockFileEx: { args: [FFIType.i64, FFIType.u32, FFIType.u32, FFIType.u32, FFIType.u32, FFIType.ptr], returns: FFIType.i32 },
-		CloseHandle: { args: [FFIType.i64], returns: FFIType.i32 },
-	});
-	const wide = (path: string) => Buffer.from(`${path}\0`, "utf16le");
-	kernel32Symbols = {
-		findFirst: (path, data) => BigInt(symbols.FindFirstFileW(wide(path), data)),
-		findClose: handle => { symbols.FindClose(handle); },
-		createFile: path => BigInt(symbols.CreateFileW(wide(path), GENERIC_READ_WRITE, FILE_SHARE_ALL, null, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, null)),
-		tryLock: handle => symbols.LockFileEx(handle, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, new Uint8Array(OVERLAPPED_SIZE)) !== 0,
-		closeHandle: handle => { symbols.CloseHandle(handle); },
-	};
-	return kernel32Symbols;
-}
-
-/** LockFileEx on the first byte of `path`; the returned function closes the handle, which releases it. */
-async function lockWindows(path: string): Promise<() => void> {
-	const system = kernel32();
-	const handle = system.createFile(path);
-	if (handle === INVALID_HANDLE_VALUE) throw new Error(`Cannot lock ${path}: CreateFileW could not open it`);
-	// A waiting LockFileEx would block this process's event loop, and with it a claim of the same
-	// path already holding the lock in this process. On this valid handle an immediate exclusive
-	// lock fails only while another handle holds the byte.
-	while (!system.tryLock(handle)) await Bun.sleep(LOCK_RETRY_MS);
-	return () => system.closeHandle(handle);
-}
-
-/**
- * FindFirstFileW reads the directory entry without opening the file: a socket file is a reparse
- * point tagged IO_REPARSE_TAG_AF_UNIX.
- */
-function windowsPathKind(path: string): PathKind {
-	const system = kernel32();
-	const data = Buffer.alloc(FIND_DATA_SIZE);
-	const handle = system.findFirst(path, data);
-	// No entry at this path.
-	if (handle === INVALID_HANDLE_VALUE) return "absent";
-	system.findClose(handle);
-	return (data.readUInt32LE(0) & FILE_ATTRIBUTE_REPARSE_POINT) !== 0 && data.readUInt32LE(36) === IO_REPARSE_TAG_AF_UNIX ? "socket" : "other";
-}
-
-/** A newline JSON adapter. Core owns hello admission and all document state. */
-export function serveK1(path: string, handler: K1Handler): Promise<{ close(): void }> {
-	return claim(path, () => listenK1(path, handler));
-}
-
-/** Result of asking the document's service to show its pane (contracts.md K1 `reveal`). */
-export type RevealOutcome = { readonly kind: "revealed" } | { readonly kind: "absent" } | { readonly kind: "failed"; readonly message: string };
-
-/** One-shot K1 client: `reveal` needs no hello and never becomes the coordinator. */
-export function revealService(path: string): Promise<RevealOutcome> {
-	const { promise, resolve } = Promise.withResolvers<RevealOutcome>();
-	const socket = createConnection(path);
-	const parts: string[] = [];
-	let connected = false;
-	socket.setEncoding("utf8");
-	socket.once("connect", () => {
-		connected = true;
-		socket.write(`${JSON.stringify({ id: "reveal", op: "reveal", args: {} })}\n`);
-	});
-	socket.on("data", (chunk: string) => {
-		let start = 0;
-		for (;;) {
-			const newline = chunk.indexOf("\n", start);
-			if (newline < 0) { parts.push(chunk.slice(start)); return; }
-			parts.push(chunk.slice(start, newline));
-			socket.destroy();
-			try {
-				const reply: unknown = JSON.parse(parts.join(""));
-				const frame = object(reply, "reply");
-				if (frame.ok === true) { resolve({ kind: "revealed" }); return; }
-				const error = object(frame.error, "error");
-				resolve({ kind: "failed", message: `${string(error.code, "code")}: ${string(error.message, "message")}` });
-			} catch (error) {
-				resolve({ kind: "failed", message: tr(`Invalid reveal reply: ${error instanceof Error ? error.message : String(error)}`, `显示回复无效：${error instanceof Error ? error.message : String(error)}`) });
-			}
-			return;
-		}
-	});
-	socket.once("error", error => resolve(connected ? { kind: "failed", message: tr(`Reveal failed: ${error.message}`, `显示失败：${error.message}`) } : { kind: "absent" }));
-	socket.once("close", () => resolve(connected ? { kind: "failed", message: tr("Connection closed before a reply", "连接在收到回复前关闭") } : { kind: "absent" }));
-	return promise;
-}
-
-function listenK1(path: string, handler: K1Handler): { close(): void } {
+export async function serveK1(endpoint: string, handler: K1Handler): Promise<{ close(): void }> {
+	const links = new Set<Link>();
 	let nextConnection = 1;
-	const connections = new Set<Bun.Socket<SocketState>>();
-	const encoder = new TextEncoder();
+	let closed = false;
 
-	function flush(socket: Bun.Socket<SocketState>): void {
-		const state = socket.data;
-		while (!state.closed && state.outgoing.length > 0) {
-			const bytes = state.outgoing[0]!;
-			const written = socket.write(bytes.subarray(state.offset));
-			if (written < 0) { disconnect(socket); socket.terminate(); return; }
-			state.offset += written;
-			if (state.offset < bytes.length) return;
-			state.outgoing.shift();
-			state.offset = 0;
-		}
+	function send(link: Link, frame: ServerFrame): void {
+		if (link.closed) return;
+		link.queued.push(JSON.stringify(frame));
+		pump(link);
 	}
 
-	function send(socket: Bun.Socket<SocketState>, frame: ServerFrame): void {
-		if (socket.data.closed) return;
-		socket.data.outgoing.push(encoder.encode(`${JSON.stringify(frame)}\n`));
-		flush(socket);
+	/** Writes queued frames in order, waiting for the host whenever its queue passes the high-water mark. */
+	function pump(link: Link): void {
+		if (link.writing || link.closed) return;
+		link.writing = true;
+		void (async () => {
+			while (!link.closed && link.queued.length > 0) {
+				if (!link.connection.send(link.queued.shift()!)) await link.connection.drained();
+			}
+			link.writing = false;
+		})();
 	}
 
-	function disconnect(socket: Bun.Socket<SocketState>): void {
-		const state = socket.data;
-		if (state.closed) return;
-		state.closed = true;
-		state.parts.length = 0;
-		state.outgoing.length = 0;
-		connections.delete(socket);
-		handler.disconnected(state.conn);
+	function disconnect(link: Link): void {
+		if (link.closed) return;
+		link.closed = true;
+		link.queued.length = 0;
+		links.delete(link);
+		handler.disconnected(link.conn);
 	}
 
-	async function processLine(socket: Bun.Socket<SocketState>, line: string): Promise<void> {
-		if (socket.data.closed) return;
+	async function processLine(link: Link, line: string): Promise<void> {
+		if (link.closed) return;
 		let frame: Record<string, unknown>;
 		try {
 			const value: unknown = JSON.parse(line);
@@ -422,62 +241,100 @@ function listenK1(path: string, handler: K1Handler): { close(): void } {
 			string(frame.id, "id");
 		} catch {
 			// There is no request id to correlate a response with.
-			socket.data.conn.close();
+			link.conn.close();
 			return;
 		}
 		const id = string(frame.id, "id");
 		if (typeof frame.op !== "string") {
-			send(socket, { id, ok: false, error: { code: "BadValue", message: tr("op must be a string", "op 必须是字符串") } });
+			send(link, { id, ok: false, error: { code: "BadValue", message: tr("op must be a string", "op 必须是字符串") } });
 			return;
 		}
 		const request = parseRequest(frame.op, frame.args);
 		if ("code" in request) {
-			send(socket, { id, ok: false, error: request });
+			send(link, { id, ok: false, error: request });
 			return;
 		}
-		const outcome = await handler.handle(socket.data.conn, id, request);
-		send(socket, outcome.ok ? { id, ok: true, result: outcome.result === undefined ? null : outcome.result } : { id, ok: false, error: outcome.error });
+		const outcome = await handler.handle(link.conn, id, request);
+		send(link, outcome.ok ? { id, ok: true, result: outcome.result === undefined ? null : outcome.result } : { id, ok: false, error: outcome.error });
 	}
 
-	const listener = Bun.listen<SocketState>({
-		unix: path,
-		socket: {
-			open(socket) {
-				const conn: Connection = {
-					id: nextConnection++,
-					send: frame => send(socket, frame),
-					close: () => { disconnect(socket); socket.terminate(); },
-				};
-				socket.data = { conn, decoder: new TextDecoder(), parts: [], tail: Promise.resolve(), closed: false, outgoing: [], offset: 0 };
-				connections.add(socket);
-				handler.connected(conn);
+	function accept(connection: IpcConnection): void {
+		// A connection accepted while this server is closing has no later chance to be closed.
+		if (closed) { connection.destroy(); return; }
+		const link: Link = {
+			conn: {
+				id: nextConnection++,
+				send: frame => send(link, frame),
+				close: () => { disconnect(link); connection.destroy(); },
 			},
-			data(socket, bytes) {
-				const state = socket.data;
-				if (state.closed) return;
-				const chunk = state.decoder.decode(bytes, { stream: true });
-				const parts = state.parts;
-				let start = 0;
-				for (;;) {
-					const newline = chunk.indexOf("\n", start);
-					if (newline < 0) { parts.push(chunk.slice(start)); return; }
-					parts.push(chunk.slice(start, newline));
-					const line = parts.join("");
-					parts.length = 0;
-					state.tail = state.tail.then(() => processLine(socket, line)).catch(() => state.conn.close());
-					start = newline + 1;
-				}
-			},
-			drain: flush,
-			close: disconnect,
-			end(socket) { socket.data.conn.close(); },
-			error(socket) { socket.data.conn.close(); },
-		},
-	});
+			connection,
+			queued: [],
+			tail: Promise.resolve(),
+			writing: false,
+			closed: false,
+		};
+		links.add(link);
+		handler.connected(link.conn);
+		connection.start(
+			line => { link.tail = link.tail.then(() => processLine(link, line)).catch(() => link.conn.close()); },
+			() => disconnect(link),
+		);
+	}
+
+	let server: IpcServer;
+	try {
+		server = await IpcServer.listen(endpoint, { framing: "lines" }, accept);
+	} catch (error) {
+		if (errorCode(error) !== "EADDRINUSE") throw error;
+		throw new ServiceRunning(tr(`A document service is already listening at ${endpoint}`, `已经有文档服务在 ${endpoint} 上监听`));
+	}
 	return {
 		close() {
-			for (const socket of connections) socket.data.conn.close();
-			listener.stop(true);
+			if (closed) return;
+			closed = true;
+			for (const link of [...links]) link.conn.close();
+			void server.close();
 		},
 	};
+}
+
+/** Result of asking the document's service to show its pane (contracts.md K1 `reveal`). */
+export type RevealOutcome = { readonly kind: "revealed" } | { readonly kind: "absent" } | { readonly kind: "failed"; readonly message: string };
+
+/** One-shot K1 client: `reveal` needs no hello and never becomes the coordinator. */
+export async function revealService(endpoint: string): Promise<RevealOutcome> {
+	let connection: IpcConnection;
+	try {
+		connection = await IpcConnection.connect(endpoint, { framing: "lines" });
+	} catch (error) {
+		// No endpoint, or one nobody listens on: no service to show.
+		const code = errorCode(error);
+		if (code === "ENOENT" || code === "ECONNREFUSED") return { kind: "absent" };
+		const message = error instanceof Error ? error.message : String(error);
+		return { kind: "failed", message: tr(`Reveal failed: ${message}`, `显示失败：${message}`) };
+	}
+	const { promise, resolve } = Promise.withResolvers<RevealOutcome>();
+	let settled = false;
+	const finish = (outcome: RevealOutcome): void => {
+		if (settled) return;
+		settled = true;
+		connection.destroy();
+		resolve(outcome);
+	};
+	connection.start(
+		line => {
+			try {
+				const reply: unknown = JSON.parse(line);
+				const frame = object(reply, "reply");
+				if (frame.ok === true) { finish({ kind: "revealed" }); return; }
+				const error = object(frame.error, "error");
+				finish({ kind: "failed", message: `${string(error.code, "code")}: ${string(error.message, "message")}` });
+			} catch (error) {
+				finish({ kind: "failed", message: tr(`Invalid reveal reply: ${error instanceof Error ? error.message : String(error)}`, `显示回复无效：${error instanceof Error ? error.message : String(error)}`) });
+			}
+		},
+		() => finish({ kind: "failed", message: tr("Connection closed before a reply", "连接在收到回复前关闭") }),
+	);
+	connection.send(JSON.stringify({ id: "reveal", op: "reveal", args: {} }));
+	return promise;
 }

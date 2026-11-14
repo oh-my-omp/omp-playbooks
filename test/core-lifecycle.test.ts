@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import type { BlockId, DocRef, TimelineEntry } from "../src/domain/model";
 import type { Request } from "../src/domain/protocol";
 import { registerCoreCleanup, coreFixture, design, task, template } from "./core-fixture";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { ipcEndpoint } from "@oh-my-pi/pi-natives";
 import type { ServerFrame } from "../src/domain/protocol";
 import { K1Client } from "../src/extension/client";
 import { serveK1 } from "../src/service/socket";
@@ -170,9 +170,9 @@ describe("timeline paging (K1 §5)", () => {
 		const f = coreFixture(); await f.connect();
 		for (let i = 0; i < 5000; i++) await f.success({ op: "post", args: { kind: "update", text: `update ${i}` } });
 		f.core.disconnected(f.connection);
-		const path = join(tmpdir(), `omp-playbooks-test-${Math.random().toString(36).slice(2)}.sock`);
-		const server = await serveK1(path, f.core);
-		const k1 = new K1Client(path, { session: "wire-test" }, (input): ServerFrame => input as ServerFrame, () => {});
+		const endpoint = ipcEndpoint(tmpdir(), `omp-playbooks-test-${Math.random().toString(36).slice(2)}`);
+		const server = await serveK1(endpoint, f.core);
+		const k1 = new K1Client(endpoint, { session: "wire-test" }, (input): ServerFrame => input as ServerFrame, () => {});
 		try {
 			type Page = { entries: { seq: number }[]; next_after?: number };
 			const hello = await k1.connect();

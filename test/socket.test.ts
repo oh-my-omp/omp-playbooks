@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createConnection, type Socket } from "node:net";
-import { once } from "node:events";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { setImmediate } from "node:timers/promises";
-import { dirname } from "node:path";
+import { IpcConnection, ipcEndpoint } from "@oh-my-pi/pi-natives";
 import type { Connection, K1Handler } from "../src/domain/ports";
 import type { Outcome, Request } from "../src/domain/protocol";
 import { parseRequest, revealService, serveK1, ServiceRunning } from "../src/service/socket";
+
+const POSIX = process.platform !== "win32";
 
 const cleanups: (() => void)[] = [];
 afterEach(() => {
@@ -16,30 +16,33 @@ afterEach(() => {
 function tempPath(): string {
 	const dir = mkdtempSync("/tmp/tern-k1-");
 	cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
-	return `${dir}/nested/service.sock`;
+	return ipcEndpoint(dir, "service");
 }
 
-async function client(path: string): Promise<{ socket: Socket; next(): Promise<unknown> }> {
-	const socket = createConnection(path);
-	cleanups.push(() => socket.destroy());
-	socket.setEncoding("utf8");
-	let buffer = "";
+/** A client that writes K1 lines and hands back reply frames in arrival order. */
+async function client(endpoint: string): Promise<{ send(text: string): void; close(): void; closed: Promise<void>; next(): Promise<unknown> }> {
+	const connection = await IpcConnection.connect(endpoint, { framing: "lines" });
+	cleanups.push(() => connection.destroy());
 	const frames: unknown[] = [];
 	const waiting: ((frame: unknown) => void)[] = [];
-	socket.on("data", (chunk: string) => {
-		buffer += chunk;
-		let newline: number;
-		while ((newline = buffer.indexOf("\n")) !== -1) {
-			const frame: unknown = JSON.parse(buffer.slice(0, newline));
-			buffer = buffer.slice(newline + 1);
+	const closed = Promise.withResolvers<void>();
+	let dead = false;
+	connection.start(
+		line => {
+			if (dead) return;
+			const frame: unknown = JSON.parse(line);
 			const resolve = waiting.shift();
 			if (resolve) resolve(frame);
 			else frames.push(frame);
-		}
-	});
-	await once(socket, "connect");
+		},
+		() => { dead = true; closed.resolve(); },
+	);
 	return {
-		socket,
+		send(text: string): void {
+			for (const line of text.split("\n")) if (line !== "") connection.send(line);
+		},
+		close(): void { connection.destroy(); },
+		closed: closed.promise,
 		next() {
 			if (frames.length) return Promise.resolve(frames.shift());
 			const next = Promise.withResolvers<unknown>();
@@ -49,8 +52,22 @@ async function client(path: string): Promise<{ socket: Socket; next(): Promise<u
 	};
 }
 
-async function start(path: string, handle: K1Handler["handle"], disconnected: K1Handler["disconnected"] = () => {}, connected: K1Handler["connected"] = () => {}) {
-	const server = await serveK1(path, { connected, disconnected, handle });
+/** A server whose endpoint some live process already listens on, then dies without cleaning it up. */
+async function residualEndpoint(): Promise<string> {
+	const endpoint = tempPath();
+	const child = Bun.spawn([process.execPath, "-e", `import { IpcServer } from "@oh-my-pi/pi-natives"; await IpcServer.listen(${JSON.stringify(endpoint)}, { framing: "lines" }, () => {}); console.log("ready")`], { stdout: "pipe", stderr: "inherit" });
+	cleanups.push(() => child.kill("SIGKILL"));
+	const reader = child.stdout.getReader();
+	const ready = await reader.read();
+	expect(new TextDecoder().decode(ready.value)).toContain("ready");
+	reader.releaseLock();
+	child.kill("SIGKILL");
+	await child.exited;
+	return endpoint;
+}
+
+async function start(endpoint: string, handle: K1Handler["handle"], disconnected: K1Handler["disconnected"] = () => {}, connected: K1Handler["connected"] = () => {}) {
+	const server = await serveK1(endpoint, { connected, disconnected, handle });
 	cleanups.push(() => server.close());
 	return server;
 }
@@ -185,7 +202,7 @@ describe("parseRequest", () => {
 	});
 });
 
-describe("serveK1 real Unix sockets", () => {
+describe("serveK1 over the host IPC endpoint", () => {
 	test("serializes handler calls and responses, including invalid requests", async () => {
 		const path = tempPath();
 		const entered = Promise.withResolvers<void>();
@@ -197,7 +214,7 @@ describe("serveK1 real Unix sockets", () => {
 			return { ok: true, result: id };
 		});
 		const c = await client(path);
-		c.socket.write('{"id":"first","op":"runs","args":{}}\n{"id":"bad","op":"set","args":{}}\n{"id":"second","op":"runs","args":{}}\n');
+		c.send('{"id":"first","op":"runs","args":{}}\n{"id":"bad","op":"set","args":{}}\n{"id":"second","op":"runs","args":{}}\n');
 		await entered.promise;
 		await setImmediate();
 		expect(calls).toEqual(["first"]);
@@ -215,30 +232,12 @@ describe("serveK1 real Unix sockets", () => {
 			return id === "empty" ? { ok: true, result: undefined } : { ok: false, error: { code: "NotHello", message: "hello required" } };
 		});
 		const c = await client(path);
-		c.socket.write('{"id":"empty","op":"runs","args":{}}\n');
+		c.send('{"id":"empty","op":"runs","args":{}}\n');
 		expect(await c.next()).toEqual({ event: "status_changed", data: { run: "r1", block: "b1", status: "done" } });
 		expect(await c.next()).toEqual({ id: "empty", ok: true, result: null });
-		c.socket.write('{"id":"error","op":"runs","args":{}}\n');
+		c.send('{"id":"error","op":"runs","args":{}}\n');
 		await c.next();
 		expect(await c.next()).toEqual({ id: "error", ok: false, error: { code: "NotHello", message: "hello required" } });
-	});
-
-	test("joins partial lines and split UTF-8 code points without premature handling", async () => {
-		const path = tempPath();
-		const requests: Request[] = [];
-		await start(path, async (_conn, _id, request) => { requests.push(request); return { ok: true, result: request.args }; });
-		const c = await client(path);
-		const bytes = Buffer.from('{"id":"unicode","op":"hello","args":{"session":"你好🌟"}}\n');
-		const split = bytes.indexOf(Buffer.from("好")) + 1;
-		c.socket.write(bytes.subarray(0, split));
-		await setImmediate();
-		expect(requests).toHaveLength(0);
-		c.socket.write(bytes.subarray(split, bytes.length - 1));
-		await setImmediate();
-		expect(requests).toHaveLength(0);
-		c.socket.write("\n");
-		expect(await c.next()).toEqual({ id: "unicode", ok: true, result: { session: "你好🌟" } });
-		expect(requests).toEqual([{ op: "hello", args: { session: "你好🌟", pane: undefined } }]);
 	});
 
 	test("disconnects once and skips queued requests after a client closes mid-request", async () => {
@@ -254,9 +253,9 @@ describe("serveK1 real Unix sockets", () => {
 			return { ok: true, result: id };
 		}, conn => { closed.push(conn); disconnected.resolve(conn); });
 		const c = await client(path);
-		c.socket.write('{"id":"first","op":"runs","args":{}}\n{"id":"second","op":"runs","args":{}}\n');
+		c.send('{"id":"first","op":"runs","args":{}}\n{"id":"second","op":"runs","args":{}}\n');
 		await entered.promise;
-		c.socket.destroy();
+		c.close();
 		const conn = await disconnected.promise;
 		conn.close();
 		conn.send({ event: "status_changed", data: { run: "r1", block: "b1", status: "todo" } });
@@ -270,17 +269,20 @@ describe("serveK1 real Unix sockets", () => {
 	test("shutdown closes every connection and unlinks the socket", async () => {
 		const path = tempPath();
 		const closed: number[] = [];
-		const server = await start(path, async () => ({ ok: true, result: null }), conn => closed.push(conn.id));
+		// Each connection reaches the handler on its own schedule, after the client's connect returns.
+		const opened = Promise.withResolvers<void>();
+		let openedCount = 0;
+		const server = await start(path, async () => ({ ok: true, result: null }), conn => closed.push(conn.id), () => { if (++openedCount === 2) opened.resolve(); });
 		const a = await client(path);
 		const b = await client(path);
-		const aClosed = once(a.socket, "close");
-		const bClosed = once(b.socket, "close");
+		await opened.promise;
 		server.close();
 		server.close();
-		await Promise.all([aClosed, bClosed]);
+		await Promise.all([a.closed, b.closed]);
 		expect(closed).toHaveLength(2);
 		expect(new Set(closed).size).toBe(2);
-		expect(existsSync(path)).toBe(false);
+		// The endpoint file is the host's to create and to remove.
+		if (POSIX) expect(existsSync(path)).toBe(false);
 	});
 
 	test("handles unidentifiable frames and unexpected handler failures as disconnects", async () => {
@@ -289,9 +291,8 @@ describe("serveK1 real Unix sockets", () => {
 			const disconnected = Promise.withResolvers<void>();
 			await start(path, async () => { throw new Error("unexpected failure"); }, () => disconnected.resolve());
 			const c = await client(path);
-			const closed = once(c.socket, "close");
-			c.socket.write(frame);
-			await Promise.all([disconnected.promise, closed]);
+			c.send(frame);
+			await Promise.all([disconnected.promise, c.closed]);
 		}
 	});
 
@@ -299,23 +300,18 @@ describe("serveK1 real Unix sockets", () => {
 		const path = tempPath();
 		await start(path, async () => ({ ok: true, result: "continued" }));
 		const c = await client(path);
-		c.socket.write('{"id":"bad","op":3,"args":{}}\n{"id":"good","op":"runs","args":{}}\n');
+		c.send('{"id":"bad","op":3,"args":{}}\n{"id":"good","op":"runs","args":{}}\n');
 		expect(await c.next()).toMatchObject({ id: "bad", ok: false, error: { code: "BadValue" } });
 		expect(await c.next()).toEqual({ id: "good", ok: true, result: "continued" });
 	});
 
-	test("consumes a large request frame arriving in small chunks, split inside a multi-byte character", async () => {
+	test("handles a request frame far above the host's write high-water mark", async () => {
 		const path = tempPath();
 		const requests: Request[] = [];
 		await start(path, async (_conn, _id, request) => { requests.push(request); return { ok: true, result: request.args }; });
 		const c = await client(path);
 		const text = `你好🌟${"x".repeat(5 * 1024 * 1024)}`;
-		const bytes = Buffer.from(`${JSON.stringify({ id: "big", op: "write", args: { block: "b1", text } })}\n{"id":"after","op":"runs","args":{}}\n`);
-		const split = bytes.indexOf(Buffer.from("好")) + 1;
-		c.socket.write(bytes.subarray(0, split));
-		await setImmediate();
-		expect(requests).toHaveLength(0);
-		for (let at = split; at < bytes.length; at += 16384) c.socket.write(bytes.subarray(at, Math.min(at + 16384, bytes.length)));
+		c.send(`${JSON.stringify({ id: "big", op: "write", args: { block: "b1", text } })}\n{"id":"after","op":"runs","args":{}}\n`);
 		expect(await c.next()).toMatchObject({ id: "big", ok: true });
 		expect(await c.next()).toEqual({ id: "after", ok: true, result: {} });
 		expect(requests).toEqual([
@@ -333,27 +329,18 @@ describe("serveK1 real Unix sockets", () => {
 			return { ok: true, result: "done" };
 		});
 		const c = await client(path);
-		c.socket.write('{"id":"large","op":"runs","args":{}}\n');
+		c.send('{"id":"large","op":"runs","args":{}}\n');
 		expect(await c.next()).toEqual({ event: "revision_requested", data: { block: "b1", revision: 1, ...{ padding: name } } });
 		expect(await c.next()).toEqual({ event: "status_changed", data: { run: "r1", block: "b1", status: "todo" } });
 		expect(await c.next()).toEqual({ id: "large", ok: true, result: "done" });
 	});
 
-	test("replaces a residual socket left by a killed process", async () => {
-		const path = tempPath();
-		mkdirSync(dirname(path), { recursive: true });
-		const child = Bun.spawn([process.execPath, "-e", `Bun.listen({unix:${JSON.stringify(path)},socket:{data(){}}});console.log("ready")`], { stdout: "pipe", stderr: "inherit" });
-		cleanups.push(() => child.kill("SIGKILL"));
-		const reader = child.stdout.getReader();
-		const ready = await reader.read();
-		expect(new TextDecoder().decode(ready.value)).toContain("ready");
-		reader.releaseLock();
-		child.kill("SIGKILL");
-		await child.exited;
-		expect(existsSync(path)).toBe(true);
+	test("replaces the endpoint a killed service left behind", async () => {
+		const path = await residualEndpoint();
+		if (POSIX) expect(existsSync(path)).toBe(true);
 		await start(path, async () => ({ ok: true, result: "replaced" }));
 		const c = await client(path);
-		c.socket.write('{"id":"stale","op":"runs","args":{}}\n');
+		c.send('{"id":"stale","op":"runs","args":{}}\n');
 		expect(await c.next()).toEqual({ id: "stale", ok: true, result: "replaced" });
 	});
 
@@ -362,22 +349,12 @@ describe("serveK1 real Unix sockets", () => {
 		await start(path, async () => ({ ok: true, result: "original" }));
 		await expect(start(path, async () => ({ ok: true, result: "contender" }))).rejects.toBeInstanceOf(ServiceRunning);
 		const c = await client(path);
-		c.socket.write('{"id":"live","op":"runs","args":{}}\n');
+		c.send('{"id":"live","op":"runs","args":{}}\n');
 		expect(await c.next()).toEqual({ id: "live", ok: true, result: "original" });
 	});
 
-	test("elects one live server when two claims race on a residual socket", async () => {
-		const path = tempPath();
-		mkdirSync(dirname(path), { recursive: true });
-		const child = Bun.spawn([process.execPath, "-e", `Bun.listen({unix:${JSON.stringify(path)},socket:{data(){}}});console.log("ready")`], { stdout: "pipe", stderr: "inherit" });
-		cleanups.push(() => child.kill("SIGKILL"));
-		const reader = child.stdout.getReader();
-		const ready = await reader.read();
-		expect(new TextDecoder().decode(ready.value)).toContain("ready");
-		reader.releaseLock();
-		child.kill("SIGKILL");
-		await child.exited;
-		expect(existsSync(path)).toBe(true);
+	test("elects one service when two start at once on an endpoint a killed service left behind", async () => {
+		const path = await residualEndpoint();
 		const claims = await Promise.allSettled([
 			start(path, async () => ({ ok: true, result: "winner-0" })),
 			start(path, async () => ({ ok: true, result: "winner-1" })),
@@ -388,19 +365,20 @@ describe("serveK1 real Unix sockets", () => {
 		for (const claim of rejected) expect(claim.reason).toBeInstanceOf(ServiceRunning);
 		const winner = claims.findIndex(claim => claim.status === "fulfilled");
 		const c = await client(path);
-		c.socket.write('{"id":"race","op":"runs","args":{}}\n');
+		c.send('{"id":"race","op":"runs","args":{}}\n');
 		expect(await c.next()).toEqual({ id: "race", ok: true, result: `winner-${winner}` });
 	});
 
-	test("does not delete non-socket files", async () => {
-		const path = tempPath().replace("/nested/service.sock", "/ordinary");
+	test("refuses an endpoint that holds an ordinary file, and leaves the file there", async () => {
+		if (!POSIX) return;
+		const path = tempPath();
 		writeFileSync(path, "keep");
-		await expect(serveK1(path, { connected() {}, disconnected() {}, async handle() { return { ok: true, result: null }; } })).rejects.toThrow(`Refusing to remove a non-socket file: ${path}`);
+		await expect(serveK1(path, { connected() {}, disconnected() {}, async handle() { return { ok: true, result: null }; } })).rejects.toBeInstanceOf(ServiceRunning);
 		expect(readFileSync(path, "utf8")).toBe("keep");
 	});
 });
 
-describe("revealService real Unix sockets", () => {
+describe("revealService over the host IPC endpoint", () => {
 	test("sends reveal and returns revealed for an ok reply", async () => {
 		const path = tempPath();
 		const requests: Request[] = [];
