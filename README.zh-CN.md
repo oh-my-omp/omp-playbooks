@@ -83,7 +83,7 @@ tern plugin unlink omp-playbooks
 打开文件有三条路径：
 
 - **从主会话打开：** 先写好 YAML 文件，再调用 `playbook_open {doc: "/绝对路径/playbook.yaml"}`。没有服务时，扩展在当前 omp pane 右侧启动服务。已有服务时只连接，不另开 pane，也不自动切换焦点。
-- **从 Tern 打开：** 聚焦 `.yaml` 或 `.yml` 文件 pane，在命令面板选“Playbook: 打开”。已有服务时显示它，否则在旁边启动。此操作不启动 omp、不建立协调者连接。
+- **从 Tern 打开：** 聚焦 `.yaml` 或 `.yml` 文件 pane，在命令面板选“Playbook: 打开”。已有服务时显示它，否则在旁边启动。此操作不启动 omp、不建立协调者连接。插件把路径和当前 pane 交给文档服务，所以 Windows 上带空格、引号和反斜杠的路径原样送达。
 - **从源码启动服务：** 在仓库安装依赖后，在 Tern pane 中运行下面的命令。随后主会话仍需调用 `playbook_open` 才能接收请求。
 
 ```sh

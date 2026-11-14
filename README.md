@@ -83,7 +83,7 @@ tern plugin unlink omp-playbooks
 There are three ways to open a file:
 
 - **From the main session:** write the YAML file first, then call `playbook_open {doc: "/absolute/path/playbook.yaml"}`. With no service running, the extension starts one to the right of the current omp pane. With a service already running it only connects: it opens no extra pane and does not move focus.
-- **From Tern:** focus a `.yaml` or `.yml` file pane and choose "Playbook: open" in the command palette. It shows the existing service, or starts one beside the pane. This does not start omp or set up a coordinator connection.
+- **From Tern:** focus a `.yaml` or `.yml` file pane and choose "Playbook: open" in the command palette. It shows the existing service, or starts one beside the pane. This does not start omp or set up a coordinator connection. The plugin passes the path and the focused pane to the document service, so Windows paths with spaces, quotes and backslashes arrive unchanged.
 - **Starting the service from source:** install dependencies in the repository, then run the commands below in a Tern pane. The main session still has to call `playbook_open` to receive requests.
 
 ```sh
