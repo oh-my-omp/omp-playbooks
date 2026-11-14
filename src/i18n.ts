@@ -36,7 +36,16 @@ export function tr(en: string, zh: string): string {
 	return language() === "zh" ? zh : en;
 }
 
+/**
+ * Windows has no `env` program, so there `bun -e` runs this script with the language and `argv`
+ * as its arguments: it starts `argv` with `OMOMP_LANG` set, sharing the pane's console, ignores
+ * Ctrl+C itself (the console delivers it to the child too) and exits with the child's status.
+ */
+const WINDOWS_LANGUAGE_LAUNCHER = `const [language, ...argv] = process.argv.slice(1); process.on("SIGINT", () => {}); process.exit(await Bun.spawn(argv, { env: { ...process.env, ${LANGUAGE_ENV}: language }, stdio: ["inherit", "inherit", "inherit"] }).exited);`;
+
 /** `argv` run with the current process language in a Tern pane that does not inherit this process's environment. */
 export function withLanguage(argv: readonly string[]): string[] {
-	return ["env", `${LANGUAGE_ENV}=${language()}`, ...argv];
+	return process.platform === "win32"
+		? ["bun", "-e", WINDOWS_LANGUAGE_LAUNCHER, language(), ...argv]
+		: ["env", `${LANGUAGE_ENV}=${language()}`, ...argv];
 }
