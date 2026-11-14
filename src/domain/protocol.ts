@@ -157,9 +157,14 @@ void _eventsCovered;
 export type ClientFrame = { readonly id: string; readonly op: string; readonly args: unknown };
 export type ServerFrame = { readonly id: string; readonly ok: true; readonly result: unknown } | { readonly id: string; readonly ok: false; readonly error: ProtocolError } | EventPayload;
 
-/** Socket path (contracts.md K1 交换). */
+/**
+ * The document service's socket for a Playbook: one per absolute path, named by the first
+ * 128 bits of its SHA-256. An AF_UNIX path on Windows holds at most 107 characters, and the
+ * name keeps this path at the temp directory plus 52, inside that bound for every default
+ * `%TEMP%` (`C:\Users\<name>\AppData\Local\Temp`; a Windows user name has at most 20).
+ */
 export function socketPath(tmpdir: string, playbookAbsPath: string): string {
-	const hash = new Bun.CryptoHasher("sha256").update(playbookAbsPath).digest("hex");
+	const hash = new Bun.CryptoHasher("sha256").update(playbookAbsPath).digest("hex").slice(0, 32);
 	return `${tmpdir.replace(/\/$/, "")}/omp-playbooks/${hash}.sock`;
 }
 

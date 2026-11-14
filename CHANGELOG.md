@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Shortened the document service socket filename so its path stays within the 107-character AF_UNIX limit on Windows, even with long temp directory paths
 - Fixed `playbook_open` and "New coordinator session" on Windows: the document service and the new omp session now start in their Tern pane with the caller's language, where the pane command used to need the `env` program Windows does not have
 - Fixed opening an already open Playbook again on Windows: the second document service now shows the existing pane instead of exiting with `EACCES`, and a socket file left by a killed service no longer blocks every later start. Of two document services started for one Playbook at the same moment, exactly one serves and the other shows its pane, on Windows and on macOS/Linux (where the second used to exit with `EEXIST`)
 
