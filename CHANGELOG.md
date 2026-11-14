@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed the document service and the pane listener failing to start on Windows when the temporary directory's path is long
+- Fixed the Playbook pane staying blank on Windows: the document service now reads Tern's replies that Windows ConPTY delivers as OSC 877 messages
 - Fixed `playbook_open` and "New coordinator session" on Windows: the document service and the new omp session now start in their Tern pane with the caller's language, where the pane command used to need the `env` program Windows does not have
 - Fixed opening an already open Playbook again on Windows: the second document service now shows the existing pane instead of failing to start, and the leftovers of a killed document service no longer block every later start. Of two document services started for one Playbook at the same moment, exactly one serves and the other shows its pane, on Windows and on macOS/Linux
 

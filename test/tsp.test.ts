@@ -74,6 +74,18 @@ describe("TSP wire and input", () => {
 		input.emit("end");
 	});
 
+	test("reads byte-fragmented OSC 877 messages, as Tern frames them through a Windows ConPTY", () => {
+		const { input, received } = harness();
+		const action: TspEvent = { ev: "action", mods: [], id: "a.button", act: "launch" };
+		const wire = Buffer.from(`好${ESC}]877;tsp;r;{"r":"hello","dark":true}${ST}x${ESC}[?62;52;c${ESC}]877;tsp;e;${JSON.stringify(action)}\x07尾`);
+		for (const byte of wire) input.feed(Buffer.from([byte]));
+		expect(received.filter(value => value.kind !== "keys")).toEqual([
+			{ kind: "hello", dark: true }, { kind: "event", event: action },
+		]);
+		expect(received.flatMap(value => value.kind === "keys" ? [value.bytes] : []).join("")).toBe("好x尾");
+		input.emit("end");
+	});
+
 	test("keeps ordinary escape key sequences together around protocol messages", () => {
 		const { input, received } = harness();
 		input.feed(`${ESC}[A${ESC}[200~paste${ESC}[201~${ESC}_tsp;e;{"ev":"undo","id":"a.body"}${ST}${ESC}[B`);
@@ -90,6 +102,15 @@ describe("TSP wire and input", () => {
 		input.feed(ESC);
 		vi.advanceTimersByTime(25);
 		expect(received).toEqual([{ kind: "keys", bytes: ESC }]);
+		input.emit("end");
+	});
+
+	test("Alt+] reaches the key handler although it starts like an OSC 877 message", () => {
+		const { input, received } = harness();
+		input.feed(`${ESC}]`);
+		expect(received).toEqual([]);
+		vi.advanceTimersByTime(25);
+		expect(received).toEqual([{ kind: "keys", bytes: `${ESC}]` }]);
 		input.emit("end");
 	});
 
