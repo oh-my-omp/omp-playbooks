@@ -4,6 +4,10 @@ import type { FrameOp, FrameStatus, TspEvent, TspInput, TspSession } from "./tsp
 const ESC = "\x1b";
 const APC = `${ESC}_tsp;`;
 const ST = `${ESC}\\`;
+// Terminal → program messages through a Windows ConPTY: its input parser drops APC strings but
+// passes OSC, so Tern frames them as `ESC ] 877 ; tsp;… ST`, or with BEL as the terminator.
+const OSC = `${ESC}]877;tsp;`;
+const BEL = "\x07";
 const OVERDUE_MS = 2_000;
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -209,9 +213,22 @@ export function createTspSession(out: (s: string) => void = s => { process.stdou
 				message(wire);
 				continue;
 			}
+			if (buffer.startsWith(OSC)) {
+				// A JSON body never holds BEL or ESC, so the first of either terminator ends the message.
+				const st = buffer.indexOf(ST, OSC.length);
+				const bel = buffer.indexOf(BEL, OSC.length);
+				const end = st < 0 ? bel : bel < 0 ? st : Math.min(st, bel);
+				keys(keyBytes);
+				keyBytes = "";
+				if (end < 0) return;
+				const wire = buffer.slice(OSC.length, end);
+				buffer = buffer.slice(end + (end === st ? ST.length : BEL.length));
+				message(wire);
+				continue;
+			}
 			const da = /^\x1b\[\?[0-9;:]*c/.exec(buffer);
 			if (da) { buffer = buffer.slice(da[0].length); continue; }
-			if (APC.startsWith(buffer) || `${ESC}[?`.startsWith(buffer) || /^\x1b\[\?[0-9;:]*$/.test(buffer)) {
+			if (APC.startsWith(buffer) || OSC.startsWith(buffer) || `${ESC}[?`.startsWith(buffer) || /^\x1b\[\?[0-9;:]*$/.test(buffer)) {
 				keys(keyBytes);
 				// ESC is also a standalone key; only its ambiguous prefix gets a short delay.
 				if (buffer === ESC || buffer === `${ESC}[`) {
