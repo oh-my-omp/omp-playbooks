@@ -1,15 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import { ptree } from "@oh-my-pi/pi-utils";
 import { parseLaunchId, type BlockId, type RunId, type RecordKind } from "../domain/model";
 import { documentEndpoint, paneEndpoint, type EventPayload, type PaneReply, type PaneRequest, type Request, type ServerFrame } from "../domain/protocol";
 import { K1Client, type Reply } from "./client";
-import { splitPane } from "../service/panes";
+import { openServicePane } from "../service/panes";
 import { ensureTernPlugin, type TernPluginState } from "./tern-setup";
 import { availableAgents } from "./agents";
-import { tr, withLanguage } from "../i18n";
+import { tr } from "../i18n";
 import { listenPane, type PaneListener } from "./pane-listener";
 import { playbookTopics } from "./topics";
 import { toolParameters } from "./params";
@@ -126,8 +126,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		return (await clientFor(absolute, ctx)).request(payload);
 	}
 
-	// K5: the document service shipped beside this extension in the same installation.
-	const serviceEntry = resolve(import.meta.dir, "../service/main.ts");
 	const preludeEntry = resolve(import.meta.dir, "eval-prelude.ts");
 	const OPEN_WAIT_MS = 10_000;
 	const startFailed = (message: string): Reply => ({ id: "", ok: false, error: { code: "StartFailed", message } });
@@ -138,7 +136,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		const client = await clientFor(absolute, ctx);
 		const ready = await client.connect();
 		if (ready.ok || ready.error.code !== "NoService") return ready;
-		const split = await splitPane(pane, dirname(absolute), withLanguage(["bun", serviceEntry, absolute]));
+		const split = await openServicePane(pane, absolute);
 		if (!split.ok) return startFailed(split.error);
 		const deadline = Date.now() + OPEN_WAIT_MS;
 		for (;;) {

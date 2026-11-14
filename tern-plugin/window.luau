@@ -7,8 +7,10 @@
 -- The omp plugin `omp-playbooks` links this directory into Tern when it is installed, so the
 -- document service entry sits next to it in the same omp plugin package.
 local MAIN = tern.plugin.dir .. "/../src/service/main.ts"
--- `main.ts --reveal` exits 4 when no service listens for the document (contracts.md K6).
-local ABSENT = 4
+-- The plugin directory is absolute, so it is a POSIX path exactly when it starts with `/`.
+-- Windows has no login shell and its programs inherit the user's PATH, so `bun` starts as
+-- itself there; the argv below never passes through a pane shell on any platform.
+local WINDOWS = string.sub(tern.plugin.dir, 1, 1) ~= "/"
 
 -- The language rule of src/i18n.ts, read from the Tern app's environment: OMOMP_LANG
 -- when it is en or zh, else the first non-empty of LC_ALL, LC_MESSAGES and LANG (Chinese when
@@ -38,34 +40,22 @@ local function quote(text: string): string
 	return "'" .. (string.gsub(text, "'", "'\\''")) .. "'"
 end
 
-local function dirname(path: string): string
-	return string.match(path, "^(.*)/[^/]*$") or "/"
+-- `main.ts --open <path> <pane>`: it shows the running service's pane, or starts the service
+-- in a new pane beside <pane>. Tern windows started from the GUI may not have the user's PATH,
+-- so `bun` resolves through the login shell elsewhere, as pane launches do.
+local function open_command(path: string, pane: string): { string }
+	if WINDOWS then
+		return { "bun", MAIN, "--open", path, pane }
+	end
+	return { tern.getenv("SHELL") or "/bin/zsh", "-lc", "exec bun " .. quote(MAIN) .. " --open " .. quote(path) .. " " .. quote(pane) }
 end
 
--- Tern windows started from the GUI may not have the user's PATH, so `bun` resolves
--- through the login shell, as pane launches do.
-local function shell_command(args: string): { string }
-	return { tern.getenv("SHELL") or "/bin/zsh", "-lc", "exec bun " .. quote(MAIN) .. " " .. args }
-end
-
-local function show(path: string)
-	tern.process.run(shell_command("--reveal " .. quote(path)), function(result, cx)
+local function show(path: string, pane: string)
+	tern.process.run(open_command(path, pane), function(result, cx)
 		if cx == nil or result.status == 0 then
 			return
 		end
-		if result.status ~= ABSENT then
-			cx:toast("error", tr("Playbook cannot be shown", "Playbook 无法显示"), result.stderr)
-			return
-		end
-		local target = cx.session:focused()
-		if target == nil then
-			cx:toast("error", tr("No focused pane to open the Playbook beside", "没有可以在旁边打开 Playbook 的 pane"))
-			return
-		end
-		local launch = { cwd = dirname(path), command = "exec bun " .. quote(MAIN) .. " " .. quote(path) }
-		if cx.layout:split(target, "right", launch) == nil then
-			cx:toast("error", tr("Cannot create the Playbook pane", "无法建立 Playbook pane"), path)
-		end
+		cx:toast("error", tr("Playbook cannot be shown", "Playbook 无法显示"), result.stderr)
 	end)
 end
 
@@ -97,10 +87,15 @@ tern.command({
 		if path == nil then
 			return
 		end
+		local target = cx.session:focused()
+		if target == nil then
+			cx:toast("error", tr("No focused pane to open the Playbook beside", "没有可以在旁边打开 Playbook 的 pane"))
+			return
+		end
 		if not tern.fs.exists(MAIN) then
 			cx:toast("error", tr("The document service entry is missing; reinstall the omp plugin omp-playbooks", "找不到文档服务入口；请重新安装 omp 插件 omp-playbooks"), MAIN)
 			return
 		end
-		show(path)
+		show(path, tostring(target))
 	end,
 })

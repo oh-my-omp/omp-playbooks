@@ -1,7 +1,8 @@
 // Tern panes through the `tern` CLI: the daemon owns panes, their programs and the layout; this module
 // only asks it and reports its answer.
+import { dirname, resolve } from "node:path";
 import { ptree } from "@oh-my-pi/pi-utils";
-import { tr } from "../i18n";
+import { tr, withLanguage } from "../i18n";
 type TernResult = { ok: true; json: unknown } | { ok: false; error: string };
 type PaneResult = { ok: true; pane: string } | { ok: false; error: string };
 
@@ -34,6 +35,17 @@ function paneOf(result: TernResult): PaneResult {
 /** The daemon, not the caller, owns the new pane and its program (contracts.md K5). */
 export async function splitPane(pane: string, cwd: string, command: readonly string[]): Promise<PaneResult> {
 	return paneOf(await tern(["split", pane, "right", "--cwd", cwd, "--json", "--", ...command]));
+}
+
+/** This installation's document service entry, beside this module. */
+const SERVICE_ENTRY = resolve(import.meta.dir, "main.ts");
+
+/**
+ * Start the document service for `doc` in a new pane right of `pane`: the one pane-opening path
+ * of `playbook_open` (extension/index.ts) and of `main.ts --open` (contracts.md K2, K5).
+ */
+export async function openServicePane(pane: string, doc: string): Promise<PaneResult> {
+	return splitPane(pane, dirname(doc), withLanguage(["bun", SERVICE_ENTRY, doc]));
 }
 
 export async function focusPane(pane: string): Promise<{ ok: true } | { ok: false; error: string }> {

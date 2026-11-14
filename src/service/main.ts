@@ -1,7 +1,9 @@
 #!/usr/bin/env bun
 // Document service entry, run inside a Tern pane:
-//   omp-playbook <playbook.yaml>           serve the document (one live service per document)
-//   omp-playbook --reveal <playbook.yaml>  show the running service's pane; exit 4 when none runs
+//   omp-playbook <playbook.yaml>                    serve the document (one live service per document)
+//   omp-playbook --reveal <playbook.yaml>           show the running service's pane; exit 4 when none runs
+//   omp-playbook --open <playbook.yaml> <pane id>  show the running service's pane, else start the
+//                                                   service in a new pane right of <pane id>
 import { realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { documentEndpoint } from "../domain/protocol";
@@ -11,27 +13,72 @@ import { readClipboardImage } from "./clipboard";
 import { coordinatorPicker } from "./coordinators";
 import { Core } from "./core";
 import { fetcher } from "./fetch";
-import { focusPane, ownPane } from "./panes";
+import { focusPane, openServicePane, ownPane } from "./panes";
 import { references } from "./references";
 import { revealService, serveK1, ServiceRunning } from "./socket";
 import { createStore } from "./store";
 import { createTspSession } from "./tsp";
 import { startUi } from "./ui";
 
-const reveal = process.argv[2] === "--reveal";
-const file = reveal ? process.argv[3] : process.argv[2];
-if (!file) {
-	process.stderr.write(`${tr("Usage: omp-playbook [--reveal] <playbook.yaml>", "用法：omp-playbook [--reveal] <playbook.yaml>")}\n`);
+type Invocation =
+	/** Serve the document in this pane. */
+	| { readonly kind: "serve"; readonly file: string }
+	/** Show the running service's pane; exit 4 when none runs. */
+	| { readonly kind: "reveal"; readonly file: string }
+	/** Show the running service's pane, else start the service beside `pane`. */
+	| { readonly kind: "open"; readonly file: string; readonly pane: string };
+
+const USAGE = tr(
+	"Usage: omp-playbook [--reveal] <playbook.yaml> | omp-playbook --open <playbook.yaml> <pane id>",
+	"用法：omp-playbook [--reveal] <playbook.yaml> | omp-playbook --open <playbook.yaml> <面板 ID>",
+);
+/** No service listens for the document (K6). */
+const ABSENT = 4;
+/** Asking the running service to show its pane failed, or the service could not be started. */
+const FAILED = 5;
+
+/** The command line this process was started with; null when it asks for none of the three modes. */
+function invocation(argv: readonly string[]): Invocation | null {
+	const [mode, doc, pane] = argv;
+	switch (mode) {
+		case undefined: return null;
+		case "--reveal": return doc === undefined ? null : { kind: "reveal", file: doc };
+		case "--open": return doc === undefined || pane === undefined ? null : { kind: "open", file: doc, pane };
+		default: return { kind: "serve", file: mode };
+	}
+}
+
+const launch = invocation(process.argv.slice(2));
+if (launch === null) {
+	process.stderr.write(`${USAGE}\n`);
 	process.exit(2);
 }
-const templatePath = realpathSync(resolve(file));
+const templatePath = realpathSync(resolve(launch.file));
 const endpoint = documentEndpoint(templatePath);
-if (reveal) {
-	const outcome = await revealService(endpoint);
-	switch (outcome.kind) {
-		case "revealed": process.exit(0);
-		case "absent": process.exit(4);
-		case "failed": process.stderr.write(`${outcome.message}\n`); process.exit(5);
+switch (launch.kind) {
+	case "serve": break;
+	case "reveal": {
+		const outcome = await revealService(endpoint);
+		switch (outcome.kind) {
+			case "revealed": process.exit(0);
+			case "absent": process.exit(ABSENT);
+			case "failed": process.stderr.write(`${outcome.message}\n`); process.exit(FAILED);
+		}
+	}
+	case "open": {
+		const outcome = await revealService(endpoint);
+		switch (outcome.kind) {
+			case "revealed": process.exit(0);
+			case "failed": process.stderr.write(`${outcome.message}\n`); process.exit(FAILED);
+			case "absent": {
+				const split = await openServicePane(launch.pane, templatePath);
+				if (!split.ok) {
+					process.stderr.write(`${split.error}\n`);
+					process.exit(FAILED);
+				}
+				process.exit(0);
+			}
+		}
 	}
 }
 const core = new Core({
