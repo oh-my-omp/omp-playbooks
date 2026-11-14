@@ -174,8 +174,9 @@ function endpointDirectory(): string {
 /**
  * The document service's endpoint for a Playbook (contracts.md K1 交换): one per absolute path, named by
  * its SHA-256. The host (`@oh-my-pi/pi-natives`) decides what an endpoint is on this platform — a named
- * pipe on Windows, a socket file on POSIX, moved under `/tmp/omp-<euid>` when that path does not fit
- * `sun_path` — and owns claiming it, so this derivation is all the extension and the service share.
+ * pipe on Windows, a socket file on POSIX, moved under `/tmp/omp-<euid>` when that path is too long
+ * for a socket address — and owns claiming it, so this derivation is all the extension and the
+ * service share.
  */
 export function documentEndpoint(playbookAbsPath: string): string {
 	const hash = new Bun.CryptoHasher("sha256").update(playbookAbsPath).digest("hex");
