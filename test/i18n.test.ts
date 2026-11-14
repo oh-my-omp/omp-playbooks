@@ -23,15 +23,20 @@ describe("process language", () => {
 		expect(resolveLanguage({ LANG: "ZH-tw" })).toBe("zh");
 		for (const value of ["en_US.UTF-8", "C", "POSIX", "ja_JP.UTF-8"]) expect(resolveLanguage({ LANG: value })).toBe("en");
 	});
-	test("language and withLanguage resolve the environment at call time", () => {
+	test("withLanguage starts argv unchanged with the language resolved at call time", async () => {
 		const previous = process.env.OMOMP_LANG;
+		const words = ["a b", "c'd", 'say "hi"', "e$'x", "D:\\x y\\"];
+		const probe = ["bun", "-e", "console.log(JSON.stringify([process.env.OMOMP_LANG, ...process.argv.slice(1)]))", ...words];
+		const run = async (argv: string[]): Promise<unknown> => JSON.parse(await new Response(Bun.spawn(argv, { env: { ...process.env, OMOMP_LANG: "" } }).stdout).text());
 		try {
 			process.env.OMOMP_LANG = "en";
 			expect(language()).toBe("en");
-			expect(withLanguage(["bun", "service.ts"])).toEqual(["env", "OMOMP_LANG=en", "bun", "service.ts"]);
+			const en = withLanguage(probe);
+			expect(en.join(" ")).not.toContain('"');
 			process.env.OMOMP_LANG = "zh";
 			expect(language()).toBe("zh");
-			expect(withLanguage(["omp"])).toEqual(["env", "OMOMP_LANG=zh", "omp"]);
+			expect(await run(en)).toEqual(["en", ...words]);
+			expect(await run(withLanguage(probe))).toEqual(["zh", ...words]);
 		} finally {
 			if (previous === undefined) delete process.env.OMOMP_LANG;
 			else process.env.OMOMP_LANG = previous;
