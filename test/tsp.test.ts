@@ -105,6 +105,15 @@ describe("TSP wire and input", () => {
 		input.emit("end");
 	});
 
+	test("Alt+] reaches the key handler although it starts like an OSC 877 message", () => {
+		const { input, received } = harness();
+		input.feed(`${ESC}]`);
+		expect(received).toEqual([]);
+		vi.advanceTimersByTime(25);
+		expect(received).toEqual([{ kind: "keys", bytes: `${ESC}]` }]);
+		input.emit("end");
+	});
+
 	test("parses all contract events, retaining unknown and malformed payloads as other", () => {
 		const { input, received } = harness();
 		const bodies: readonly TspEvent[] = [

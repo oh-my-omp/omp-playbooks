@@ -230,8 +230,9 @@ export function createTspSession(out: (s: string) => void = s => { process.stdou
 			if (da) { buffer = buffer.slice(da[0].length); continue; }
 			if (APC.startsWith(buffer) || OSC.startsWith(buffer) || `${ESC}[?`.startsWith(buffer) || /^\x1b\[\?[0-9;:]*$/.test(buffer)) {
 				keys(keyBytes);
-				// ESC is also a standalone key; only its ambiguous prefix gets a short delay.
-				if (buffer === ESC || buffer === `${ESC}[`) {
+				// ESC is also a standalone key, and Alt+] arrives as `ESC ]`, the start of an OSC prefix:
+				// these ambiguous prefixes get a short delay before they count as keys.
+				if (buffer === ESC || buffer === `${ESC}[` || (buffer.length > 1 && OSC.startsWith(buffer))) {
 					escapeTimer = setTimeout(() => { const bytes = buffer; buffer = ""; escapeTimer = undefined; keys(bytes); }, 25);
 					escapeTimer.unref();
 				}
