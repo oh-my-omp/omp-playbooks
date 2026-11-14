@@ -1,3 +1,4 @@
+import { dlopen, FFIType } from "bun:ffi";
 import { randomUUID } from "node:crypto";
 import { lstatSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { createConnection } from "node:net";
@@ -205,25 +206,79 @@ function listening(path: string): Promise<boolean> {
 	return promise;
 }
 
+/** What occupies a socket path: nothing, a Unix socket file, or anything else (never removed). */
+type PathKind = "absent" | "socket" | "other";
+
+const FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
+const IO_REPARSE_TAG_AF_UNIX = 0x80000023;
+/** sizeof(WIN32_FIND_DATAW); dwFileAttributes at offset 0, dwReserved0 (the reparse tag) at 36. */
+const FIND_DATA_SIZE = 592;
+
+interface FindFile {
+	first(path: string, data: Buffer): bigint;
+	close(handle: bigint): void;
+}
+
+let findFile: FindFile | undefined;
+
+function kernel32(): FindFile {
+	if (findFile !== undefined) return findFile;
+	const { symbols } = dlopen("kernel32.dll", {
+		FindFirstFileW: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i64 },
+		FindClose: { args: [FFIType.i64], returns: FFIType.i32 },
+	});
+	findFile = {
+		first: (path, data) => BigInt(symbols.FindFirstFileW(Buffer.from(`${path}\0`, "utf16le"), data)),
+		close: handle => { symbols.FindClose(handle); },
+	};
+	return findFile;
+}
+
+/**
+ * Windows answers `lstat`, `stat` and `open` of a Unix socket file with EACCES, alive or not, so
+ * the kind comes from the directory entry: FindFirstFileW reports a socket file as a reparse
+ * point tagged IO_REPARSE_TAG_AF_UNIX without opening it.
+ */
+function windowsPathKind(path: string): PathKind {
+	const find = kernel32();
+	const data = Buffer.alloc(FIND_DATA_SIZE);
+	const handle = find.first(path, data);
+	// INVALID_HANDLE_VALUE: no entry at this path.
+	if (handle === -1n) return "absent";
+	find.close(handle);
+	return (data.readUInt32LE(0) & FILE_ATTRIBUTE_REPARSE_POINT) !== 0 && data.readUInt32LE(36) === IO_REPARSE_TAG_AF_UNIX ? "socket" : "other";
+}
+
+function pathKind(path: string): PathKind {
+	if (process.platform === "win32") return windowsPathKind(path);
+	const existing = lstatSync(path, { throwIfNoEntry: false });
+	return existing === undefined ? "absent" : existing.isSocket() ? "socket" : "other";
+}
+
 /**
  * Claims the document's socket path for this process. The bind itself arbitrates: a live
  * listener makes this process refuse; a socket file nobody listens on is moved aside by an
- * atomic rename of exactly that inode, so concurrent starters cannot both win (I1).
+ * atomic rename and removed only if nothing answers at its new name, so a socket a concurrent
+ * starter bound in between is put back and concurrent starters cannot both win (I1). Liveness
+ * is decided by connecting alone, because Windows denies every stat of a socket file.
  */
 async function claim(path: string, listen: () => { close(): void }): Promise<{ close(): void }> {
 	mkdirSync(dirname(path), { recursive: true });
 	for (;;) {
-		const existing = lstatSync(path, { throwIfNoEntry: false });
-		if (existing) {
-			if (!existing.isSocket()) throw new Error(`Refusing to remove a non-socket file: ${path}`);
-			if (await listening(path)) throw new ServiceRunning(`A document service is already listening at ${path}`);
-			const aside = `${path}.stale-${randomUUID()}`;
-			try { renameSync(path, aside); } catch (error) { if (errorCode(error) === "ENOENT") continue; throw error; }
-			if (lstatSync(aside).ino !== existing.ino) { renameSync(aside, path); continue; }
-			unlinkSync(aside);
-			continue;
+		switch (pathKind(path)) {
+			case "other":
+				throw new Error(`Refusing to remove a non-socket file: ${path}`);
+			case "socket": {
+				if (await listening(path)) throw new ServiceRunning(`A document service is already listening at ${path}`);
+				const aside = `${path}.stale-${randomUUID()}`;
+				try { renameSync(path, aside); } catch (error) { if (errorCode(error) === "ENOENT") continue; throw error; }
+				if (await listening(aside)) { renameSync(aside, path); continue; }
+				unlinkSync(aside);
+				continue;
+			}
+			case "absent":
+				try { return listen(); } catch (error) { if (errorCode(error) === "EADDRINUSE") continue; throw error; }
 		}
-		try { return listen(); } catch (error) { if (errorCode(error) === "EADDRINUSE") continue; throw error; }
 	}
 }
 

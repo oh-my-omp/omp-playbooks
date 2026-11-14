@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed opening an already open Playbook again on Windows: the second document service now shows the existing pane instead of exiting with `EACCES`, and a socket file left by a killed service no longer blocks every later start
+
 ## [0.1.50] - 2026-11-12
 
 ### Changed
