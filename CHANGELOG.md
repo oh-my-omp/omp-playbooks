@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.54] - 2026-11-22
+
 ### Changed
 
 - Updated the shared copy of `tern-plugin.ts` to oh-my-omp/shared@a88403a.
