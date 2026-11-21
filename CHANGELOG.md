@@ -6,6 +6,10 @@
 
 - Updated the shared copy of `tern-plugin.ts` to oh-my-omp/shared@a88403a.
 
+### Fixed
+
+- A Launch of blocks without a shared preset `agent` no longer fails on the coordinator's first call when the session's default subagent is disabled: the `launch_requested` notice now writes `agent: "<subagent>"` into its `playbook.agent` / `playbook.run` calls and names the subagents the session can start, from the same list as the SUBAGENT dropdown. When the session cannot list them, the notice keeps the general hint.
+
 ## [0.1.53] - 2026-11-20
 
 ### Changed

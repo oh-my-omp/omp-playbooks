@@ -568,17 +568,33 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 						`块 ${only.id} 已预设${only.agent !== undefined ? ` agent: "${only.agent}"` : ""}${only.isolated !== undefined ? ` isolated: ${only.isolated}` : ""}，不显式传参时 playbook.agent / playbook.run 自动使用。`,
 					)
 				: "";
+		const first = requested[0];
+		const presetAgent =
+			first?.kind === "task" && first.agent !== undefined && requested.every((item) => item.kind === "task" && item.agent === first.agent);
+		const startable = orchestration || presetAgent ? null : availableAgents(pi.getAllTools());
 		const where = data.run === undefined ? "Playbook" : `Run ${data.run}`;
 		const runArg = data.run === undefined ? "" : `, run: "${data.run}"`;
-		const call = `{ doc: ${docLiteral}${runArg}, blocks: ${blocks} }`;
+		const agentArg = startable?.kind === "listed" ? `, agent: "<subagent>"` : "";
+		const call = `{ doc: ${docLiteral}${runArg}, blocks: ${blocks}${agentArg} }`;
+		const names = startable?.kind === "listed" ? startable.names.map((name) => JSON.stringify(name)) : [];
+		const agentHint =
+			startable?.kind === "listed"
+				? tr(
+						`No preset agent applies to these blocks, so replace \`<subagent>\` with one of the subagents this session can start: ${names.join(", ")}. Pick one that can carry out the blocks and write their status into the file.`,
+						`这些块没有可用的预设 agent，请把 \`<subagent>\` 换成本会话可启动的 subagent 之一：${names.join("、")}。选一个能执行这些块并把状态写回文件的。`,
+					)
+				: tr(
+						`When the default subagent is disabled and the block has no preset agent, add \`agent: "<available agent>"\` (for example "task:mid").`,
+						`默认 subagent 被禁用且块没有预设 agent 时加上 \`agent: "<可用的 agent>"\`（例如 "task:mid"）。`,
+					);
 		return orchestration
 			? tr(
 					`A person requested launching orchestration blocks ${blocks}. Next: call xd://playbook_launch {doc: ${docLiteral}, op: "launch"${runArg}, blocks: ${blocks}} to get l<n>, then send a separate eval whose code is only \`await playbook.exec("l<n>")\`.`,
 					`人请求启动编排块 ${blocks}。下一步：调用 xd://playbook_launch {doc: ${docLiteral}, op: "launch"${runArg}, blocks: ${blocks}} 得到 l<n>，再单独发一个 eval，代码只写 \`await playbook.exec("l<n>")\`。`,
 				)
 			: tr(
-					`A person requested launching blocks ${blocks} of ${where === "Playbook" ? "the Playbook" : where}. ${preset ? `${preset} ` : ""}Next, choose one: ① Non-blocking: in eval, \`var worker = await playbook.agent(${call})\` returns as soon as the subagent is started and bound; wait for it with the top-level wait tool, which still lets you handle pane notices meanwhile; after it finishes, send another eval \`await playbook.result(worker)\` to record the result and close the Launch. ② Single step: \`await playbook.run(${call})\` starts, waits, records and closes. The subagent writes the block's status and completion report into the file itself; you do not write them for it. When the default subagent is disabled and the block has no preset agent, add \`agent: "<available agent>"\` (for example "task:mid"). The extension adds the \`var playbook = …\` line at the start of an eval cell automatically; do not write it yourself.`,
-					`人请求启动 ${where} 的块 ${blocks}。${preset}下一步二选一：① 不阻塞：在 eval 中 \`var worker = await playbook.agent(${call})\`，启动并绑定后立即返回；用顶层 wait 等它，期间仍能处理面板通知；结束后另发 eval \`await playbook.result(worker)\` 记录结果并关闭 Launch。② 单步：\`await playbook.run(${call})\` 启动、等待、记录并关闭。subagent 自己把块的状态与完成报告写进文件，你不用代写。默认 subagent 被禁用且块没有预设 agent 时加上 \`agent: "<可用的 agent>"\`（例如 "task:mid"）。eval 单元开头那行 \`var playbook = …\` 由扩展自动加入，不要自己再写。`,
+					`A person requested launching blocks ${blocks} of ${where === "Playbook" ? "the Playbook" : where}. ${preset ? `${preset} ` : ""}Next, choose one: ① Non-blocking: in eval, \`var worker = await playbook.agent(${call})\` returns as soon as the subagent is started and bound; wait for it with the top-level wait tool, which still lets you handle pane notices meanwhile; after it finishes, send another eval \`await playbook.result(worker)\` to record the result and close the Launch. ② Single step: \`await playbook.run(${call})\` starts, waits, records and closes. The subagent writes the block's status and completion report into the file itself; you do not write them for it. ${agentHint} The extension adds the \`var playbook = …\` line at the start of an eval cell automatically; do not write it yourself.`,
+					`人请求启动 ${where} 的块 ${blocks}。${preset}下一步二选一：① 不阻塞：在 eval 中 \`var worker = await playbook.agent(${call})\`，启动并绑定后立即返回；用顶层 wait 等它，期间仍能处理面板通知；结束后另发 eval \`await playbook.result(worker)\` 记录结果并关闭 Launch。② 单步：\`await playbook.run(${call})\` 启动、等待、记录并关闭。subagent 自己把块的状态与完成报告写进文件，你不用代写。${agentHint}eval 单元开头那行 \`var playbook = …\` 由扩展自动加入，不要自己再写。`,
 				);
 	}
 
