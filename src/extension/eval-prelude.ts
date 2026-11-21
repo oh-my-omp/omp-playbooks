@@ -113,6 +113,10 @@ function launchInfo(value: unknown): LaunchInfo {
 	};
 }
 
+function shellJson(value: Record<string, unknown>): string {
+	return `'${JSON.stringify(value).replaceAll("'", "'\\''")}'`;
+}
+
 function textOf(value: unknown): string {
 	return typeof value === "string" ? value : JSON.stringify(value, null, 2);
 }
@@ -188,10 +192,11 @@ export function createPlaybook(deps: PlaybookDeps) {
 		const launch = created(await call("playbook_launch", { ...target, op: "launch", blocks: [...request.blocks] }));
 		if (launch.kind === "orchestration") {
 			await call("playbook_launch", { ...docArg(target.doc), op: "close", launch: launch.launch });
+			const launchCmd = `playbook_launch --json ${shellJson({ ...target, op: "launch", blocks: [...request.blocks] })}`;
 			throw new PlaybookError(
 				tr(
-					`${request.blocks.join(", ")} is an orchestration block (Launch ${launch.launch} closed): start it with xd://playbook_launch {op: "launch"} and run \`await playbook.exec("l<n>")\` as its own eval call`,
-					`${request.blocks.join("、")} 是编排块（Launch ${launch.launch} 已关闭）：请用 xd://playbook_launch {op: "launch"} 启动，然后单独发一个 eval 执行 \`await playbook.exec("l<n>")\``,
+					`${request.blocks.join(", ")} is an orchestration block (Launch ${launch.launch} closed): start it with \`${launchCmd}\` and run \`await playbook.exec("l<n>")\` as its own eval call`,
+					`${request.blocks.join("、")} 是编排块（Launch ${launch.launch} 已关闭）：请用 \`${launchCmd}\` 启动，然后单独发一个 eval 执行 \`await playbook.exec("l<n>")\``,
 				),
 			);
 		}
@@ -243,8 +248,8 @@ export function createPlaybook(deps: PlaybookDeps) {
 			if (workers.length === 0)
 				throw new PlaybookError(
 					tr(
-						`No subagent of ${launch} was started in this session; stop it where it runs, then set its blocks back to todo with xd://playbook_edit {op: "status", status: "todo"}`,
-						`本会话没有启动 ${launch} 的 subagent；请在其运行处停止它，然后用 xd://playbook_edit {op: "status", status: "todo"} 将其块改回 todo`,
+						`No subagent of ${launch} was started in this session; stop it where it runs, then set its blocks back to todo with \`playbook_edit --json '{"op":"status","block":"<id>","status":"todo"}'\``,
+						`本会话没有启动 ${launch} 的 subagent；请在其运行处停止它，然后用 \`playbook_edit --json '{"op":"status","block":"<id>","status":"todo"}'\` 将其块改回 todo`,
 					),
 				);
 			for (const worker of workers) await worker.handle.cancel();

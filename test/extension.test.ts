@@ -550,7 +550,8 @@ test("event aside precedes block_changed ack; unrelated interruption is ignored"
 	expect(h.messages[0]!.message.content.split("\n")[0]).toBe("这是 Playbook 文档服务的通知，不是用户消息");
 	const lines = h.messages[0]!.message.content.split("\n");
 	expect(lines).toHaveLength(3);
-	expect(lines[1]).toContain('op: "rebase", launch: "l1"');
+	expect(lines[1]).toContain('playbook_launch --json \'{"op":"rebase","launch":"l1"}\'');
+	expect(lines[1]).not.toContain("xd://");
 	expect(JSON.parse(lines[2]!)).toEqual({
 		doc: await realpath(s.doc),
 		event: "block_changed",
@@ -602,10 +603,11 @@ for (const run of [undefined, "r1"] as const) {
 		expect(message.content).toContain(prompt);
 		expect(message.content).not.toContain("A newer request");
 		const instruction = lines.slice(1, -1).join("\n");
-		expect(instruction).toContain("playbook_read");
-		expect(instruction).toContain('block: "b3"');
-		const history = `xd://playbook_read {doc: ${JSON.stringify(await realpath(s.doc))}, ${run === undefined ? "" : `run: "${run}", `}op: "revisions", block: "b3"}`;
-		expect(instruction).toContain(`需要以前的修改要求时用 ${history}。`);
+		expect(instruction).toContain("playbook_read --json");
+		expect(instruction).toContain('"block":"b3"');
+		const history = `playbook_read --json '${JSON.stringify({ doc: await realpath(s.doc), ...(run === undefined ? {} : { run }), op: "revisions", block: "b3" })}'`;
+		expect(instruction).toContain(`需要以前的修改要求时用 \`${history}\`。`);
+		expect(instruction).not.toContain("xd://");
 		expect(instruction).toContain("修订设计");
 		expect(instruction).toContain("playbook_edit");
 		for (const op of ["write", "replace", "panel"]) expect(instruction).toContain(op);
@@ -634,9 +636,10 @@ for (const run of [undefined, "r1"] as const) {
 		expect(options).toEqual({ deliverAs: "aside", triggerTurn: true });
 		const lines = message.content.split("\n");
 		const instruction = lines.slice(1, -1).join("\n");
-		const history = `xd://playbook_read {doc: ${JSON.stringify(await realpath(s.doc))}, ${run === undefined ? "" : `run: "${run}", `}op: "revisions", block: "b3"}`;
-		expect(instruction).toContain(`（读取失败，用 ${history} 查询）`);
-		expect(instruction).toContain(`需要以前的修改要求时用 ${history}。`);
+		const history = `playbook_read --json '${JSON.stringify({ doc: await realpath(s.doc), ...(run === undefined ? {} : { run }), op: "revisions", block: "b3" })}'`;
+		expect(instruction).toContain(`（读取失败，用 \`${history}\` 查询）`);
+		expect(instruction).toContain(`需要以前的修改要求时用 \`${history}\`。`);
+		expect(instruction).not.toContain("xd://");
 		expect(instruction).not.toContain("<prompt>");
 		expect(JSON.parse(lines.at(-1)!)).toEqual({
 			doc: await realpath(s.doc),
@@ -837,7 +840,7 @@ for (const value of [undefined, "coordinator-pane"]) {
 	});
 }
 
-test("a main session in a daemon Tern pane registers all eight tools as xd:// devices only at session_start, once", async () => {
+test("a main session in a daemon Tern pane registers all eight tools as discoverable commands only at session_start, once", async () => {
 	const h = await harness();
 	expect(h.registered.tools).toEqual([]);
 	await h.event("session_start");
@@ -863,7 +866,7 @@ test("every tool keeps its short purpose before any topic pointers", async () =>
 	}
 });
 
-test("each registered tool serves body-only topics and its own xd pointers without a registry", async () => {
+test("each registered tool serves body-only topics and its own help pointers without a registry", async () => {
 	const h = await harness();
 	await h.event("session_start");
 	expect(h.warnings).toEqual([]);
@@ -880,15 +883,17 @@ test("each registered tool serves body-only topics and its own xd pointers witho
 		const ownTopics = topics.get(tool.name) ?? [];
 		const bodies = tool.docTopics();
 		expect(Object.keys(bodies)).toEqual(ownTopics.map((topic) => topic.name));
+		expect(tool.description).not.toContain("xd://");
 		for (const topic of ownTopics) {
 			expect(bodies[topic.name]).toBe(topic.read());
 			expect(bodies[topic.name]!.trim()).not.toBe("");
 			expect(bodies[topic.name]).not.toStartWith("---");
-			expect(tool.description).toContain(`- \`xd://${tool.name}/${topic.name}\` — ${topic.when}`);
+			expect(bodies[topic.name]).not.toContain("xd://");
+			expect(tool.description).toContain(`- \`help://${tool.name}/${topic.name}\` — ${topic.when}`);
 		}
 		if (ownTopics.length) {
 			expect(tool.description).toEndWith(
-				`Topics — read the one a call needs before making it:\n${ownTopics.map((topic) => `- \`xd://${tool.name}/${topic.name}\` — ${topic.when}`).join("\n")}`,
+				`Topics — read the one a call needs before making it:\n${ownTopics.map((topic) => `- \`help://${tool.name}/${topic.name}\` — ${topic.when}`).join("\n")}`,
 			);
 		} else {
 			expect(bodies).toEqual({});
@@ -896,7 +901,7 @@ test("each registered tool serves body-only topics and its own xd pointers witho
 		}
 	}
 	expect(h.tools.get("playbook_open")!.docTopics().format).toStartWith("# Playbook file format\n");
-	expect(h.tools.get("playbook_open")!.docTopics().format).toContain("xd://playbook_open/references");
+	expect(h.tools.get("playbook_open")!.docTopics().format).toContain("help://playbook_open/references");
 });
 
 test("a registered tool generates its language topic afresh on every read", async () => {
@@ -1053,7 +1058,10 @@ test("in-flight disconnect is Disconnected; automatic reconnect sends only hello
 test("tool calls require an unambiguous connected document when doc is omitted", async () => {
 	const h = await harness();
 	const none = await h.execute("playbook_read", {});
-	expect(JSON.parse(resultText(none)).error.code).toBe("NoService");
+	const noneError = JSON.parse(resultText(none)).error;
+	expect(noneError.code).toBe("NoService");
+	expect(noneError.message).toContain("playbook_open --json");
+	expect(noneError.message).not.toContain("xd://");
 	const a = await service();
 	const b = await service();
 	await h.execute("playbook_open", { doc: a.doc });
@@ -1148,7 +1156,8 @@ for (const orchestration of [false, true]) {
 		const lines = h.messages[0]!.message.content.split("\n");
 		expect(lines).toHaveLength(3);
 		expect(lines[0]).toBe("这是 Playbook 文档服务的通知，不是用户消息");
-		expect(lines[1]).toContain(orchestration ? "playbook_launch" : "await playbook.run(");
+		expect(lines[1]).toContain(orchestration ? "playbook_launch --json '" : "await playbook.run(");
+		expect(lines[1]).not.toContain("xd://");
 		if (orchestration) expect(lines[1]).toContain('await playbook.exec("l<n>")');
 		else {
 			expect(lines[1]).not.toContain("playbook_launch");

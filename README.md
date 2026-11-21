@@ -63,7 +63,7 @@ omp plugin install 'https://github.com/oh-my-omp/omp-playbooks#release'
 
 When the extension loads and finds `tern` on `PATH`, it links the package's `tern-plugin/` into Tern; it skips this when the same directory is already linked. Without `tern` it links nothing and the install still succeeds, so a machine without Tern can carry the plugin; a main session in a Tern pane whose omp has no `tern` on `PATH` gets a warning, and the next extension load that finds `tern` links the plugin. The link points at the omp install directory itself. The Tern daemon reloads plugin files edited in place, but an upgrade replaces the whole install directory, which leaves the daemon on a missing link target or an old version. The extension therefore compares the version in `tern-plugin/plugin.toml` with the version the daemon loaded, runs `tern plugin reload` when they differ, and reports the outcome in the next main session that runs in a Tern pane. If the versions still differ after the reload it only warns and does not abort the install; the next extension load compares again.
 
-Beyond that link, the extension acts only when omp runs in a Tern pane managed by the session daemon, which sets `TERN_PANE` to the pane's numeric ID. An omp started anywhere else (a plain terminal, `omp -p`, a missing or non-numeric `TERN_PANE`) gets nothing from it: no `playbook_*` tools or `xd://` topics, no commands, no notices and no eval rewriting.
+Beyond that link, the extension acts only when omp runs in a Tern pane managed by the session daemon, which sets `TERN_PANE` to the pane's numeric ID. An omp started anywhere else (a plain terminal, `omp -p`, a missing or non-numeric `TERN_PANE`) gets nothing from it: no `playbook_*` tools or `help://` topics, no commands, no notices and no eval rewriting.
 
 **Pulling the repository or restarting a session does not update the installed plugin copy.** If an older version is installed, update it first:
 
@@ -82,7 +82,7 @@ tern plugin unlink omp-playbooks
 
 There are three ways to open a file:
 
-- **From the main session:** write the YAML file first, then call `playbook_open {doc: "/absolute/path/playbook.yaml"}`. With no service running, the extension starts one to the right of the current omp pane. With a service already running it only connects: it opens no extra pane and does not move focus.
+- **From the main session:** write the YAML file first, then run `playbook_open --json '{"doc":"/absolute/path/playbook.yaml"}'`. With no service running, the extension starts one to the right of the current omp pane. With a service already running it only connects: it opens no extra pane and does not move focus.
 - **From Tern:** focus a `.yaml` or `.yml` file pane and choose "Playbook: open" in the command palette. It shows the existing service, or starts one beside the pane. This does not start omp or set up a coordinator connection. The plugin passes the path and the focused pane to the document service, so Windows paths with spaces, quotes and backslashes arrive unchanged.
 - **Starting the service from source:** install dependencies in the repository, then run the commands below in a Tern pane. The main session still has to call `playbook_open` to receive requests.
 
@@ -100,7 +100,7 @@ Main-session commands:
 
 These commands and the `playbook_*` tools are available only in a main session running in a Tern pane; subagents do not see them.
 
-The `playbook_*` tools are `xd://` devices: the model reads `xd://playbook_<name>` for the description and schema and writes the JSON arguments to it; eval calls them as `tool.playbook_<name>`. The extension registers them in the main session's `session_start`, after omp has built the session, so omp mounts them with a hidden mount notice on the next prompt instead of adding them to the system prompt or tool list. Adding them therefore never changes the prompt prefix the provider caches, and a subagent session, which never registers them, carries none of them.
+The `playbook_*` tools are registered with `loadMode: "discoverable"` and mounted by omp as bash tool commands: the model runs `playbook_<name> --help` for the description and CLI options and invokes them via `playbook_<name> --json '{…}'` (or flags); eval calls them as `await tool.playbook_<name>({…})`. The extension registers them in the main session's `session_start`, after omp has built the session, so omp mounts them with a hidden mount notice on the next prompt instead of adding them to the system prompt or tool list. Adding them therefore never changes the prompt prefix the provider caches, and a subagent session, which never registers them, carries none of them.
 
 ## Language
 
@@ -112,7 +112,7 @@ The pane, its notices and component diagnostics, the coordinator's notices and t
 
 The extension starts the document service and new coordinator sessions with `OMOMP_LANG` from its resolved language, so they match the omp session that opened them. A service started by hand, an omp session attached from the pane and the Tern command use the language of their own environment. The Tern command reads the Tern app's environment, which may not include your shell profile. Each process rereads its environment whenever it resolves a language. Changing a shell profile does not change an already-running process's environment: set the variable where omp is started, then restart omp and the Playbook pane.
 
-The Playbook file's content is never translated: what the file says is shown and compiled as written. The language only decides what new text is written in. The tool descriptions and topics the model reads are English; the `xd://playbook_open/language` topic tells the coordinator to write the titles, bodies, designs and slot options it adds in the session's language, keeping the English role words of `## A Where · …` panels and leaving existing text untouched; the launch-prompt footer asks the subagent for its completion report in that language. Texts the pane itself inserts (a new flow node's name, a pasted image's caption) follow the pane's language.
+The Playbook file's content is never translated: what the file says is shown and compiled as written. The language only decides what new text is written in. The tool descriptions and topics the model reads are English; the `help://playbook_open/language` topic tells the coordinator to write the titles, bodies, designs and slot options it adds in the session's language, keeping the English role words of `## A Where · …` panels and leaving existing text untouched; the launch-prompt footer asks the subagent for its completion report in that language. Texts the pane itself inserts (a new flow node's name, a pasted image's caption) follow the pane's language.
 
 ## The file and its blocks
 
@@ -349,11 +349,11 @@ Execution bodies and designs are drawn with the same component parser. The compo
 
 ## Coordinator tools
 
-These are tool arguments, not shell commands. `doc` can be omitted only when exactly one document is connected; `run` is omitted to act on the Playbook file itself. Input is strictly validated: a field the device does not declare is removed by the host before the call runs, and a declared field that the chosen `op` does not use is rejected. A plain `playbook_read` **has no `op: "read"`**.
+The table below lists each tool's JSON arguments (passed via `playbook_<name> --json '{…}'` or CLI flags in bash, or to `await tool.playbook_<name>({…})` in eval). `doc` can be omitted only when exactly one document is connected; `run` is omitted to act on the Playbook file itself. Input is strictly validated: a field the tool does not declare is removed by the host before the call runs, and a declared field that the chosen `op` does not use is rejected. A plain `playbook_read` **has no `op: "read"`**.
 
-What the model reads of these tools comes in two layers. omp lists a device with only the first 200 characters of its description, so each description starts with a short purpose and the semantics its schema cannot carry. The full description ends with `xd://` topic pointers and when to read each. The call instructions are read on demand: `playbook_open` has `format`, `outline`, `slots`, `references`, `execution`, `runs` and `language`; `playbook_edit` has `text`, `blocks` and `state`; `playbook_read` has `revisions`, `playbook_launch` `lifecycle`, `playbook_timeline` `records` and `playbook_check` `judge`. `read xd://playbook_open` reads the full description and pointers; `read xd://playbook_open/format` returns that topic's Markdown body without its file header. The topics live in `src/extension/topics/`; `language` is generated on every read in the session's current language.
+What the model reads of these tools comes in two layers. omp caps an external command's description at 200 characters in the prompt and catalog, so each description starts with a short purpose and the semantics its schema cannot carry. The full description ends with `help://` topic pointers and when to read each. The call instructions are read on demand: `playbook_open` has `format`, `outline`, `slots`, `references`, `execution`, `runs` and `language`; `playbook_edit` has `text`, `blocks` and `state`; `playbook_read` has `revisions`, `playbook_launch` `lifecycle`, `playbook_timeline` `records` and `playbook_check` `judge`. `playbook_open --help` prints the full description, pointers and CLI options; `read help://playbook_open` lists its topic URLs, and `read help://playbook_open/format` returns that topic's Markdown body without its file header. The topics live in `src/extension/topics/`; `language` is generated on every read in the session's current language.
 
-Each tool provides its topics through `docTopics()` on its own tool definition. Topic reads use omp's native `xd://` protocol and need no omp-config extension or shared topic registry.
+Each tool provides its topics through `docTopics()` on its own tool definition. Topic reads use omp's native `help://` protocol and need no omp-config extension or shared topic registry.
 
 | Tool | Arguments |
 |---|---|
@@ -372,8 +372,8 @@ Each tool provides its topics through `docTopics()` on its own tool definition. 
 
 With the file above, the main session calls in order:
 
-1. `playbook_open {doc: "/absolute/path/playbook.yaml"}`.
-2. `playbook_compile {op: "compile", blocks: ["b3"]}`: check the expanded rules, requirement, panel B and slot value, followed by the execution-record instructions.
+1. `playbook_open --json '{"doc":"/absolute/path/playbook.yaml"}'`.
+2. `playbook_compile --json '{"op":"compile","blocks":["b3"]}'`: check the expanded rules, requirement, panel B and slot value, followed by the execution-record instructions.
 3. In the main session's **JS eval**, start the worker:
 
 ```js

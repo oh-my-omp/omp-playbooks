@@ -5,6 +5,7 @@
 ### Changed
 
 - Updated the shared copy of `tern-plugin.ts` to oh-my-omp/shared@a88403a.
+- Migrated all `playbook_*` topic pointers from `xd://` to `help://` and updated coordinator notices, errors, topic docs, and READMEs to omp 19.1.0's mounted command form (`playbook_<name> --json '{…}'` / `--help`).
 
 ### Fixed
 

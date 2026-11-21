@@ -250,7 +250,9 @@ test("a spawned subagent shares the Launch: its result keeps the Launch open unl
 test("agent on an orchestration block closes the Launch it just created before rejecting; spawn rejects before any subagent", async () => {
 	const agent = harness();
 	agent.launchKind = "orchestration";
-	await expect(agent.playbook.agent({ blocks: ["b1"] })).rejects.toThrow("是编排块（Launch l1 已关闭）");
+	await expect(agent.playbook.agent({ blocks: ["b1"] })).rejects.toThrow(
+		/是编排块（Launch l1 已关闭）：请用 `playbook_launch --json '\{"doc":"\/book\.yaml","run":"r1","op":"launch","blocks":\["b1"\]\}'`/,
+	);
 	expect(agent.calls).toEqual([
 		{ kind: "tool", name: "playbook_launch", args: { doc: "/book.yaml", run: "r1", op: "launch", blocks: ["b1"] } },
 		close(),
@@ -404,5 +406,5 @@ test("template helper calls omit run and stop cancels handles before resetting o
 	expect(calls.map((call) => call.op)).toEqual(["cancel", "launch", "read", "edit", "read"]);
 	expect(calls[3]).toEqual({ op: "edit", args: { doc: "/template.yaml", op: "status", block: "b1", status: "todo" } });
 	expect(calls.every((call) => call.args === undefined || !("run" in call.args))).toBe(true);
-	await expect(laterCell.stop("l999")).rejects.toThrow();
+	await expect(laterCell.stop("l999")).rejects.toThrow(/playbook_edit --json '\{"op":"status","block":"<id>","status":"todo"\}'/);
 });
