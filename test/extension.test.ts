@@ -1200,6 +1200,35 @@ test("launch_requested without a preset agent names the subagents this session c
 	expect(lines[1]).not.toContain("<可用的 agent>");
 });
 
+for (const [agents, listed] of [
+	[["task:low", "task:mid"], true],
+	[["task:mid", "task:mid"], false],
+] as const) {
+	test(`launch_requested for blocks presetting ${listed ? "different agents" : "the same agent"} ${listed ? "names" : "does not name"} startable subagents`, async () => {
+		const s = await service();
+		const h = await harness("main", [builtinTask]);
+		await h.execute("playbook_open", { doc: s.doc });
+		s.handler = (frame, connection) =>
+			respond(connection, frame, {
+				title: "Book",
+				blocks: [
+					{ ...block, body: "Prompt", agent: agents[0] },
+					{ ...block, id: "b2", body: "Second", agent: agents[1] },
+				],
+			});
+		s.push({ event: "launch_requested", data: { blocks: ["b1", "b2"] } } as EventPayload);
+		await h.messageSent;
+		const lines = h.messages[0]!.message.content.split("\n");
+		if (listed) {
+			expect(lines[1]).toContain('blocks: ["b1","b2"], agent: "<subagent>" })');
+			expect(lines[1]).toContain('"task:low"、"task:mid"');
+		} else {
+			expect(lines[1]).toContain('blocks: ["b1","b2"] })');
+			expect(lines[1]).not.toContain("<subagent>");
+		}
+	});
+}
+
 test("launch requests made during a turn wait for its end and arrive as one notice", async () => {
 	const s = await service();
 	const h = await harness();
