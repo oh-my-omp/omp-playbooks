@@ -388,7 +388,7 @@ var worker = await playbook.agent({
 return await playbook.result(worker);
 ```
 
-It records the worker's final message as a result on b3 (a Launch with a single block is associated automatically) and closes this Launch. When nothing needs answering in between, one blocking call `await playbook.run({ blocks: ["b3"], agent: "task:mid" })` starts, waits, records and closes in one go. A person's "Launch" in the pane arrives as `launch_requested` once the coordinator is idle (launches clicked during one turn in one notice, numbered in click order), and the notice gives the same calls.
+It records the worker's final message as a result on b3 (a Launch with a single block is associated automatically) and closes this Launch. When nothing needs answering in between, one blocking call `await playbook.run({ blocks: ["b3"], agent: "task:mid" })` starts, waits, records and closes in one go. A person's "Launch" in the pane arrives as `launch_requested` once the coordinator is idle (launches clicked during one turn in one notice, numbered in click order), and the notice gives the same calls. When the requested blocks do not all preset the same `agent` and the session can list its subagents (read from its built-in `task` tool, like the SUBAGENT dropdown), those calls carry `agent: "<subagent>"` and the notice names the subagents for the coordinator to pick one; when the session cannot list them, the calls carry no `agent` and the notice says to pass an available agent if the default subagent is disabled.
 
 To execute the Playbook again from a clean state without touching the file, call `playbook_run {op: "start", name: "Review the cache plan"}`, take the returned Run ID and pass it as `run` to the calls above; finish with `playbook_run {op:"finish", run}`.
 

@@ -388,7 +388,7 @@ var worker = await playbook.agent({
 return await playbook.result(worker);
 ```
 
-它把 worker 的最终消息作为结果记到 b3（Launch 只有一个块时自动关联）并关闭这个 Launch。不需要中途响应面板时，也可以用一次阻塞调用 `await playbook.run({ blocks: ["b3"], agent: "task:mid" })` 完成启动、等待、记录和关闭。人在面板上点“启动”会在协调者空闲时以 `launch_requested` 到达（同一轮里点的多个启动合成一条通知，按点击顺序编号），通知里给出同样的调用。
+它把 worker 的最终消息作为结果记到 b3（Launch 只有一个块时自动关联）并关闭这个 Launch。不需要中途响应面板时，也可以用一次阻塞调用 `await playbook.run({ blocks: ["b3"], agent: "task:mid" })` 完成启动、等待、记录和关闭。人在面板上点“启动”会在协调者空闲时以 `launch_requested` 到达（同一轮里点的多个启动合成一条通知，按点击顺序编号），通知里给出同样的调用。请求的块没有都预设同一个 `agent`、且会话能列出它的 subagent（与 SUBAGENT 下拉框一样从会话内置的 `task` 工具读取）时，这些调用会带上 `agent: "<subagent>"`，通知同时列出这些 subagent，由协调者从中选一个；会话无法列出时，调用不带 `agent`，通知提示在默认 subagent 被禁用时传入一个可用的 agent。
 
 要在不动文件的情况下从干净状态再执行一遍，调用 `playbook_run {op: "start", name: "检查缓存方案"}`，把返回的 Run ID 作为 `run` 传给上面的调用；最后 `playbook_run {op:"finish", run}`。
 
