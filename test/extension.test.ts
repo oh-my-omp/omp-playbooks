@@ -22,6 +22,7 @@ import { language } from "../omomp-shared/i18n";
 import { readPluginManifest } from "../omomp-shared/tern-plugin";
 import { parseRunId } from "../src/domain/model";
 import { documentEndpoint, type EventPayload, type Request, type ServerFrame } from "../src/domain/protocol";
+import type { ToolDescription } from "../src/extension/agents";
 import { K1Client } from "../src/extension/client";
 import extension from "../src/extension/index";
 import { ensureTernPlugin } from "../src/extension/tern-setup";
@@ -40,6 +41,11 @@ const summary = {
 	retrospective: false,
 };
 const block = { id: "b1", kind: "task", title: "Block", body: "Body", status: "todo" };
+const builtinTask: ToolDescription = {
+	name: "task",
+	description: "Spawn subagents.\n# Available Agents\n- `task:low`: Lowest tier\n- `task:mid`: Mid tier\n# Delegation",
+	sourceInfo: { source: "builtin", path: "<builtin:task>", scope: "temporary", origin: "package" },
+};
 const designBlock = {
 	id: "b3",
 	kind: "design",
@@ -225,7 +231,7 @@ function resultText(result: AgentToolResult): string {
 	if (part?.type !== "text") throw new Error("expected a text result");
 	return part.text;
 }
-async function harness(kind: "main" | "sub" = "main") {
+async function harness(kind: "main" | "sub" = "main", builtins: readonly ToolDescription[] = []) {
 	const tools = new Map<string, Tool>();
 	const handlers = new Map<string, Handler>();
 	const commands = new Map<string, { handler(args: string, ctx: ExtensionCommandContext): Promise<void> }>();
@@ -281,7 +287,7 @@ async function harness(kind: "main" | "sub" = "main") {
 		registerTool: (value: Tool) => {
 			tools.set(value.name, value);
 		},
-		getAllTools: () => [...tools.keys()].map((name) => ({ name, sourceInfo: { source: "extension" } })),
+		getAllTools: () => [...[...tools.keys()].map((name) => ({ name, sourceInfo: { source: "extension" } })), ...builtins],
 		on: (event: string, handler: Handler) => {
 			handlers.set(event, handler);
 		},
@@ -1149,6 +1155,8 @@ for (const orchestration of [false, true]) {
 			expect(lines[1]).toContain("var worker = await playbook.agent(");
 			expect(lines[1]).toContain("await playbook.result(worker)");
 			expect(lines[1]).not.toContain("已预设");
+			expect(lines[1]).toContain('`agent: "<可用的 agent>"`（例如 "task:mid"）');
+			expect(lines[1]).not.toContain("<subagent>");
 		}
 		expect(JSON.parse(lines[2]!)).toEqual({ doc: await realpath(s.doc), event: "launch_requested", data: { run: "r1", blocks: ["b1"] } });
 		expect(h.messages[0]!.options).toEqual({ deliverAs: "aside", triggerTurn: true });
@@ -1157,7 +1165,7 @@ for (const orchestration of [false, true]) {
 
 test("launch_requested names a single block's preset agent and isolated", async () => {
 	const s = await service();
-	const h = await harness();
+	const h = await harness("main", [builtinTask]);
 	await h.execute("playbook_open", { doc: s.doc });
 	s.handler = (frame, connection) =>
 		respond(connection, frame, { title: "Run copy", blocks: [{ ...block, body: "Prompt", agent: "task:mid", isolated: true }] });
@@ -1165,7 +1173,61 @@ test("launch_requested names a single block's preset agent and isolated", async 
 	await h.messageSent;
 	const lines = h.messages[0]!.message.content.split("\n");
 	expect(lines[1]).toContain('块 b1 已预设 agent: "task:mid" isolated: true，不显式传参时 playbook.agent / playbook.run 自动使用。');
+	expect(lines[1]).toContain("playbook.agent({ doc: ");
+	expect(lines[1]).toContain(', blocks: ["b1"] })');
+	expect(lines[1]).not.toContain("<subagent>");
 });
+
+test("launch_requested without a preset agent names the subagents this session can start", async () => {
+	const s = await service();
+	const h = await harness("main", [builtinTask]);
+	await h.execute("playbook_open", { doc: s.doc });
+	s.handler = (frame, connection) =>
+		respond(connection, frame, {
+			title: "Run copy",
+			blocks: [
+				{ ...block, body: "Prompt" },
+				{ ...block, id: "b2", body: "Second", agent: "task:mid" },
+			],
+		});
+	s.push({ event: "launch_requested", data: { run: "r1", blocks: ["b1", "b2"] } } as EventPayload);
+	await h.messageSent;
+	const lines = h.messages[0]!.message.content.split("\n");
+	const call = `{ doc: ${JSON.stringify(await realpath(s.doc))}, run: "r1", blocks: ["b1","b2"], agent: "<subagent>" }`;
+	expect(lines[1]).toContain(`var worker = await playbook.agent(${call})`);
+	expect(lines[1]).toContain(`await playbook.run(${call})`);
+	expect(lines[1]).toContain('本会话可启动的 subagent 之一："task:low"、"task:mid"。');
+	expect(lines[1]).not.toContain("<可用的 agent>");
+});
+
+for (const [agents, listed] of [
+	[["task:low", "task:mid"], true],
+	[["task:mid", "task:mid"], false],
+] as const) {
+	test(`launch_requested for blocks presetting ${listed ? "different agents" : "the same agent"} ${listed ? "names" : "does not name"} startable subagents`, async () => {
+		const s = await service();
+		const h = await harness("main", [builtinTask]);
+		await h.execute("playbook_open", { doc: s.doc });
+		s.handler = (frame, connection) =>
+			respond(connection, frame, {
+				title: "Book",
+				blocks: [
+					{ ...block, body: "Prompt", agent: agents[0] },
+					{ ...block, id: "b2", body: "Second", agent: agents[1] },
+				],
+			});
+		s.push({ event: "launch_requested", data: { blocks: ["b1", "b2"] } } as EventPayload);
+		await h.messageSent;
+		const lines = h.messages[0]!.message.content.split("\n");
+		if (listed) {
+			expect(lines[1]).toContain('blocks: ["b1","b2"], agent: "<subagent>" })');
+			expect(lines[1]).toContain('"task:low"、"task:mid"');
+		} else {
+			expect(lines[1]).toContain('blocks: ["b1","b2"] })');
+			expect(lines[1]).not.toContain("<subagent>");
+		}
+	});
+}
 
 test("launch requests made during a turn wait for its end and arrive as one notice", async () => {
 	const s = await service();
