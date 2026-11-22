@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Synced `compact-handoff.ts` and `context-delta.ts` from `oh-my-omp/shared@8f2c5e520126`, deferred `playbook-event` launch, pane attach, and service notices across compaction via the shared compaction barrier, and registered `omp-playbooks` (`source="omp-playbooks/active-runs"`) as a stateful post-compaction handoff that re-injects connected Playbook document paths and `playbook://` handles via `delta-stream`.
+
 ## [0.1.54] - 2026-11-22
 
 ### Changed
@@ -39,4 +43,8 @@
 
 ### Changed
 
-- The plugin now ships on the `release` branch instead of following `main`: every merge to `main` keeps its entry under `## [Unreleased]` here, and one run of the shared omomp release workflow each day at 02:00 GMT+9 promotes those entries into a version, tags it and moves `release` together with `main`. The version in `package.json` and `tern-plugin/plugin.toml` changes only then, still in both files together, so the extension keeps telling old and new code apart; the per-push version bump is gone.
+- The plugin now ships on the `release` branch instead of following `main`: every merge to `main` keeps its entry under `## [Unreleased]
+
+### Changed
+
+- Synced `compact-handoff.ts` and `context-delta.ts` from `oh-my-omp/shared@8f2c5e520126`, deferred `playbook-event` launch, pane attach, and service notices across compaction via the shared compaction barrier, and registered `omp-playbooks` (`source="omp-playbooks/active-runs"`) as a stateful post-compaction handoff that re-injects connected Playbook document paths and `playbook://` handles via `delta-stream`.` here, and one run of the shared omomp release workflow each day at 02:00 GMT+9 promotes those entries into a version, tags it and moves `release` together with `main`. The version in `package.json` and `tern-plugin/plugin.toml` changes only then, still in both files together, so the extension keeps telling old and new code apart; the per-push version bump is gone.

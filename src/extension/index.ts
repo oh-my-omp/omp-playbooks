@@ -4,6 +4,13 @@ import { resolve } from "node:path";
 import type { AgentToolResult, ExtensionAPI, ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import { InternalUrlRouter, type ProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { ptree } from "@oh-my-pi/pi-utils";
+import {
+	deferDuringCompaction,
+	defineStatefulHarnessHandoff,
+	isCompacting,
+	registerCompactHandoff,
+	type StatefulHarnessHandoff,
+} from "../../omomp-shared/compact-handoff";
 import { tr } from "../../omomp-shared/i18n";
 import { clearToolTopics, registerInternalScheme, registerToolTopics } from "../../omomp-shared/internal-url";
 import { type BlockId, parseBlockId, parseLaunchId, type RecordKind, type RunId } from "../domain/model";
@@ -143,6 +150,35 @@ function resolveRolePanelId(
 	return { ok: true, id: matches[0]!.id };
 }
 
+export interface PlaybookCompactState {
+	readonly docs: readonly string[];
+}
+
+export function createPlaybookCompactHandoff(getConnectedDocs: () => readonly string[]): StatefulHarnessHandoff<PlaybookCompactState> {
+	return defineStatefulHarnessHandoff<PlaybookCompactState>({
+		pluginId: "omp-playbooks",
+		captureState() {
+			const docs = getConnectedDocs();
+			if (docs.length === 0) return null;
+			return { docs };
+		},
+		renderCompactPromptClaim(state) {
+			return `Active Playbook sessions (${state.docs.length} connected, \`source="omp-playbooks/active-runs"\`): \`omp-playbooks\` will re-inject the connected Playbook document paths and \`playbook://\` handles after compaction; NEVER restate Playbook document paths, \`playbook://\` URLs, or full Playbook contents in the summary.`;
+		},
+		renderPostCompactInjection(state) {
+			const lines = state.docs.map((doc) => {
+				const url = formatPlaybookUrl(doc, state.docs);
+				return `- \`${doc}\` -> \`${url}\``;
+			});
+			return {
+				source: "omp-playbooks/active-runs",
+				delivery: "delta-stream",
+				content: ["Connected Playbook documents in this coordinator session:", ...lines].join("\n"),
+			};
+		},
+	});
+}
+
 export default async function (pi: ExtensionAPI): Promise<void> {
 	const inTern = ternPane();
 	if (inTern === null) {
@@ -169,12 +205,31 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		return [...clients.entries()].filter(([, client]) => client.connected).map(([path]) => path);
 	}
 
+	registerCompactHandoff(
+		pi,
+		createPlaybookCompactHandoff(() => connectedDocs()),
+	);
+
 	function deliverLaunches(ctx: ExtensionContext): Promise<void> {
 		const delivered = delivering.then(async () => {
-			if (busy || launches.length === 0) return;
+			if (stopped || busy || launches.length === 0) return;
+			if (isCompacting(ctx.sessionManager)) {
+				deferDuringCompaction(ctx.sessionManager, "omp-playbooks:launches", () => {
+					void deliverLaunches(ctx);
+				});
+				return;
+			}
 			const batch = launches;
 			launches = [];
 			const content = await launchNotice(batch);
+			if (stopped) return;
+			if (isCompacting(ctx.sessionManager)) {
+				launches = [...batch, ...launches];
+				deferDuringCompaction(ctx.sessionManager, "omp-playbooks:launches", () => {
+					void deliverLaunches(ctx);
+				});
+				return;
+			}
 			pi.sendMessage(
 				{ customType: "playbook-event", content, display: true },
 				{ deliverAs: ctx.isIdle() ? "aside" : "followUp", triggerTurn: true },
@@ -235,10 +290,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 						launches.push({ absolute, data: event.data });
 						return deliverLaunches(ctx);
 					}
-					pi.sendMessage(
-						{ customType: "playbook-event", content: await notice(absolute, event), display: true },
-						{ deliverAs: "aside", triggerTurn: true },
-					);
+					const content = await notice(absolute, event);
+					if (stopped) return;
+					const send = () =>
+						pi.sendMessage({ customType: "playbook-event", content, display: true }, { deliverAs: "aside", triggerTurn: true });
+					if (isCompacting(ctx.sessionManager)) {
+						deferDuringCompaction(ctx.sessionManager, `omp-playbooks:event:${absolute}:${event.event}:${randomUUID()}`, send);
+						return;
+					}
+					send();
 				},
 			);
 			clients.set(absolute, client);
@@ -893,14 +953,20 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		const ready = await (await clientFor(absolute, ctx)).connect();
 		if (!ready.ok) return { ok: false, error: { code: ready.error.code, message: ready.error.message } };
 		const readUrl = formatPlaybookUrl(absolute, connectedDocs());
-		pi.sendMessage({
-			customType: "playbook-event",
-			content: tr(
-				`This is a Playbook document service notice, not a user message\nA person designated this session as the coordinator for ${absolute} in the Playbook pane; the extension is connected (equivalent to \`playbook_open\`). Run \`read ${readUrl}\` to learn it; then follow the next step in each Playbook notice.`,
-				`这是 Playbook 文档服务的通知，不是用户消息\n人在 Playbook 面板里指定本会话为 ${absolute} 的协调者，扩展已经连接（等同 \`playbook_open\`）。用 \`read ${readUrl}\` 了解它；之后每收到 Playbook 通知，按通知里的下一步做。`,
-			),
-			display: true,
-		});
+		const send = () =>
+			pi.sendMessage({
+				customType: "playbook-event",
+				content: tr(
+					`This is a Playbook document service notice, not a user message\nA person designated this session as the coordinator for ${absolute} in the Playbook pane; the extension is connected (equivalent to \`playbook_open\`). Run \`read ${readUrl}\` to learn it; then follow the next step in each Playbook notice.`,
+					`这是 Playbook 文档服务的通知，不是用户消息\n人在 Playbook 面板里指定本会话为 ${absolute} 的协调者，扩展已经连接（等同 \`playbook_open\`）。用 \`read ${readUrl}\` 了解它；之后每收到 Playbook 通知，按通知里的下一步做。`,
+				),
+				display: true,
+			});
+		if (isCompacting(ctx.sessionManager)) {
+			deferDuringCompaction(ctx.sessionManager, `omp-playbooks:pane:${absolute}`, send);
+		} else {
+			send();
+		}
 		return here;
 	}
 

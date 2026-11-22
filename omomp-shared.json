@@ -1,1 +1,4 @@
-{ "directory": "omomp-shared", "files": ["biome.base.json", "i18n.ts", "internal-url.ts", "tern-plugin.ts"] }
+{
+	"directory": "omomp-shared",
+	"files": ["biome.base.json", "compact-handoff.ts", "context-delta.ts", "i18n.ts", "internal-url.ts", "tern-plugin.ts"]
+}
