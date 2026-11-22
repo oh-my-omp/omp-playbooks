@@ -15,10 +15,12 @@ import type {
 	ToolCallEventResult,
 	ToolDefinition,
 } from "@oh-my-pi/pi-coding-agent";
+import { InternalUrlRouter, parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { type IpcConnection, IpcServer } from "@oh-my-pi/pi-natives";
 import { defaultFormData, type HtmlFormData } from "@oh-my-pi/pi-tui/html-form/data";
 import { parseHtmlForm, spansText } from "@oh-my-pi/pi-tui/html-form/parse";
 import { language } from "../omomp-shared/i18n";
+import { listToolTopics, resolveToolTopic } from "../omomp-shared/internal-url";
 import { readPluginManifest } from "../omomp-shared/tern-plugin";
 import { parseRunId } from "../src/domain/model";
 import { documentEndpoint, type EventPayload, type Request, type ServerFrame } from "../src/domain/protocol";
@@ -28,6 +30,7 @@ import extension from "../src/extension/index";
 import { ensureTernPlugin } from "../src/extension/tern-setup";
 import { playbookTopics } from "../src/extension/topics";
 
+const LEGACY_SCHEME = `${"xd"}://`;
 const summary = {
 	id: "r1",
 	name: "Run",
@@ -191,7 +194,6 @@ type Assistant = Extract<Message, { role: "assistant" }>;
 type TextPart = Extract<Assistant["content"][number], { type: "text" | "thinking" }>;
 type Tool = Omit<ToolDefinition, "parameters"> & {
 	parameters: { parse(value: unknown): unknown };
-	docTopics(): Readonly<Record<string, string>>;
 };
 type ToolCallResult = (Omit<ToolCallEventResult, "input"> & { input?: EvalToolParams }) | undefined;
 type Handler = (event: unknown, ctx: ExtensionContext) => unknown | Promise<unknown>;
@@ -420,77 +422,102 @@ function client(path: string): K1Client {
 }
 const runId = parseRunId("r1")!;
 
-for (const [op, fields, mutation, args] of [
-	["title", { title: "Renamed" }, "set", { field: "title", value: "Renamed" }],
-	["status", { status: "done" }, "set", { field: "status", value: "done" }],
-	["replace", { find: "Body", replace: "New" }, "edit", { find: "Body", replace: "New" }],
-	["write", { text: "New design" }, "write", { text: "New design" }],
-	["panel", { panel: "A", text: "## A Revised\nNew design" }, "panel", { panel: "A", text: "## A Revised\nNew design" }],
-	["delete", {}, "delete", {}],
-	["move", { position: "top" }, "move", { after: null }],
-	["move", { position: "after", after: "b2" }, "move", { after: "b2" }],
-	["agent", { agent: " task:mid " }, "set", { field: "agent", value: "task:mid" }],
-	["agent", { clear: true }, "set", { field: "agent", value: null }],
-	["isolated", { isolation: "shared" }, "set", { field: "isolated", value: false }],
-	["isolated", { isolation: "default" }, "set", { field: "isolated", value: null }],
+for (const [tool, label, fields, mutation, args] of [
+	["playbook_edit_content", "title", { block: "b1", title: "Renamed" }, "set", { field: "title", value: "Renamed" }],
+	["playbook_edit_content", "replace", { block: "b1", find: "Body", replace: "New" }, "edit", { find: "Body", replace: "New" }],
+	["playbook_edit_content", "design", { block: "b1", design: "New design" }, "write", { text: "New design" }],
+	[
+		"playbook_edit_content",
+		"panel",
+		{ block: "b1", panel: "A", text: "## A Revised\nNew design" },
+		"panel",
+		{ panel: "A", text: "## A Revised\nNew design" },
+	],
+	["playbook_edit_structure", "status", { meta: { block: "b1", status: "done" } }, "set", { field: "status", value: "done" }],
+	["playbook_edit_structure", "delete", { remove_block: "b1" }, "delete", {}],
+	["playbook_edit_structure", "move top", { move: { block: "b1", at_top: true } }, "move", { after: null }],
+	["playbook_edit_structure", "move after", { move: { block: "b1", after: "b2" } }, "move", { after: "b2" }],
+	["playbook_edit_structure", "agent set", { meta: { block: "b1", agent: " task:mid " } }, "set", { field: "agent", value: "task:mid" }],
+	["playbook_edit_structure", "agent clear", { meta: { block: "b1", agent: null } }, "set", { field: "agent", value: null }],
+	["playbook_edit_structure", "isolation none", { meta: { block: "b1", isolation: "none" } }, "set", { field: "isolated", value: false }],
+	["playbook_edit_structure", "isolation clear", { meta: { block: "b1", isolation: null } }, "set", { field: "isolated", value: null }],
 ] as const) {
-	test(`edit ${op} ${JSON.stringify(fields)} locks, changes and releases only its own lock`, async () => {
+	test(`${tool} ${label} locks, changes and releases only its own lock`, async () => {
 		const s = await service();
 		const h = await harness();
 		await h.execute("playbook_open", { doc: s.doc });
-		const result = await h.execute("playbook_edit", { doc: s.doc, run: "r1", block: "b1", op, ...fields });
+		const result = await h.execute(tool, { doc: s.doc, run: "r1", ...fields });
 		expect(result.isError).toBe(false);
 		expect(s.frames.map((frame) => frame.op)).toEqual(
-			op === "delete" ? ["hello", "lock", mutation] : ["hello", "lock", mutation, "unlock"],
+			label === "delete" ? ["hello", "lock", mutation] : ["hello", "lock", mutation, "unlock"],
 		);
 		expect(s.frames[0]).toMatchObject({ args: { session: "session-test" } });
 		expect(s.frames[1]!.args).toEqual({ run: "r1", block: "b1" });
 		expect(s.frames[2]!.args).toEqual({ run: "r1", block: "b1", ...args });
-		if (op !== "delete") expect(s.frames[3]!.args).toEqual({ run: "r1", block: "b1", request: s.frames[1]!.id });
+		if (label !== "delete") expect(s.frames[3]!.args).toEqual({ run: "r1", block: "b1", request: s.frames[1]!.id });
 		await h.event("session_shutdown");
-		expect(s.frames).toHaveLength(op === "delete" ? 3 : 4);
+		expect(s.frames).toHaveLength(label === "delete" ? 3 : 4);
 	});
 }
+
+test("playbook_edit_content resolves role panel names (where/what/how) from the locked block", async () => {
+	const s = await service();
+	const h = await harness();
+	const outlined = {
+		...block,
+		body: "## A Where · Scope\nHere\n\n## B What · Goal\nDo it\n\n## C How · Steps\nRun it\n",
+	};
+	s.handler = (frame, connection) =>
+		respond(connection, frame, frame.op === "hello" ? { blocks: ["b1"], runs: [] } : frame.op === "lock" ? { block: outlined } : null);
+	await h.execute("playbook_open", { doc: s.doc });
+	const result = await h.execute("playbook_edit_content", {
+		doc: s.doc,
+		block: "b1",
+		panel: "what",
+		text: "## B What · Updated\nNew goal",
+	});
+	expect(result.isError).toBe(false);
+	expect(s.frames.map((frame) => frame.op)).toEqual(["hello", "lock", "panel", "unlock"]);
+	expect(s.frames[2]!.args).toEqual({ block: "b1", panel: "B", text: "## B What · Updated\nNew goal" });
+});
 
 test("a call whose parameters do not parse fails as BadValue, not NoService, before any request", async () => {
 	const s = await service();
 	const h = await harness();
 	await h.execute("playbook_open", { doc: s.doc });
-	const result = await h.execute("playbook_read", { doc: s.doc, op: "read", after: 3 });
+	const result = await h.execute("playbook_edit_content", { doc: s.doc, block: "b1", find: "x" });
 	expect(result.isError).toBe(true);
 	expect(JSON.parse(resultText(result)).error.code).toBe("BadValue");
 	expect(s.frames.map((frame) => frame.op)).toEqual(["hello"]);
 });
 
-test("playbook_edit rejects a blank agent, a design-block contract field and a move without a target before any request", async () => {
+test("playbook_edit_structure rejects a blank agent, a design-block contract field and a move without a target before any request", async () => {
 	const s = await service();
 	const h = await harness();
 	await h.execute("playbook_open", { doc: s.doc });
 	for (const params of [
-		{ op: "agent", block: "b1", agent: "   " },
-		{ op: "agent", block: "b1", agent: "task:mid", clear: true },
-		{ op: "isolated", block: "b1", isolation: "yes" },
-		{ op: "move", block: "b1" },
-		{ op: "move", block: "b1", position: "top", after: "b2" },
-		{ op: "insert", title: "T", body: "B", agent: "" },
-		{ op: "insert_design", title: "T", design: "D", agent: "task:mid" },
+		{ meta: { block: "b1", agent: "   " } },
+		{ meta: { block: "b1", isolation: "yes" } },
+		{ move: { block: "b1" } },
+		{ move: { block: "b1", at_top: true, after: "b2" } },
+		{ add: { title: "T", body: "B", agent: "" } },
+		{ add: { title: "T", design: "D", agent: "task:mid" } },
 	]) {
-		const result = await h.execute("playbook_edit", { doc: s.doc, ...params });
+		const result = await h.execute("playbook_edit_structure", { doc: s.doc, ...params });
 		expect(result.isError).toBe(true);
 	}
 	expect(s.frames.map((frame) => frame.op)).toEqual(["hello"]);
 });
 
-test("playbook_read accepts task blocks carrying agent and isolated", async () => {
+test("playbook:// read returns task blocks carrying agent and isolated", async () => {
 	const s = await service();
 	const h = await harness();
 	const configured = { ...block, agent: "task:mid", isolated: true };
 	s.handler = (frame, connection) =>
 		respond(connection, frame, frame.op === "hello" ? { blocks: ["b1"], runs: [] } : { title: "Book", blocks: [configured] });
 	await h.execute("playbook_open", { doc: s.doc });
-	const result = await h.execute("playbook_read", { doc: s.doc });
-	expect(result.isError).toBe(false);
-	expect(JSON.parse(resultText(result))).toEqual({ title: "Book", blocks: [configured] });
+	const resource = await InternalUrlRouter.instance().resolve(`playbook://${encodeURIComponent(s.doc)}`);
+	expect(JSON.parse(resource.content as string)).toEqual({ title: "Book", blocks: [configured] });
 });
 
 test("interruption revokes an in-flight edit without aborting the coordinator; Locked never sends a mutation", async () => {
@@ -505,7 +532,7 @@ test("interruption revokes an in-flight edit without aborting the coordinator; L
 			connection.send(JSON.stringify({ id: frame.id, ok: false, error: { code: "NotLocked", message: "lock revoked" } }));
 		} else respond(connection, frame);
 	};
-	const changed = await h.execute("playbook_edit", { op: "title", run: "r1", block: "b1", title: "New" });
+	const changed = await h.execute("playbook_edit_content", { run: "r1", block: "b1", title: "New" });
 	expect(changed.isError).toBe(true);
 	expect(structuredClone(JSON.parse(resultText(changed)).error)).toMatchObject({
 		code: "NotLocked",
@@ -518,7 +545,7 @@ test("interruption revokes an in-flight edit without aborting the coordinator; L
 		connection.send(
 			JSON.stringify({ id: frame.id, ok: false, error: { code: "Locked", message: "human editing", detail: { block: "b1" } } }),
 		);
-	const locked = await h.execute("playbook_edit", { op: "delete", block: "b1" });
+	const locked = await h.execute("playbook_edit_structure", { remove_block: "b1" });
 	expect(JSON.parse(resultText(locked))).toEqual({ error: { code: "Locked", message: "human editing", detail: { block: "b1" } } });
 	expect(s.frames.map((frame) => frame.op)).toEqual(["hello", "lock", "set", "unlock", "lock"]);
 });
@@ -550,8 +577,8 @@ test("event aside precedes block_changed ack; unrelated interruption is ignored"
 	expect(h.messages[0]!.message.content.split("\n")[0]).toBe("这是 Playbook 文档服务的通知，不是用户消息");
 	const lines = h.messages[0]!.message.content.split("\n");
 	expect(lines).toHaveLength(3);
-	expect(lines[1]).toContain('playbook_launch --json \'{"op":"rebase","launch":"l1"}\'');
-	expect(lines[1]).not.toContain("xd://");
+	expect(lines[1]).toContain('playbook_launch --json \'{"rebase_launch":"l1"}\'');
+	expect(lines[1]).not.toContain(LEGACY_SCHEME);
 	expect(JSON.parse(lines[2]!)).toEqual({
 		doc: await realpath(s.doc),
 		event: "block_changed",
@@ -567,7 +594,7 @@ test("event aside precedes block_changed ack; unrelated interruption is ignored"
 	expect(h.messages[0]!.options).toEqual({ deliverAs: "aside", triggerTurn: true });
 	expect(s.frames.at(-1)).toMatchObject({ op: "ack", args: { event: "e1" } });
 	s.push({ event: "interrupted", data: { block: "b1", request: "old" } } as EventPayload);
-	await h.execute("playbook_run", { doc: s.doc, op: "list" });
+	await InternalUrlRouter.instance().resolve("playbook://");
 	expect(h.aborted).toBe(0);
 	expect(h.messages).toHaveLength(1);
 });
@@ -603,14 +630,14 @@ for (const run of [undefined, "r1"] as const) {
 		expect(message.content).toContain(prompt);
 		expect(message.content).not.toContain("A newer request");
 		const instruction = lines.slice(1, -1).join("\n");
-		expect(instruction).toContain("playbook_read --json");
-		expect(instruction).toContain('"block":"b3"');
-		const history = `playbook_read --json '${JSON.stringify({ doc: await realpath(s.doc), ...(run === undefined ? {} : { run }), op: "revisions", block: "b3" })}'`;
+		const prefix = run === undefined ? "playbook://book.yaml" : `playbook://book.yaml/${run}`;
+		expect(instruction).toContain(`read ${prefix}/b3`);
+		const history = `read ${prefix}/revisions?block=b3`;
 		expect(instruction).toContain(`需要以前的修改要求时用 \`${history}\`。`);
-		expect(instruction).not.toContain("xd://");
+		expect(instruction).not.toContain(LEGACY_SCHEME);
 		expect(instruction).toContain("修订设计");
-		expect(instruction).toContain("playbook_edit");
-		for (const op of ["write", "replace", "panel"]) expect(instruction).toContain(op);
+		expect(instruction).toContain("playbook_edit_content");
+		for (const field of ["design", "find", "replace", "panel"]) expect(instruction).toContain(field);
 		expect(instruction).toMatch(/不要改\s+requirement/);
 		expect(instruction).not.toContain("playbook.run");
 		expect(JSON.parse(lines.at(-1)!)).toEqual({
@@ -636,10 +663,11 @@ for (const run of [undefined, "r1"] as const) {
 		expect(options).toEqual({ deliverAs: "aside", triggerTurn: true });
 		const lines = message.content.split("\n");
 		const instruction = lines.slice(1, -1).join("\n");
-		const history = `playbook_read --json '${JSON.stringify({ doc: await realpath(s.doc), ...(run === undefined ? {} : { run }), op: "revisions", block: "b3" })}'`;
+		const prefix = run === undefined ? "playbook://book.yaml" : `playbook://book.yaml/${run}`;
+		const history = `read ${prefix}/revisions?block=b3`;
 		expect(instruction).toContain(`（读取失败，用 \`${history}\` 查询）`);
 		expect(instruction).toContain(`需要以前的修改要求时用 \`${history}\`。`);
-		expect(instruction).not.toContain("xd://");
+		expect(instruction).not.toContain(LEGACY_SCHEME);
 		expect(instruction).not.toContain("<prompt>");
 		expect(JSON.parse(lines.at(-1)!)).toEqual({
 			doc: await realpath(s.doc),
@@ -675,7 +703,7 @@ test("add asks two forms (message, log and kind, then block) and writes full tex
 	}
 	expect(h.notices.filter((notice) => notice.type === "error")).toEqual([]);
 	expect(() =>
-		h.tools.get("playbook_timeline")!.parameters.parse({ doc: s.doc, op: "post", run: "r1", kind: "result", text: "x", origin: "human" }),
+		h.tools.get("playbook_timeline")!.parameters.parse({ doc: s.doc, run: "r1", kind: "result", text: "x", origin: "human" }),
 	).toThrow();
 });
 
@@ -779,7 +807,13 @@ test("open starts the document service beside the coordinator pane and returns h
 	const s = await service("document-pane", doc);
 	const result = await opening;
 	expect(result.isError).toBe(false);
-	expect(JSON.parse(resultText(result))).toMatchObject({ blocks: ["b1"], pane: "document-pane" });
+	expect(JSON.parse(resultText(result))).toMatchObject({
+		blocks: ["b1"],
+		pane: "document-pane",
+		doc: await realpath(doc),
+		urls: { runs: "playbook://" },
+		topics: ["tool://playbook_open/format-outline", "tool://playbook_open/slots-references", "tool://playbook_open/execution"],
+	});
 	const real = await realpath(doc);
 	expect(await tern.args()).toEqual([
 		"split",
@@ -816,8 +850,8 @@ test("a child session registers no tool or command, and never connects (R4)", as
 });
 
 const documentToolNames = [
-	"playbook_read",
-	"playbook_edit",
+	"playbook_edit_content",
+	"playbook_edit_structure",
 	"playbook_compile",
 	"playbook_check",
 	"playbook_run",
@@ -833,6 +867,8 @@ for (const value of [undefined, "coordinator-pane"]) {
 		const h = await harness();
 		await h.event("session_start");
 		expect(h.registered).toEqual({ tools: [], commands: [] });
+		expect(InternalUrlRouter.instance().getHandler("playbook")).toBeUndefined();
+		expect(listToolTopics("playbook_open")).toEqual([]);
 		expect(h.warnings).toEqual([]);
 		expect(h.notices).toEqual([]);
 		expect(await h.event("tool_call", { toolName: "eval", input: { language: "js", code: "await playbook.run({})" } })).toBeUndefined();
@@ -845,9 +881,12 @@ test("a main session in a daemon Tern pane registers all eight tools as discover
 	expect(h.registered.tools).toEqual([]);
 	await h.event("session_start");
 	expect(h.registered.tools).toEqual(["playbook_open", ...documentToolNames]);
+	expect(h.tools.has("playbook_read")).toBe(false);
+	expect(h.tools.has("playbook_edit")).toBe(false);
 	for (const tool of h.tools.values()) {
 		expect(tool.loadMode).toBe("discoverable");
 		expect(tool.defaultInactive).toBeUndefined();
+		expect("docTopics" in tool).toBe(false);
 	}
 	const first = [...h.tools.values()];
 	await h.event("session_start");
@@ -856,55 +895,47 @@ test("a main session in a daemon Tern pane registers all eight tools as discover
 	});
 });
 
-test("every tool keeps its short purpose before any topic pointers", async () => {
+test("every tool keeps its entire description <= 200 chars with zero legacy scheme links", async () => {
 	const h = await harness();
 	await h.event("session_start");
 	for (const tool of h.tools.values()) {
-		const purpose = tool.description.split("\n\n")[0]!;
-		expect(purpose.length).toBeLessThanOrEqual(200);
-		expect(purpose).not.toBe("");
+		expect(tool.description.length).toBeLessThanOrEqual(200);
+		expect(tool.description).not.toBe("");
+		expect(tool.description).not.toContain(LEGACY_SCHEME);
+		expect(tool.description).not.toContain("help://");
 	}
 });
 
-test("each registered tool serves body-only topics and its own help pointers without a registry", async () => {
+test("topics are consolidated into 3 tool://playbook_open/* entries via registerToolTopics without docTopics", async () => {
 	const h = await harness();
 	await h.event("session_start");
 	expect(h.warnings).toEqual([]);
 	const topics = playbookTopics();
-	expect([...topics.keys()].sort()).toEqual([
-		"playbook_check",
-		"playbook_edit",
-		"playbook_launch",
-		"playbook_open",
-		"playbook_read",
-		"playbook_timeline",
+	expect(topics.map((doc) => `${doc.tool}/${doc.topic}`)).toEqual([
+		"playbook_open/execution",
+		"playbook_open/format-outline",
+		"playbook_open/slots-references",
 	]);
-	for (const tool of h.tools.values()) {
-		const ownTopics = topics.get(tool.name) ?? [];
-		const bodies = tool.docTopics();
-		expect(Object.keys(bodies)).toEqual(ownTopics.map((topic) => topic.name));
-		expect(tool.description).not.toContain("xd://");
-		for (const topic of ownTopics) {
-			expect(bodies[topic.name]).toBe(topic.read());
-			expect(bodies[topic.name]!.trim()).not.toBe("");
-			expect(bodies[topic.name]).not.toStartWith("---");
-			expect(bodies[topic.name]).not.toContain("xd://");
-			expect(tool.description).toContain(`- \`help://${tool.name}/${topic.name}\` — ${topic.when}`);
-		}
-		if (ownTopics.length) {
-			expect(tool.description).toEndWith(
-				`Topics — read the one a call needs before making it:\n${ownTopics.map((topic) => `- \`help://${tool.name}/${topic.name}\` — ${topic.when}`).join("\n")}`,
-			);
-		} else {
-			expect(bodies).toEqual({});
-			expect(tool.description).not.toContain("Topics");
-		}
+	const hubDocs = listToolTopics("playbook_open");
+	expect(hubDocs.map((doc) => doc.topic)).toEqual(["execution", "format-outline", "slots-references"]);
+	for (const doc of hubDocs) {
+		const resolved = resolveToolTopic(doc.tool, doc.topic);
+		expect(resolved).toBeDefined();
+		expect(resolved!.content.trim()).not.toBe("");
+		expect(resolved!.content).not.toStartWith("---");
+		expect(resolved!.content).not.toContain(LEGACY_SCHEME);
+		expect(resolved!.content).not.toContain("help://");
 	}
-	expect(h.tools.get("playbook_open")!.docTopics().format).toStartWith("# Playbook file format\n");
-	expect(h.tools.get("playbook_open")!.docTopics().format).toContain("help://playbook_open/references");
+	const router = InternalUrlRouter.instance();
+	const formatRes = await router.resolve("tool://playbook_open/format-outline");
+	expect(formatRes.content as string).toStartWith("# Playbook file format\n");
+	expect(formatRes.content as string).toContain("tool://playbook_open/slots-references");
+	const execRes = await router.resolve("tool://playbook_open/execution");
+	expect(execRes.content as string).toContain("block_changed");
+	expect(execRes.content as string).toContain("# Language");
 });
 
-test("a registered tool generates its language topic afresh on every read", async () => {
+test("tool://playbook_open/execution and format-outline regenerate language guidance afresh on every read", async () => {
 	const original = process.env.OMOMP_LANG;
 	cleanup.push(() => {
 		if (original === undefined) delete process.env.OMOMP_LANG;
@@ -912,13 +943,96 @@ test("a registered tool generates its language topic afresh on every read", asyn
 	});
 	const h = await harness();
 	await h.event("session_start");
-	const tool = h.tools.get("playbook_open")!;
+	const router = InternalUrlRouter.instance();
 	process.env.OMOMP_LANG = "en";
-	expect(tool.docTopics().language).toContain("in English");
+	expect((await router.resolve("tool://playbook_open/execution")).content as string).toContain("in English");
+	expect((await router.resolve("tool://playbook_open/format-outline")).content as string).toContain("in English");
 	process.env.OMOMP_LANG = "zh";
-	expect(tool.docTopics().language).toContain("in Chinese");
+	expect((await router.resolve("tool://playbook_open/execution")).content as string).toContain("in Chinese");
+	expect((await router.resolve("tool://playbook_open/format-outline")).content as string).toContain("in Chinese");
 	process.env.OMOMP_LANG = "en";
-	expect(tool.docTopics().language).toContain("in English");
+	expect((await router.resolve("tool://playbook_open/execution")).content as string).toContain("in English");
+});
+
+test("playbook:// registers without promptDoc, serves all read/write routes, and unregisters on shutdown", async () => {
+	const s = await service();
+	const h = await harness();
+	await h.execute("playbook_open", { doc: s.doc });
+	const router = InternalUrlRouter.instance();
+	const handler = router.getHandler("playbook");
+	expect(handler).toBeDefined();
+	expect(handler!.promptDoc).toBeUndefined();
+	expect(handler!.spec.write).toBeDefined();
+	expect(handler!.spec.write!.via).toBe("handler");
+	expect(handler!.spec.write!.payload).toBe("verbatim");
+	expect(handler!.spec.write!.scope).toBe("coordination");
+	expect(handler!.spec.write!.tier(parseInternalUrl("playbook://book.yaml/timeline"), "", undefined)).toBe("read");
+
+	// read playbook:// -> runs
+	const runsRes = await router.resolve("playbook://");
+	expect(JSON.parse(runsRes.content as string)).toEqual({ runs: [summary] });
+	expect(s.frames.at(-1)).toMatchObject({ op: "runs", args: {} });
+
+	// read playbook://<doc>/<run>/<block>
+	const blockRes = await router.resolve("playbook://book.yaml/r1/b1");
+	expect(JSON.parse(blockRes.content as string)).toEqual({ title: "Book", blocks: [block] });
+	expect(s.frames.at(-1)).toMatchObject({ op: "read", args: { run: "r1", block: "b1" } });
+
+	// read playbook:///<abs>/<run>/revisions?after=2&block=b3
+	s.handler = (frame, connection) =>
+		respond(
+			connection,
+			frame,
+			frame.op === "revisions"
+				? { revisions: [{ seq: 3, at: 10, block: "b3", prompt: "Fix" }] }
+				: frame.op === "timeline"
+					? { entries: [{ seq: 7 }], next_after: 7 }
+					: frame.op === "launch_info"
+						? { id: "l1", run: "r1", kind: "prompt", blocks: ["b1"] }
+						: frame.op === "inspect"
+							? { blocks: ["b1", "b2"], findings: {}, version: "ver-123" }
+							: frame.op === "post"
+								? { seq: 9 }
+								: { title: "Book", blocks: [block] },
+		);
+	const revRes = await router.resolve(`playbook://${await realpath(s.doc)}/r1/revisions?after=2&block=b3`);
+	expect(JSON.parse(revRes.content as string)).toEqual({ revisions: [{ seq: 3, at: 10, block: "b3", prompt: "Fix" }] });
+	expect(s.frames.at(-1)).toMatchObject({ op: "revisions", args: { run: "r1", block: "b3", after: 2 } });
+
+	// read playbook://<doc>/<run>/timeline?after=6&limit=200
+	const tlRes = await router.resolve("playbook://book.yaml/r1/timeline?after=6&limit=200");
+	expect(tlRes.content as string).toBe('{"entries":[{"seq":7}],"next_after":7}');
+	expect(s.frames.at(-1)).toMatchObject({ op: "timeline", args: { run: "r1", after: 6, limit: 200 } });
+
+	// read playbook://<doc>/<run>/launches/<launchId>
+	const launchRes = await router.resolve("playbook://book.yaml/r1/launches/l1");
+	expect(JSON.parse(launchRes.content as string)).toEqual({ id: "l1", run: "r1", kind: "prompt", blocks: ["b1"] });
+	expect(s.frames.at(-1)).toMatchObject({ op: "launch_info", args: { launch: "l1" } });
+
+	// read playbook://<doc>/<run>/checks?blocks=b1,b2 (includes inline playbook_check hint)
+	const checksRes = await router.resolve("playbook://book.yaml/r1/checks?blocks=b1,b2");
+	expect(checksRes.content as string).toContain('"version": "ver-123"');
+	expect(checksRes.content as string).toContain("playbook_check");
+	expect(s.frames.at(-1)).toMatchObject({ op: "inspect", args: { run: "r1", blocks: ["b1", "b2"] } });
+
+	// write playbook://<doc>/<run>/timeline?kind=note&block=b1&launch=l1&next=60&quote=m-1
+	const writeResult = await handler!.write!(
+		parseInternalUrl("playbook://book.yaml/r1/timeline?kind=note&block=b1&launch=l1&next=60&quote=m-1"),
+		"Progress update",
+	);
+	expect(writeResult?.content[0]).toEqual({ type: "text", text: '{"seq":9}' });
+	expect(s.frames.at(-1)).toMatchObject({
+		op: "post",
+		args: { run: "r1", kind: "update", text: "Progress update", block: "b1", launch: "l1", next: 60, quote: "m-1" },
+	});
+
+	// write on non-timeline fails
+	await expect(handler!.write!(parseInternalUrl("playbook://book.yaml/r1/b1"), "nope")).rejects.toThrow();
+
+	// shutdown cleans up scheme and topics
+	await h.event("session_shutdown");
+	expect(router.getHandler("playbook")).toBeUndefined();
+	expect(listToolTopics("playbook_open")).toEqual([]);
 });
 
 for (const command of ["playbook-add", "playbook-show"]) {
@@ -1057,74 +1171,80 @@ test("in-flight disconnect is Disconnected; automatic reconnect sends only hello
 
 test("tool calls require an unambiguous connected document when doc is omitted", async () => {
 	const h = await harness();
-	const none = await h.execute("playbook_read", {});
+	const none = await h.execute("playbook_compile", { blocks: ["b1"] });
 	const noneError = JSON.parse(resultText(none)).error;
 	expect(noneError.code).toBe("NoService");
 	expect(noneError.message).toContain("playbook_open --json");
-	expect(noneError.message).not.toContain("xd://");
+	expect(noneError.message).not.toContain(LEGACY_SCHEME);
 	const a = await service();
 	const b = await service();
 	await h.execute("playbook_open", { doc: a.doc });
-	const read = await h.execute("playbook_read", { run: "r1", block: "b1" });
-	expect(read.isError).toBe(false);
-	expect(a.frames.at(-1)).toMatchObject({ op: "read", args: { run: "r1", block: "b1" } });
+	const compiled = await h.execute("playbook_compile", { run: "r1", blocks: ["b1"] });
+	expect(compiled.isError).toBe(false);
+	expect(a.frames.at(-1)).toMatchObject({ op: "compile", args: { run: "r1", blocks: ["b1"] } });
 	await h.execute("playbook_open", { doc: b.doc });
 	const counts = [a.frames.length, b.frames.length];
-	const ambiguous = await h.execute("playbook_read", {});
+	const ambiguous = await h.execute("playbook_compile", { blocks: ["b1"] });
 	expect(JSON.parse(resultText(ambiguous)).error.code).toBe("NoService");
 	expect([a.frames.length, b.frames.length]).toEqual(counts);
-	await h.execute("playbook_read", { doc: b.doc });
-	expect(b.frames.at(-1)).toMatchObject({ op: "read", args: {} });
+	await h.execute("playbook_compile", { doc: b.doc, blocks: ["b1"] });
+	expect(b.frames.at(-1)).toMatchObject({ op: "compile", args: { blocks: ["b1"] } });
 });
 
-for (const [tool, params, request] of [
+for (const [tool, label, params, request] of [
 	[
-		"playbook_edit",
-		{ op: "insert", run: "r1", after: "b1", title: "New", body: "Text" },
+		"playbook_edit_structure",
+		"add task",
+		{ run: "r1", add: { after: "b1", title: "New", body: "Text" } },
 		{ op: "insert", args: { run: "r1", after: "b1", title: "New", content: { kind: "task", body: "Text" } } },
 	],
 	[
-		"playbook_edit",
-		{ op: "insert", title: "Configured", body: "Text", agent: " task:mid ", isolated: false },
+		"playbook_edit_structure",
+		"add configured task",
+		{ add: { title: "Configured", body: "Text", agent: " task:mid ", isolation: "none" } },
 		{ op: "insert", args: { title: "Configured", content: { kind: "task", body: "Text", agent: "task:mid", isolated: false } } },
 	],
 	[
-		"playbook_edit",
-		{ op: "insert_design", run: "r1", after: "b1", title: "New design", design: "## A Overview\nDraft" },
+		"playbook_edit_structure",
+		"add design in run",
+		{ run: "r1", add: { after: "b1", title: "New design", design: "## A Overview\nDraft" } },
 		{ op: "insert", args: { run: "r1", after: "b1", title: "New design", content: { kind: "design", design: "## A Overview\nDraft" } } },
 	],
 	[
-		"playbook_edit",
-		{ op: "insert_design", title: "Template design", design: "Draft" },
+		"playbook_edit_structure",
+		"add template design",
+		{ add: { title: "Template design", design: "Draft" } },
 		{ op: "insert", args: { title: "Template design", content: { kind: "design", design: "Draft" } } },
 	],
-	["playbook_read", { op: "revisions" }, { op: "revisions", args: {} }],
-	["playbook_read", { op: "revisions", run: "r1", block: "b3", after: 0 }, { op: "revisions", args: { run: "r1", block: "b3", after: 0 } }],
-	["playbook_compile", { op: "compile", run: "r1", blocks: ["b1"] }, { op: "compile", args: { run: "r1", blocks: ["b1"] } }],
-	["playbook_compile", { op: "refetch", targets: ["file:book.md"] }, { op: "refetch", args: { targets: ["file:book.md"] } }],
-	["playbook_check", { op: "inspect", blocks: ["b1"] }, { op: "inspect", args: { blocks: ["b1"] } }],
+	["playbook_compile", "compile", { run: "r1", blocks: ["b1"] }, { op: "compile", args: { run: "r1", blocks: ["b1"] } }],
+	["playbook_compile", "refetch", { refetch: true, targets: ["file:book.md"] }, { op: "refetch", args: { targets: ["file:book.md"] } }],
 	[
 		"playbook_check",
-		{ op: "report", run: "r1", blocks: ["b1"], version: "v", result: "answers", answers: [{ question: "q1", probability: 0.8 }] },
+		"report answers",
+		{ run: "r1", blocks: ["b1"], version: "v", result: "answers", answers: { q1: 0.8 } },
 		{ op: "report", args: { run: "r1", blocks: ["b1"], version: "v", result: { kind: "answers", answers: { q1: 0.8 } } } },
 	],
-	["playbook_run", { op: "start", name: "Run", update_every: 30 }, { op: "start_run", args: { name: "Run", update_every: 30 } }],
-	["playbook_run", { op: "finish", run: "r1" }, { op: "finish_run", args: { run: "r1" } }],
-	["playbook_run", { op: "list" }, { op: "runs", args: {} }],
-	["playbook_timeline", { op: "read", run: "r1", after: 0 }, { op: "timeline", args: { run: "r1", after: 0 } }],
+	[
+		"playbook_check",
+		"report pass",
+		{ run: "r1", blocks: ["b1"], version: "v", result: "pass" },
+		{ op: "report", args: { run: "r1", blocks: ["b1"], version: "v", result: { kind: "answers", answers: { missing: 0 } } } },
+	],
+	["playbook_run", "start", { start_name: "Run", update_every: 30 }, { op: "start_run", args: { name: "Run", update_every: 30 } }],
+	["playbook_run", "finish", { finish_run: "r1" }, { op: "finish_run", args: { run: "r1" } }],
 	[
 		"playbook_timeline",
-		{ op: "post", run: "r1", kind: "result", text: "Answer", block: "b1", launch: "l1", quote: "message-1" },
+		"post",
+		{ run: "r1", kind: "result", text: "Answer", block: "b1", launch: "l1", quote: "message-1" },
 		{ op: "post", args: { run: "r1", kind: "result", text: "Answer", block: "b1", launch: "l1", quote: "message-1" } },
 	],
-	["playbook_timeline", { op: "snooze", run: "r1", after: 30 }, { op: "snooze", args: { run: "r1", after: 30 } }],
-	["playbook_launch", { op: "launch", run: "r1", blocks: ["b1"] }, { op: "launch", args: { run: "r1", blocks: ["b1"] } }],
-	["playbook_launch", { op: "bind", launch: "l1", agent: "worker-1" }, { op: "bind", args: { launch: "l1", agent: "worker-1" } }],
-	["playbook_launch", { op: "info", launch: "l1" }, { op: "launch_info", args: { launch: "l1" } }],
-	["playbook_launch", { op: "rebase", launch: "l1" }, { op: "rebase", args: { launch: "l1" } }],
-	["playbook_launch", { op: "close", launch: "l1" }, { op: "close", args: { launch: "l1" } }],
+	["playbook_timeline", "snooze", { run: "r1", snooze_seconds: 30 }, { op: "snooze", args: { run: "r1", after: 30 } }],
+	["playbook_launch", "launch", { run: "r1", blocks: ["b1"] }, { op: "launch", args: { run: "r1", blocks: ["b1"] } }],
+	["playbook_launch", "bind", { bind_launch: "l1", agent: "worker-1" }, { op: "bind", args: { launch: "l1", agent: "worker-1" } }],
+	["playbook_launch", "rebase", { rebase_launch: "l1" }, { op: "rebase", args: { launch: "l1" } }],
+	["playbook_launch", "close", { close_launch: "l1" }, { op: "close", args: { launch: "l1" } }],
 ] as const) {
-	test(`${tool} ${params.op} sends the scoped K1 request without editor-only fields`, async () => {
+	test(`${tool} (${label}) sends the scoped K1 request without editor-only fields`, async () => {
 		const s = await service();
 		const h = await harness();
 		await h.execute("playbook_open", { doc: s.doc });
@@ -1157,7 +1277,7 @@ for (const orchestration of [false, true]) {
 		expect(lines).toHaveLength(3);
 		expect(lines[0]).toBe("这是 Playbook 文档服务的通知，不是用户消息");
 		expect(lines[1]).toContain(orchestration ? "playbook_launch --json '" : "await playbook.run(");
-		expect(lines[1]).not.toContain("xd://");
+		expect(lines[1]).not.toContain(LEGACY_SCHEME);
 		if (orchestration) expect(lines[1]).toContain('await playbook.exec("l<n>")');
 		else {
 			expect(lines[1]).not.toContain("playbook_launch");
@@ -1252,7 +1372,7 @@ test("launch requests made during a turn wait for its end and arrive as one noti
 	await h.event("agent_start");
 	s.push({ event: "launch_requested", data: { blocks: ["b1"] } } as EventPayload);
 	s.push({ event: "launch_requested", data: { run: "r1", blocks: ["b2"] } } as EventPayload);
-	await h.execute("playbook_run", { doc: s.doc, op: "list" });
+	await InternalUrlRouter.instance().resolve("playbook://");
 	await h.event("agent_end", { messages: [], willContinue: true });
 	expect(h.messages).toHaveLength(0);
 	h.idle = false;
@@ -1487,9 +1607,9 @@ test("a rejected edit still releases its lock and the next call receives a fresh
 			connection.send(JSON.stringify({ id: frame.id, ok: false, error: { code: "BadValue", message: "find is not unique" } }));
 		else respond(connection, frame, frame.op === "lock" ? { block } : undefined);
 	};
-	const rejected = await h.execute("playbook_edit", { op: "replace", block: "b1", find: "Body", replace: "New" });
+	const rejected = await h.execute("playbook_edit_content", { block: "b1", find: "Body", replace: "New" });
 	expect(JSON.parse(resultText(rejected))).toEqual({ error: { code: "BadValue", message: "find is not unique" } });
-	await h.execute("playbook_edit", { op: "status", block: "b1", status: "done" });
+	await h.execute("playbook_edit_structure", { meta: { block: "b1", status: "done" } });
 	expect(s.frames.map((frame) => frame.op)).toEqual(["hello", "lock", "edit", "unlock", "lock", "set", "unlock"]);
 	expect(s.frames[1]!.args).toEqual({ block: "b1" });
 	expect(s.frames[4]!.id).not.toBe(s.frames[1]!.id);
@@ -1497,15 +1617,14 @@ test("a rejected edit still releases its lock and the next call receives a fresh
 	expect(s.frames[6]!.args).toEqual({ block: "b1", request: s.frames[4]!.id });
 });
 
-test("playbook_timeline read forwards after and limit to the K1 request", async () => {
+test("playbook:// timeline read forwards after and limit to the K1 request", async () => {
 	const s = await service();
 	const h = await harness();
 	await h.execute("playbook_open", { doc: s.doc });
 	s.handler = (frame, connection) => respond(connection, frame, { entries: [{ seq: 7 }], next_after: 7 });
-	const result = await h.execute("playbook_timeline", { doc: s.doc, op: "read", run: "r1", after: 6, limit: 200 });
-	expect(result.isError).toBe(false);
+	const res = await InternalUrlRouter.instance().resolve(`playbook://${encodeURIComponent(s.doc)}/r1/timeline?after=6&limit=200`);
 	expect(s.frames.at(-1)).toMatchObject({ op: "timeline", args: { run: "r1", after: 6, limit: 200 } });
-	expect(resultText(result)).toBe('{"entries":[{"seq":7}],"next_after":7}');
+	expect(res.content).toBe('{"entries":[{"seq":7}],"next_after":7}');
 });
 
 test("tool output passes the reply's serialized result through byte-identically, canonical or not", async () => {
@@ -1513,7 +1632,7 @@ test("tool output passes the reply's serialized result through byte-identically,
 	const h = await harness();
 	await h.execute("playbook_open", { doc: s.doc });
 	s.handler = (frame, connection) => connection.send(`{"id":${JSON.stringify(frame.id)},"ok":true,"result":{ "entries" : [{"seq":9}] }}`);
-	const result = await h.execute("playbook_timeline", { doc: s.doc, op: "read" });
+	const result = await h.execute("playbook_compile", { doc: s.doc, blocks: ["b1"] });
 	expect(result.isError).toBe(false);
 	expect(resultText(result)).toBe('{ "entries" : [{"seq":9}] }');
 });
@@ -1524,9 +1643,8 @@ test("a large reply frame far above the host's write high-water mark reassembles
 	await h.execute("playbook_open", { doc: s.doc });
 	const text = `你好🌟${"x".repeat(5 * 1024 * 1024)}`;
 	s.handler = (frame, connection) => connection.send(JSON.stringify({ id: frame.id, ok: true, result: { entries: [{ seq: 1, text }] } }));
-	const result = await h.execute("playbook_timeline", { doc: s.doc, op: "read" });
-	expect(result.isError).toBe(false);
-	expect(resultText(result)).toBe(JSON.stringify({ entries: [{ seq: 1, text }] }));
+	const res = await InternalUrlRouter.instance().resolve(`playbook://${encodeURIComponent(s.doc)}/timeline`);
+	expect(res.content).toBe(JSON.stringify({ entries: [{ seq: 1, text }] }));
 });
 
 test("a bad reply line closes the connection and in-flight requests fail Disconnected", async () => {
@@ -1534,8 +1652,8 @@ test("a bad reply line closes the connection and in-flight requests fail Disconn
 	const h = await harness();
 	await h.execute("playbook_open", { doc: s.doc });
 	s.handler = (_frame, connection) => connection.send("not-json");
-	const result = await h.execute("playbook_timeline", { doc: s.doc, op: "read" });
+	const result = await h.execute("playbook_compile", { doc: s.doc, blocks: ["b1"] });
 	expect(result.isError).toBe(true);
 	expect(JSON.parse(resultText(result))).toMatchObject({ error: { code: "Disconnected" } });
-	expect(s.frames.at(-1)!.op).toBe("timeline");
+	expect(s.frames.at(-1)!.op).toBe("compile");
 });

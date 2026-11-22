@@ -31,8 +31,21 @@ function harness(context: { doc?: string; run?: string; launch?: string } = { do
 			playbook_launch: async (args) => {
 				calls.push({ kind: "tool", name: "playbook_launch", args });
 				if (toolFailure) return JSON.stringify({ error: toolFailure });
-				if (args.op === "launch") return JSON.stringify({ launch: "l1", kind: launchKind, text: "Frozen prompt", ...contract });
-				if (args.op === "info") {
+				if ("blocks" in args) return JSON.stringify({ launch: "l1", kind: launchKind, text: "Frozen prompt", ...contract });
+				if ("bind_launch" in args) {
+					binding.resolve();
+					if (holdBind) await bound.promise;
+				}
+				return "null";
+			},
+			playbook_timeline: async (args) => {
+				calls.push({ kind: "tool", name: "playbook_timeline", args });
+				return JSON.stringify({ seq: 7 });
+			},
+			read: async (args) => {
+				calls.push({ kind: "tool", name: "read", args });
+				const path = String(args.path ?? "");
+				if (path.includes("/launches/")) {
 					return JSON.stringify({
 						id: "l1",
 						run: "r2",
@@ -43,18 +56,7 @@ function harness(context: { doc?: string; run?: string; launch?: string } = { do
 						closed: info.closed ?? null,
 					});
 				}
-				if (args.op === "bind") {
-					binding.resolve();
-					if (holdBind) await bound.promise;
-				}
-				return "null";
-			},
-			playbook_timeline: async (args) => {
-				calls.push({ kind: "tool", name: "playbook_timeline", args });
-				return JSON.stringify({ seq: 7 });
-			},
-			playbook_read: async (args) => {
-				calls.push({ kind: "tool", name: "playbook_read", args });
+				if (path.includes("/timeline")) return JSON.stringify({ seq: 7 });
 				return JSON.stringify({ title: "Book", blocks: [] });
 			},
 		},
@@ -100,21 +102,25 @@ function harness(context: { doc?: string; run?: string; launch?: string } = { do
 	};
 }
 
-const close = (launch = "l1", doc = "/book.yaml"): Call => ({ kind: "tool", name: "playbook_launch", args: { doc, op: "close", launch } });
+const close = (launch = "l1", doc = "/book.yaml"): Call => ({
+	kind: "tool",
+	name: "playbook_launch",
+	args: { doc, close_launch: launch },
+});
 
 test("agent() failing on a Launch it created closes that Launch and names the agent option; spawn leaves an existing Launch open", async () => {
 	const h = harness();
 	h.agentFailure = new Error('Agent "task" is disabled in settings');
 	await expect(h.playbook.agent({ blocks: ["b1"] })).rejects.toThrow(/Agent "task" is disabled in settings[\s\S]*agent: "task:mid"/);
 	expect(h.calls).toEqual([
-		{ kind: "tool", name: "playbook_launch", args: { doc: "/book.yaml", run: "r1", op: "launch", blocks: ["b1"] } },
+		{ kind: "tool", name: "playbook_launch", args: { doc: "/book.yaml", run: "r1", blocks: ["b1"] } },
 		{ kind: "agent", prompt: "Frozen prompt", options: {} },
 		close(),
 	]);
 	h.calls.length = 0;
 	await expect(h.playbook.spawn("l1")).rejects.toThrow('Agent "task" is disabled in settings');
-	expect(h.calls.some((call) => call.kind === "tool" && call.args.op === "close")).toBe(false);
-	expect(h.calls.some((call) => call.kind === "tool" && call.args.op === "bind")).toBe(false);
+	expect(h.calls.some((call) => call.kind === "tool" && "close_launch" in call.args)).toBe(false);
+	expect(h.calls.some((call) => call.kind === "tool" && "bind_launch" in call.args)).toBe(false);
 });
 
 test("agent launches, spawns and completes binding before exposing the handle or waiting", async () => {
@@ -124,9 +130,9 @@ test("agent launches, spawns and completes binding before exposing the handle or
 	const starting = h.playbook.agent({ blocks: ["b1"], ...options });
 	await h.binding;
 	expect(h.calls).toEqual([
-		{ kind: "tool", name: "playbook_launch", args: { doc: "/book.yaml", run: "r1", op: "launch", blocks: ["b1"] } },
+		{ kind: "tool", name: "playbook_launch", args: { doc: "/book.yaml", run: "r1", blocks: ["b1"] } },
 		{ kind: "agent", prompt: "Frozen prompt", options },
-		{ kind: "tool", name: "playbook_launch", args: { doc: "/book.yaml", op: "bind", launch: "l1", agent: "worker-1" } },
+		{ kind: "tool", name: "playbook_launch", args: { doc: "/book.yaml", bind_launch: "l1", agent: "worker-1" } },
 	]);
 	h.bound.resolve();
 	const spawned = await starting;
@@ -141,7 +147,7 @@ test("agent launches, spawns and completes binding before exposing the handle or
 		{
 			kind: "tool",
 			name: "playbook_timeline",
-			args: { doc: "/book.yaml", run: "r1", op: "post", kind: "result", text: JSON.stringify(answer, null, 2), launch: "l1", block: "b1" },
+			args: { doc: "/book.yaml", run: "r1", kind: "result", text: JSON.stringify(answer, null, 2), launch: "l1", block: "b1" },
 		},
 		close(),
 	]);
@@ -177,14 +183,14 @@ test("run inherits the preset contract, records on the only block and closes its
 	h.outcome.resolve("Done");
 	expect(await running).toBe("Done");
 	expect(h.calls).toEqual([
-		{ kind: "tool", name: "playbook_launch", args: { doc: "/book.yaml", run: "r1", op: "launch", blocks: ["b2"] } },
+		{ kind: "tool", name: "playbook_launch", args: { doc: "/book.yaml", run: "r1", blocks: ["b2"] } },
 		{ kind: "agent", prompt: "Frozen prompt", options: { agent: "task:mid" } },
-		{ kind: "tool", name: "playbook_launch", args: { doc: "/book.yaml", op: "bind", launch: "l1", agent: "worker-1" } },
+		{ kind: "tool", name: "playbook_launch", args: { doc: "/book.yaml", bind_launch: "l1", agent: "worker-1" } },
 		{ kind: "wait" },
 		{
 			kind: "tool",
 			name: "playbook_timeline",
-			args: { doc: "/book.yaml", run: "r1", op: "post", kind: "result", text: "Done", launch: "l1", block: "b2" },
+			args: { doc: "/book.yaml", run: "r1", kind: "result", text: "Done", launch: "l1", block: "b2" },
 		},
 		close(),
 	]);
@@ -203,7 +209,7 @@ test("wait rejection posts a failure on the only block, closes the owned Launch,
 		{
 			kind: "tool",
 			name: "playbook_timeline",
-			args: { doc: "/book.yaml", run: "r1", op: "post", kind: "failure", text: "subagent failed", launch: "l1", block: "b1" },
+			args: { doc: "/book.yaml", run: "r1", kind: "failure", text: "subagent failed", launch: "l1", block: "b1" },
 		},
 		close(),
 	]);
@@ -219,9 +225,9 @@ test("result leaves the Launch open with close: false, and a multi-block result 
 	expect(h.calls.at(-1)).toEqual({
 		kind: "tool",
 		name: "playbook_timeline",
-		args: { doc: "/book.yaml", run: "r1", op: "post", kind: "result", text: "Both", launch: "l1" },
+		args: { doc: "/book.yaml", run: "r1", kind: "result", text: "Both", launch: "l1" },
 	});
-	expect(h.calls.filter((call) => call.kind === "tool" && call.args.op === "close")).toEqual([]);
+	expect(h.calls.filter((call) => call.kind === "tool" && "close_launch" in call.args)).toEqual([]);
 });
 
 test("a spawned subagent shares the Launch: its result keeps the Launch open unless close: true", async () => {
@@ -236,7 +242,7 @@ test("a spawned subagent shares the Launch: its result keeps the Launch open unl
 	expect(kept.calls.at(-1)).toEqual({
 		kind: "tool",
 		name: "playbook_timeline",
-		args: { doc: "/book.yaml", run: "r2", op: "post", kind: "result", text: "Part", launch: "l1", block: "b4" },
+		args: { doc: "/book.yaml", run: "r2", kind: "result", text: "Part", launch: "l1", block: "b4" },
 	});
 	const closing = harness();
 	const last = await closing.playbook.spawn("l1");
@@ -251,16 +257,13 @@ test("agent on an orchestration block closes the Launch it just created before r
 	const agent = harness();
 	agent.launchKind = "orchestration";
 	await expect(agent.playbook.agent({ blocks: ["b1"] })).rejects.toThrow(
-		/是编排块（Launch l1 已关闭）：请用 `playbook_launch --json '\{"doc":"\/book\.yaml","run":"r1","op":"launch","blocks":\["b1"\]\}'`/,
+		/是编排块（Launch l1 已关闭）：请用 `playbook_launch --json '\{"doc":"\/book\.yaml","run":"r1","blocks":\["b1"\]\}'`/,
 	);
-	expect(agent.calls).toEqual([
-		{ kind: "tool", name: "playbook_launch", args: { doc: "/book.yaml", run: "r1", op: "launch", blocks: ["b1"] } },
-		close(),
-	]);
+	expect(agent.calls).toEqual([{ kind: "tool", name: "playbook_launch", args: { doc: "/book.yaml", run: "r1", blocks: ["b1"] } }, close()]);
 	const spawn = harness();
 	spawn.launchKind = "orchestration";
 	await expect(spawn.playbook.spawn("l1")).rejects.toThrow("是编排 Launch");
-	expect(spawn.calls).toEqual([{ kind: "tool", name: "playbook_launch", args: { doc: "/book.yaml", op: "info", launch: "l1" } }]);
+	expect(spawn.calls).toEqual([{ kind: "tool", name: "read", args: { path: "playbook://%2Fbook.yaml/launches/l1:raw" } }]);
 });
 
 for (const [blocks, explicit, expected] of [
@@ -282,7 +285,6 @@ for (const [blocks, explicit, expected] of [
 				args: {
 					doc: "/book.yaml",
 					run: "r1",
-					op: "post",
 					kind: "result",
 					text: "Result text",
 					launch: "l1",
@@ -300,9 +302,9 @@ test("spawn uses the Launch's latest baseline and Run rather than the coordinato
 	const spawned = await h.playbook.spawn("l1", { doc: "/other.yaml", label: "More work" });
 	expect(spawned).toMatchObject({ doc: "/other.yaml", run: "r2", launch: "l1" });
 	expect(h.calls).toEqual([
-		{ kind: "tool", name: "playbook_launch", args: { doc: "/other.yaml", op: "info", launch: "l1" } },
+		{ kind: "tool", name: "read", args: { path: "playbook://%2Fother.yaml/launches/l1:raw" } },
 		{ kind: "agent", prompt: "Rebased prompt", options: { label: "More work" } },
-		{ kind: "tool", name: "playbook_launch", args: { doc: "/other.yaml", op: "bind", launch: "l1", agent: "worker-1" } },
+		{ kind: "tool", name: "playbook_launch", args: { doc: "/other.yaml", bind_launch: "l1", agent: "worker-1" } },
 	]);
 	const initial = harness();
 	await initial.playbook.spawn("l1");
@@ -313,7 +315,7 @@ test("spawn refuses a closed Launch before starting a subagent", async () => {
 	const h = harness();
 	h.info = { closed: { at: 1, by: "coordinator" } };
 	await expect(h.playbook.spawn("l1")).rejects.toThrow("l1 已关闭");
-	expect(h.calls).toEqual([{ kind: "tool", name: "playbook_launch", args: { doc: "/book.yaml", op: "info", launch: "l1" } }]);
+	expect(h.calls).toEqual([{ kind: "tool", name: "read", args: { path: "playbook://%2Fbook.yaml/launches/l1:raw" } }]);
 });
 
 test("tool errors propagate without starting an agent; omitted run targets the template", async () => {
@@ -324,7 +326,7 @@ test("tool errors propagate without starting an agent; omitted run targets the t
 	const noRun = harness({});
 	const spawned = await noRun.playbook.agent({ blocks: ["b1"] });
 	expect(spawned.run).toBeUndefined();
-	expect(noRun.calls[0]).toEqual({ kind: "tool", name: "playbook_launch", args: { op: "launch", blocks: ["b1"] } });
+	expect(noRun.calls[0]).toEqual({ kind: "tool", name: "playbook_launch", args: { blocks: ["b1"] } });
 });
 
 test("read, timeline and post decode JSON text and respect explicit scope overrides", async () => {
@@ -333,12 +335,12 @@ test("read, timeline and post decode JSON text and respect explicit scope overri
 	expect(await h.playbook.timeline({ doc: "/other.yaml", run: "r2", after: 0 })).toEqual({ seq: 7 });
 	expect(await h.playbook.post({ run: "r2", kind: "update", text: "Working", next: 30 })).toEqual({ seq: 7 });
 	expect(h.calls).toEqual([
-		{ kind: "tool", name: "playbook_read", args: { doc: "/book.yaml", run: "r1", block: "b1" } },
-		{ kind: "tool", name: "playbook_timeline", args: { doc: "/other.yaml", run: "r2", op: "read", after: 0 } },
+		{ kind: "tool", name: "read", args: { path: "playbook://%2Fbook.yaml/r1/b1:raw" } },
+		{ kind: "tool", name: "read", args: { path: "playbook://%2Fother.yaml/r2/timeline?after=0:raw" } },
 		{
 			kind: "tool",
 			name: "playbook_timeline",
-			args: { doc: "/book.yaml", run: "r2", op: "post", kind: "update", text: "Working", next: 30 },
+			args: { doc: "/book.yaml", run: "r2", kind: "update", text: "Working", next: 30 },
 		},
 	]);
 });
@@ -354,7 +356,7 @@ test("result decodes the eval agent wait JSON envelope before returning or recor
 		{
 			kind: "tool",
 			name: "playbook_timeline",
-			args: { doc: "/book.yaml", run: "r1", op: "post", kind: "result", text: "hello", launch: "l1", block: "b1" },
+			args: { doc: "/book.yaml", run: "r1", kind: "result", text: "hello", launch: "l1", block: "b1" },
 		},
 		close(),
 	]);
@@ -374,8 +376,13 @@ test("template helper calls omit run and stop cancels handles before resetting o
 		tool: {
 			playbook_launch: async (args) => {
 				calls.push({ op: "launch", args });
-				if (args.op === "launch") return { launch: "l999", kind: "prompt", text: "Prompt" };
-				if (args.op === "info")
+				if ("blocks" in args) return { launch: "l999", kind: "prompt", text: "Prompt" };
+				return null;
+			},
+			read: async (args) => {
+				calls.push({ op: "read", args });
+				const path = String(args.path ?? "");
+				if (path.includes("/launches/")) {
 					return {
 						run: null,
 						kind: "prompt",
@@ -384,14 +391,11 @@ test("template helper calls omit run and stop cancels handles before resetting o
 						snapshot: { result: { text: "Prompt" } },
 						closed: null,
 					};
-				return null;
+				}
+				return { status: path.includes("/b1") ? "running" : "done" };
 			},
-			playbook_read: async (args) => {
-				calls.push({ op: "read", args });
-				return { status: args.block === "b1" ? "running" : "done" };
-			},
-			playbook_edit: async (args) => {
-				calls.push({ op: "edit", args });
+			playbook_edit_structure: async (args) => {
+				calls.push({ op: "edit_structure", args });
 				return null;
 			},
 		},
@@ -399,12 +403,12 @@ test("template helper calls omit run and stop cancels handles before resetting o
 	const firstCell = createPlaybook(deps);
 	const spawned = await firstCell.agent({ blocks: ["b1", "b2"] });
 	expect(spawned.run).toBeUndefined();
-	expect(calls[0]).toEqual({ op: "launch", args: { doc: "/template.yaml", op: "launch", blocks: ["b1", "b2"] } });
+	expect(calls[0]).toEqual({ op: "launch", args: { doc: "/template.yaml", blocks: ["b1", "b2"] } });
 	calls.length = 0;
 	const laterCell = createPlaybook(deps);
 	expect(await laterCell.stop("l999")).toEqual({ cancelled: ["stop-worker"] });
-	expect(calls.map((call) => call.op)).toEqual(["cancel", "launch", "read", "edit", "read"]);
-	expect(calls[3]).toEqual({ op: "edit", args: { doc: "/template.yaml", op: "status", block: "b1", status: "todo" } });
+	expect(calls.map((call) => call.op)).toEqual(["cancel", "read", "read", "edit_structure", "read"]);
+	expect(calls[3]).toEqual({ op: "edit_structure", args: { doc: "/template.yaml", meta: { block: "b1", status: "todo" } } });
 	expect(calls.every((call) => call.args === undefined || !("run" in call.args))).toBe(true);
-	await expect(laterCell.stop("l999")).rejects.toThrow(/playbook_edit --json '\{"op":"status","block":"<id>","status":"todo"\}'/);
+	await expect(laterCell.stop("l999")).rejects.toThrow(/playbook_edit_structure --json '\{"meta":\{"block":"<id>","status":"todo"\}\}'/);
 });

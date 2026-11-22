@@ -1,17 +1,26 @@
 import type * as zod from "@oh-my-pi/omptype/zod";
 import type { EvalToolParams } from "@oh-my-pi/pi-coding-agent";
 import { tr } from "../../omomp-shared/i18n";
-import { parseBlockId, parseLaunchId, parseRunId } from "../domain/model";
+import {
+	type BlockId,
+	type JudgeReport,
+	type LaunchId,
+	parseBlockId,
+	parseLaunchId,
+	parseRunId,
+	type RecordKind,
+	type RunId,
+	type Status,
+} from "../domain/model";
 
 type Zod = typeof zod;
 
 const BLOCK_ID = /^b[1-9][0-9]*$/;
 const RUN_ID = /^r[1-9][0-9]*$/;
 const LAUNCH_ID = /^l[1-9][0-9]*$/;
-const PANEL_ID = /^[A-Z][0-9]*$/;
+const PANEL_TARGET = /^(?:[A-Z][0-9]*|where|what|how)$/;
 
 export function toolParameters(z: Zod) {
-	const doc = z.string().optional();
 	const block = z
 		.string()
 		.regex(BLOCK_ID)
@@ -36,25 +45,22 @@ export function toolParameters(z: Zod) {
 			if (id === null) throw new Error(tr("Invalid Launch id", "Launch id 无效"));
 			return id;
 		});
-	const kind = z.enum(["update", "result", "failure", "retrospective"]);
-	const agentName = z.string().trim().min(1);
 	const positive = z.number().int().positive();
-	const report = z.union([
-		z.object({ kind: z.literal("answers"), answers: z.record(z.string(), z.number()) }).strict(),
-		z.object({ kind: z.literal("judge_unavailable") }).strict(),
-	]);
+	const agentName = z.string().trim().min(1);
 
-	// op-conditional fields go optional at the end of their chain so the marker
-	// survives `.describe()`.
 	const docField = z
 		.string()
 		.describe("Playbook file path. Omit while exactly one Playbook is open in this session; that one is used.")
 		.optional();
 	const runField = z.string().regex(RUN_ID).describe("Run id `r<n>` (for example `r2`). Omit to work in the Playbook itself.").optional();
 	const blockField = z.string().regex(BLOCK_ID);
-	const launchField = z.string().regex(LAUNCH_ID).describe("Launch id `l<n>` (for example `l2`).").optional();
+	const launchField = z.string().regex(LAUNCH_ID);
 	const blocksField = z.array(z.string().regex(BLOCK_ID));
+	const isolationField = z.enum(["none", "worktree"]);
+	const statusField = z.enum(["todo", "running", "done"]);
+	const recordKindField = z.enum(["update", "result", "failure", "retrospective"]);
 
+	// Wire schemas for K1 IPC validation
 	const site = z.object({ block, reference: z.string() });
 	const compileError = z.union([
 		z.object({ kind: z.literal("UnknownBlock"), block, at: site }),
@@ -100,7 +106,7 @@ export function toolParameters(z: Zod) {
 		}),
 		z.object({
 			event: z.literal("status_changed"),
-			data: z.object({ run: run.optional(), block, status: z.enum(["todo", "running", "done"]) }),
+			data: z.object({ run: run.optional(), block, status: statusField }),
 		}),
 		z.object({ event: z.literal("update_due"), data: z.object({ run, due: z.number(), last_update: z.number().nullable() }) }),
 		z.object({ event: z.literal("interrupted"), data: z.object({ run: run.optional(), block, request: z.string() }) }),
@@ -151,7 +157,7 @@ export function toolParameters(z: Zod) {
 	const runsResult = z.object({ runs: z.array(summary) });
 	const helloResult = z.object({ blocks: z.array(block), runs: z.array(summary), pane: z.string().optional() });
 	const progressFields = {
-		status: z.enum(["todo", "running", "done"]).optional(),
+		status: statusField.optional(),
 		report: z.string().optional(),
 		task: z.literal(false).optional(),
 	};
@@ -186,439 +192,609 @@ export function toolParameters(z: Zod) {
 		reset: z.boolean().optional(),
 	});
 
-	const openInternal = z.object({ doc: z.string() }).strict();
-
-	const readBranches = {
-		read: z.object({ doc, run: run.optional(), block: block.optional() }).strict(),
-		revisions: z
-			.object({
-				doc,
-				run: run.optional(),
-				op: z.literal("revisions"),
-				block: block.optional(),
-				after: z.number().int().nonnegative().optional(),
-			})
-			.strict(),
-	};
-	const readInternal = z.union([readBranches.read, readBranches.revisions]);
-
-	const editBranches = {
-		title: z.object({ doc, run: run.optional(), op: z.literal("title"), block, value: z.string() }).strict(),
-		status: z.object({ doc, run: run.optional(), op: z.literal("status"), block, value: z.enum(["todo", "running", "done"]) }).strict(),
-		task: z.object({ doc, run: run.optional(), op: z.literal("task"), block, value: z.boolean() }).strict(),
-		replace: z.object({ doc, run: run.optional(), op: z.literal("replace"), block, find: z.string(), replace: z.string() }).strict(),
-		write: z.object({ doc, run: run.optional(), op: z.literal("write"), block, text: z.string() }).strict(),
-		panel: z
-			.object({ doc, run: run.optional(), op: z.literal("panel"), block, panel: z.string().regex(PANEL_ID), text: z.string() })
-			.strict(),
-		insert: z
-			.object({
-				doc,
-				run: run.optional(),
-				op: z.literal("insert"),
-				after: block.optional(),
-				title: z.string(),
-				body: z.string(),
-				agent: agentName.optional(),
-				isolated: z.boolean().optional(),
-			})
-			.strict(),
-		insert_design: z
-			.object({ doc, run: run.optional(), op: z.literal("insert_design"), after: block.optional(), title: z.string(), design: z.string() })
-			.strict(),
-		delete: z.object({ doc, run: run.optional(), op: z.literal("delete"), block }).strict(),
-		move: z.object({ doc, run: run.optional(), op: z.literal("move"), block, after: block.nullable() }).strict(),
-		agent: z.object({ doc, run: run.optional(), op: z.literal("agent"), block, value: agentName.nullable() }).strict(),
-		isolated: z.object({ doc, run: run.optional(), op: z.literal("isolated"), block, value: z.boolean().nullable() }).strict(),
-	};
-	const editInternal = z.union(
-		Object.values(editBranches) as [
-			typeof editBranches.title,
-			typeof editBranches.status,
-			typeof editBranches.task,
-			typeof editBranches.replace,
-			typeof editBranches.write,
-			typeof editBranches.panel,
-			typeof editBranches.insert,
-			typeof editBranches.insert_design,
-			typeof editBranches.delete,
-			typeof editBranches.move,
-			typeof editBranches.agent,
-			typeof editBranches.isolated,
-		],
-	);
-
-	const compileBranches = {
-		compile: z.object({ doc, run: run.optional(), op: z.literal("compile"), blocks: z.array(block) }).strict(),
-		refetch: z.object({ doc, run: run.optional(), op: z.literal("refetch"), targets: z.array(z.string()) }).strict(),
-	};
-	const _compileInternal = z.union([compileBranches.compile, compileBranches.refetch]);
-
-	const checkBranches = {
-		inspect: z.object({ doc, run: run.optional(), op: z.literal("inspect"), blocks: z.array(block) }).strict(),
-		report: z
-			.object({ doc, run: run.optional(), op: z.literal("report"), blocks: z.array(block), version: z.string(), result: report })
-			.strict(),
-	};
-	const checkInternal = z.union([checkBranches.inspect, checkBranches.report]);
-
-	const runBranches = {
-		start: z.object({ doc, op: z.literal("start"), name: z.string(), update_every: positive.optional() }).strict(),
-		finish: z.object({ doc, op: z.literal("finish"), run }).strict(),
-		list: z.object({ doc, op: z.literal("list") }).strict(),
-	};
-	const _runInternal = z.union([runBranches.start, runBranches.finish, runBranches.list]);
-
-	const timelineBranches = {
-		read: z
-			.object({
-				doc,
-				op: z.literal("read"),
-				run: run.optional(),
-				after: z.number().int().nonnegative().optional(),
-				limit: z.number().int().positive().optional(),
-			})
-			.strict(),
-		post: z
-			.object({
-				doc,
-				op: z.literal("post"),
-				run: run.optional(),
-				kind,
-				text: z.string(),
-				block: block.optional(),
-				launch: launch.optional(),
-				next: positive.optional(),
-				quote: z.string().optional(),
-			})
-			.strict(),
-		snooze: z.object({ doc, op: z.literal("snooze"), run, after: positive }).strict(),
-	};
-	const _timelineInternal = z.union([timelineBranches.read, timelineBranches.post, timelineBranches.snooze]);
-
-	const launchBranches = {
-		launch: z.object({ doc, op: z.literal("launch"), run: run.optional(), blocks: z.array(block) }).strict(),
-		bind: z.object({ doc, op: z.literal("bind"), launch, agent: z.string() }).strict(),
-		info: z.object({ doc, op: z.literal("info"), launch }).strict(),
-		rebase: z.object({ doc, op: z.literal("rebase"), launch }).strict(),
-		close: z.object({ doc, op: z.literal("close"), launch }).strict(),
-	};
-	const _launchInternal = z.union([
-		launchBranches.launch,
-		launchBranches.bind,
-		launchBranches.info,
-		launchBranches.rebase,
-		launchBranches.close,
-	]);
-
+	// Flat tool parameter schemas (zero `op` enums)
 	const openParams = z
 		.object({
 			doc: z.string().describe("Playbook file path to open, for example `/home/me/book.yaml`."),
 		})
 		.strict();
 
-	const readParams = z
+	const editContentParams = z
 		.object({
-			op: z
-				.enum(["read", "revisions"])
-				.optional()
-				.describe("`revisions` lists the person's change requests for design blocks; `read` or omit for a normal read."),
 			doc: docField,
 			run: runField,
-			block: blockField.describe("Block id `b<n>` (for example `b3`). Omit to read all blocks.").optional(),
-			after: z
-				.number()
-				.int()
-				.nonnegative()
-				.describe(
-					"Revision sequence number (0, 1, 2, …): only requests with a larger `seq` are returned. `revisions` only; omit to list all.",
-				)
+			block: blockField.describe("Block id `b<n>` to edit (for example `b3`)."),
+			title: z.string().describe("New block title.").optional(),
+			body: z.string().describe("Replace the entire body of a task block (Markdown).").optional(),
+			design: z.string().describe("Replace the entire design of a design block (draft format). Never edits requirement.").optional(),
+			panel: z
+				.string()
+				.regex(PANEL_TARGET)
+				.describe("Panel letter ID (`A`, `B`, `A1`, …) or role (`where`, `what`, `how`) to replace with `text`.")
 				.optional(),
+			text: z
+				.string()
+				.describe("Replacement text: whole block body/design, or whole panel starting with `## <ID> Title` when `panel` is set.")
+				.optional(),
+			find: z.string().describe("Exact text occurring once in the block's body or design (requires `replace`).").optional(),
+			replace: z.string().describe("Replacement text for `find`.").optional(),
 		})
 		.strict();
 
-	const editParams = z
+	const editStructureParams = z
 		.object({
-			op: z
-				.enum(["title", "status", "task", "replace", "write", "panel", "insert", "insert_design", "delete", "move", "agent", "isolated"])
-				.describe("The change to make. Each value needs the fields its own note names; a field of another op is rejected."),
 			doc: docField,
 			run: runField,
-			block: blockField
-				.describe(
-					"Block id `b<n>` (for example `b3`): the block to change (`title`, `status`, `task`, `replace`, `write`, `panel`, `delete`, `move`, `agent`, `isolated`); not used by `insert` or `insert_design`.",
-				)
+			add: z
+				.object({
+					title: z.string().describe("Title of the new block."),
+					body: z.string().describe("Task block body (Markdown). Provide either `body` or `design`, not both.").optional(),
+					design: z
+						.string()
+						.describe("Design block initial draft (requirement starts empty). Provide either `body` or `design`.")
+						.optional(),
+					after: blockField.describe("Insert after block `b<n>`. Omit to append at the end.").optional(),
+					at_top: z.boolean().describe("Insert at the top of the Playbook (cannot be combined with `after`).").optional(),
+					agent: z.string().describe("Default subagent name for a new task block.").optional(),
+					isolation: isolationField.describe('Worktree isolation preset for a new task block: `"none"` or `"worktree"`.').optional(),
+				})
+				.strict()
+				.describe("Add a new task or design block.")
 				.optional(),
-			after: z
-				.string()
-				.regex(BLOCK_ID)
-				.describe(
-					'Block id `b<n>`: insert the new block after it (`insert`, `insert_design`; omit to append at the end) or place the moved block after it (`move` with `position: "after"`).',
-				)
+			move: z
+				.object({
+					block: blockField.describe("Block id `b<n>` to move."),
+					after: blockField.describe("Place the moved block after `b<n>`.").optional(),
+					at_top: z.boolean().describe("Move the block to the top (cannot be combined with `after`).").optional(),
+				})
+				.strict()
+				.describe("Reorder an existing block.")
 				.optional(),
-			position: z
-				.enum(["top", "after"])
-				.optional()
-				.describe("Where to put the moved block: `top` for the beginning, `after` to follow `after`. `move` only."),
-			title: z
-				.string()
-				.describe("Title text: the new title (`title`), or the title of the new block (`insert`, `insert_design`).")
-				.optional(),
-			body: z.string().describe("Body of the new task block, in Markdown; `insert` only.").optional(),
-			design: z.string().describe("Initial design of the new design block, in draft format; `insert_design` only.").optional(),
-			text: z
-				.string()
-				.describe("New text, written whole: the block's body or design (`write`), or one panel's whole text (`panel`).")
-				.optional(),
-			find: z.string().describe("Text that must occur exactly once in the block's body or design; `replace` only.").optional(),
-			replace: z.string().describe("Replacement for `find`; `replace` only.").optional(),
-			panel: z.string().regex(PANEL_ID).describe("Panel letter id `A`, `A1`, … as written in the panel heading; `panel` only.").optional(),
-			agent: z
-				.string()
-				.describe(
-					"Task block's default subagent name: the new default (`agent`) or the new block's default (`insert`). Omit for `insert` to use the session default; `agent` with `clear: true` is rejected.",
-				)
-				.optional(),
-			isolated: z
-				.boolean()
-				.describe("Whether that default subagent works in its own worktree; `insert` only. Use `isolation` to change an existing block.")
-				.optional(),
-			isolation: z
-				.enum(["isolated", "shared", "default"])
-				.optional()
-				.describe("New isolated setting of an existing task block: own worktree, shared worktree, or no preset. `isolated` only."),
-			status: z
-				.enum(["todo", "running", "done"])
-				.optional()
-				.describe("New status; `status` only. The subagent that runs a block writes its own status; set it only to correct one."),
-			tracked: z
-				.boolean()
-				.describe(
-					"`false` makes a task block untracked (no status, not launchable, not counted); `true` tracks it again from `todo`. `task` only.",
-				)
-				.optional(),
-			clear: z
-				.boolean()
-				.describe(
-					"`true` clears the task block's default agent; `agent` only, and not together with `agent`. `false` is the same as omitting it.",
-				)
+			remove_block: blockField.describe("Block id `b<n>` to remove.").optional(),
+			meta: z
+				.object({
+					block: blockField.describe("Block id `b<n>` whose metadata to update."),
+					agent: z.string().nullable().describe("Default subagent name for a task block, or `null` to clear.").optional(),
+					isolation: isolationField
+						.nullable()
+						.describe('Worktree isolation: `"worktree"`, `"none"`, or `null` to clear preset.')
+						.optional(),
+					status: statusField
+						.describe("Override block status (`todo`, `running`, `done`). Subagents set their own status normally.")
+						.optional(),
+					tracked: z
+						.boolean()
+						.describe("`false` marks a task block untracked (`task: false`); `true` tracks it again from `todo`.")
+						.optional(),
+				})
+				.strict()
+				.describe("Update block metadata (agent, isolation, status, tracked).")
 				.optional(),
 		})
 		.strict();
 
 	const compileParams = z
 		.object({
-			op: z
-				.enum(["compile", "refetch"])
-				.describe("`compile` renders the prompt the blocks produce; `refetch` fetches external references again."),
 			doc: docField,
 			run: runField,
-			blocks: blocksField.describe('Block ids `b<n>` to compile, for example `["b1", "b3"]`; `compile` only.').optional(),
+			blocks: blocksField.describe('Block ids `b<n>` to compile into their final prompt, e.g. `["b1", "b3"]`.').optional(),
 			targets: z
 				.array(z.string())
-				.describe("External reference targets to fetch again, exactly as compiled: `file:<path>` or an `https://` URL. `refetch` only.")
+				.describe("External reference targets to refetch (`file:<path>` or `https://` URL); pair with `refetch: true`.")
 				.optional(),
+			refetch: z.boolean().describe("Set `true` to refetch external `targets` before/instead of compiling.").optional(),
 		})
 		.strict();
 
 	const checkParams = z
 		.object({
-			op: z
-				.enum(["inspect", "report"])
-				.describe("`inspect` returns findings, judge questions and a `version`; `report` records the judge's answers for that version."),
 			doc: docField,
 			run: runField,
-			blocks: blocksField.describe('Block ids `b<n>` to check, for example `["b1", "b3"]`; `inspect` and `report`.').optional(),
-			version: z.string().describe("The `version` the matching `inspect` returned; `report` only.").optional(),
+			blocks: blocksField.describe("Block ids `b<n>` that were inspected. Omit to target all blocks.").optional(),
+			version: z.string().describe("Version hash returned by `read playbook://<doc>[/<run>]/checks`."),
 			result: z
-				.enum(["answers", "judge_unavailable"])
-				.optional()
-				.describe("`answers` reports judged questions in `answers`; `judge_unavailable` marks them not judged. `report` only."),
+				.enum(["answers", "pass", "fail", "judge_unavailable"])
+				.describe('Verdict: `"answers"` (with `answers` map), `"pass"`, `"fail"`, or `"judge_unavailable"`.'),
 			answers: z
-				.array(
-					z
-						.object({
-							question: z.string().describe("Question id, as returned by `inspect`."),
-							probability: z.number().describe("Probability 0–1 that the answer is yes; 0.5 or more counts as failed."),
-						})
-						.strict(),
-				)
-				.describe("One entry per judge question; required when `result` is `answers`.")
+				.record(z.string(), z.number().min(0).max(1))
+				.describe("Map of question id → yes probability (0–1; >= 0.5 fails). Required when `result` is `answers`.")
 				.optional(),
 		})
 		.strict();
 
 	const runParams = z
 		.object({
-			op: z
-				.enum(["start", "finish", "list"])
-				.describe("`start` copies the Playbook into a new Run; `finish` ends a Run; `list` returns Run summaries."),
 			doc: docField,
-			name: z.string().describe("Name of the new Run; `start` only.").optional(),
-			update_every: z.number().int().positive().describe("Seconds between update reminders in the new Run; `start` only.").optional(),
-			run: z.string().regex(RUN_ID).describe("Run id `r<n>` (for example `r2`): the Run to finish. `finish` only.").optional(),
+			start_name: z.string().describe("Start a new Run with this name (copies Playbook with fresh `todo` status).").optional(),
+			update_every: z.number().int().positive().describe("Seconds between update reminders in the new Run (with `start_name`).").optional(),
+			finish_run: z.string().regex(RUN_ID).describe("Run id `r<n>` to finish (closes Launches and locks blocks).").optional(),
 		})
 		.strict();
 
 	const timelineParams = z
 		.object({
-			op: z
-				.enum(["read", "post", "snooze"])
-				.describe("`read` lists entries; `post` appends a record; `snooze` postpones a Run's update reminder."),
 			doc: docField,
-			run: z
-				.string()
-				.regex(RUN_ID)
-				.describe(
-					"Run id `r<n>` (for example `r2`) to read or post in; required for `snooze`. Omit otherwise to work in the Playbook itself.",
-				)
-				.optional(),
-			after: z
-				.number()
-				.int()
-				.nonnegative()
-				.describe(
-					"Entry sequence number: for `read`, return entries with a larger `seq` (pass `next_after` from the last page); for `snooze`, postpone the reminder by this many seconds.",
-				)
-				.optional(),
-			limit: z
-				.number()
-				.int()
-				.positive()
-				.describe("Maximum entries to return; `read` only. A truncated page returns `next_after`.")
-				.optional(),
-			kind: z.enum(["update", "result", "failure", "retrospective"]).optional().describe("Record kind; `post` only."),
-			text: z.string().describe("Record text; `post` only.").optional(),
-			block: blockField.describe("Block id `b<n>` the record is about; `post` only.").optional(),
-			launch: launchField.describe("Launch id `l<n>` the record is about; `post` only.").optional(),
-			next: z.number().int().positive().describe("Seconds until the next update reminder; `post` only, for a Run's `update`.").optional(),
-			quote: z.string().describe("Session message id this record quotes; `post` only.").optional(),
+			run: runField,
+			snooze_seconds: z.number().int().positive().describe("Postpone this Run's update reminder by N seconds (requires `run`).").optional(),
+			kind: recordKindField.describe("Record kind to append (requires `text`).").optional(),
+			text: z.string().describe("Record text to append (requires `kind`).").optional(),
+			block: blockField.describe("Block id `b<n>` the record is about.").optional(),
+			launch: launchField.describe("Launch id `l<n>` the record is about.").optional(),
+			next: z.number().int().positive().describe("Seconds until the next update reminder (for a Run's `update`).").optional(),
+			quote: z.string().describe("Session message id this record quotes.").optional(),
 		})
 		.strict();
 
 	const launchParams = z
 		.object({
-			op: z
-				.enum(["launch", "bind", "info", "rebase", "close"])
-				.describe("`launch` freezes blocks into a Launch; the other values work on an existing Launch."),
 			doc: docField,
 			run: runField,
-			blocks: blocksField.describe('Root block ids `b<n>` of the Launch, for example `["b1", "b3"]`; `launch` only.').optional(),
-			launch: launchField.describe("Launch id `l<n>` the op works on; `bind`, `info`, `rebase` and `close`.").optional(),
-			agent: z.string().describe("Name of the subagent working from the Launch; `bind` only.").optional(),
+			blocks: blocksField.describe('Root block ids `b<n>` to freeze into a new Launch, e.g. `["b1", "b3"]`.').optional(),
+			bind_launch: launchField.describe("Existing Launch id `l<n>` to bind `agent` to.").optional(),
+			agent: z.string().describe("Subagent id/name working from `bind_launch`.").optional(),
+			rebase_launch: launchField.describe("Existing Launch id `l<n>` to rebase to current block text.").optional(),
+			close_launch: launchField.describe("Existing Launch id `l<n>` to close.").optional(),
 		})
 		.strict();
 
-	const needs = (tool: string, op: string, field: string): never => {
-		throw new Error(tr(`${tool} op ${op} requires ${field}`, `${tool} 的 ${op} op 需要 ${field}`));
+	// Converters to clean typed internal representations
+	function parseOptRun(value: string | undefined): RunId | undefined {
+		return value === undefined ? undefined : run.parse(value);
+	}
+	function parseReqBlock(value: string): BlockId {
+		return block.parse(value);
+	}
+	function parseOptBlock(value: string | undefined): BlockId | undefined {
+		return value === undefined ? undefined : block.parse(value);
+	}
+	function parseReqLaunch(value: string): LaunchId {
+		return launch.parse(value);
+	}
+	function parseOptLaunch(value: string | undefined): LaunchId | undefined {
+		return value === undefined ? undefined : launch.parse(value);
+	}
+
+	type EditContentInternal = {
+		readonly doc?: string;
+		readonly run?: RunId;
+		readonly block: BlockId;
+		readonly title?: string;
+		readonly change?:
+			| { readonly kind: "write"; readonly text: string }
+			| { readonly kind: "panel"; readonly panel: string; readonly text: string }
+			| { readonly kind: "replace"; readonly find: string; readonly replace: string };
 	};
 
-	function readToInternal(flat: ReturnType<typeof readParams.parse>): ReturnType<typeof readInternal.parse> {
-		const candidate: Record<string, unknown> = { ...flat };
-		if (flat.op !== "revisions") delete candidate.op;
-		return (flat.op === "revisions" ? readBranches.revisions : readBranches.read).parse(candidate);
-	}
-
-	function editToInternal(flat: ReturnType<typeof editParams.parse>): ReturnType<typeof editInternal.parse> {
-		const candidate: Record<string, unknown> = { ...flat };
-		switch (flat.op) {
-			case "title":
-				if (flat.title === undefined) needs("playbook_edit", "title", "title");
-				candidate.value = flat.title;
-				delete candidate.title;
-				break;
-			case "status":
-				if (flat.status === undefined) needs("playbook_edit", "status", "status");
-				candidate.value = flat.status;
-				delete candidate.status;
-				break;
-			case "task":
-				if (flat.tracked === undefined) needs("playbook_edit", "task", "tracked");
-				candidate.value = flat.tracked;
-				delete candidate.tracked;
-				break;
-			case "move":
-				if (flat.position === undefined) needs("playbook_edit", "move", "position");
-				if (flat.position === "top" && flat.after !== undefined) {
-					throw new Error(
-						tr("playbook_edit op move with position top takes no after", "playbook_edit 的 move op 在 position 为 top 时不接受 after"),
-					);
-				}
-				if (flat.position === "after" && flat.after === undefined) needs("playbook_edit", "move", "after");
-				candidate.after = flat.position === "top" ? null : flat.after;
-				delete candidate.position;
-				break;
-			case "agent":
-				if (flat.agent !== undefined && flat.clear === true) {
-					throw new Error(
-						tr("playbook_edit op agent takes either agent or clear, not both", "playbook_edit 的 agent op 只能传 agent 或 clear 之一"),
-					);
-				}
-				if (flat.clear !== true && flat.agent === undefined) needs("playbook_edit", "agent", "agent");
-				candidate.value = flat.clear === true ? null : flat.agent;
-				delete candidate.agent;
-				delete candidate.clear;
-				break;
-			case "isolated":
-				if (flat.isolation === undefined) needs("playbook_edit", "isolated", "isolation");
-				candidate.value = flat.isolation === "default" ? null : flat.isolation === "isolated";
-				delete candidate.isolation;
-				break;
+	function editContentToInternal(flat: ReturnType<typeof editContentParams.parse>): EditContentInternal {
+		const hasFind = flat.find !== undefined;
+		const hasReplace = flat.replace !== undefined;
+		if (hasFind !== hasReplace) {
+			throw new Error(
+				tr("playbook_edit_content requires both find and replace together", "playbook_edit_content 的 find 和 replace 必须同时提供"),
+			);
 		}
-		return editBranches[flat.op].parse(candidate);
+		if (flat.panel !== undefined && flat.text === undefined) {
+			throw new Error(tr("playbook_edit_content with panel requires text", "playbook_edit_content 传 panel 时必须同时提供 text"));
+		}
+		const changes: NonNullable<EditContentInternal["change"]>[] = [];
+		if (hasFind && hasReplace) changes.push({ kind: "replace", find: flat.find!, replace: flat.replace! });
+		if (flat.panel !== undefined && flat.text !== undefined) changes.push({ kind: "panel", panel: flat.panel, text: flat.text });
+		if (flat.body !== undefined) changes.push({ kind: "write", text: flat.body });
+		if (flat.design !== undefined) changes.push({ kind: "write", text: flat.design });
+		if (flat.panel === undefined && flat.text !== undefined) changes.push({ kind: "write", text: flat.text });
+		if (changes.length > 1) {
+			throw new Error(
+				tr(
+					"playbook_edit_content accepts only one content change per call (find+replace, panel+text, body, design, or text)",
+					"playbook_edit_content 每次调用只接受一种内容修改（find+replace、panel+text、body、design 或 text）",
+				),
+			);
+		}
+		if (flat.title === undefined && changes.length === 0) {
+			throw new Error(
+				tr(
+					"playbook_edit_content requires at least one of title, body, design, text, panel+text, or find+replace",
+					"playbook_edit_content 至少需要提供 title、body、design、text、panel+text 或 find+replace 之一",
+				),
+			);
+		}
+		const parsedRun = parseOptRun(flat.run);
+		return {
+			...(flat.doc !== undefined ? { doc: flat.doc } : {}),
+			...(parsedRun !== undefined ? { run: parsedRun } : {}),
+			block: parseReqBlock(flat.block),
+			...(flat.title !== undefined ? { title: flat.title } : {}),
+			...(changes[0] !== undefined ? { change: changes[0] } : {}),
+		};
 	}
 
-	function checkToInternal(flat: ReturnType<typeof checkParams.parse>): ReturnType<typeof checkInternal.parse> {
-		const candidate: Record<string, unknown> = { ...flat };
-		delete candidate.answers;
-		if (flat.result === "answers") {
-			if (flat.answers === undefined) {
+	type EditStructureInternal =
+		| {
+				readonly kind: "insert_task";
+				readonly doc?: string;
+				readonly run?: RunId;
+				readonly title: string;
+				readonly body: string;
+				readonly after?: BlockId;
+				readonly at_top?: boolean;
+				readonly agent?: string;
+				readonly isolated?: boolean;
+		  }
+		| {
+				readonly kind: "insert_design";
+				readonly doc?: string;
+				readonly run?: RunId;
+				readonly title: string;
+				readonly design: string;
+				readonly after?: BlockId;
+				readonly at_top?: boolean;
+		  }
+		| {
+				readonly kind: "move";
+				readonly doc?: string;
+				readonly run?: RunId;
+				readonly block: BlockId;
+				readonly after: BlockId | null;
+		  }
+		| {
+				readonly kind: "delete";
+				readonly doc?: string;
+				readonly run?: RunId;
+				readonly block: BlockId;
+		  }
+		| {
+				readonly kind: "meta";
+				readonly doc?: string;
+				readonly run?: RunId;
+				readonly block: BlockId;
+				readonly agent?: string | null;
+				readonly isolated?: boolean | null;
+				readonly status?: Status;
+				readonly tracked?: boolean;
+		  };
+
+	function editStructureToInternal(flat: ReturnType<typeof editStructureParams.parse>): EditStructureInternal {
+		const actions = [flat.add !== undefined, flat.move !== undefined, flat.remove_block !== undefined, flat.meta !== undefined].filter(
+			Boolean,
+		).length;
+		if (actions !== 1) {
+			throw new Error(
+				tr(
+					"playbook_edit_structure requires exactly one of add, move, remove_block, or meta",
+					"playbook_edit_structure 必须且只能提供 add、move、remove_block 或 meta 之一",
+				),
+			);
+		}
+		const base = {
+			...(flat.doc !== undefined ? { doc: flat.doc } : {}),
+			...(flat.run !== undefined ? { run: parseOptRun(flat.run) } : {}),
+		};
+		if (flat.add !== undefined) {
+			const add = flat.add;
+			const hasBody = add.body !== undefined;
+			const hasDesign = add.design !== undefined;
+			if (hasBody === hasDesign) {
 				throw new Error(
 					tr(
-						"playbook_check op report with result answers requires answers",
-						"playbook_check 的 report 在 result 为 answers 时需要 answers",
+						"playbook_edit_structure add requires either body (task block) or design (design block), not both",
+						"playbook_edit_structure 的 add 必须提供 body（任务块）或 design（设计块）之一，不能同时提供",
 					),
 				);
 			}
-			const answers = new Map<string, number>();
-			for (const item of flat.answers) {
-				if (answers.has(item.question)) {
-					throw new Error(tr(`Duplicate answer for question ${item.question}`, `问题 ${item.question} 有重复回答`));
-				}
-				answers.set(item.question, item.probability);
+			if (add.at_top === true && add.after !== undefined) {
+				throw new Error(
+					tr("playbook_edit_structure add with at_top takes no after", "playbook_edit_structure 的 add 在 at_top 为 true 时不接受 after"),
+				);
 			}
-			candidate.result = { kind: "answers", answers: Object.fromEntries(answers) };
-		} else if (flat.result === "judge_unavailable") {
+			const after = parseOptBlock(add.after);
+			if (hasDesign) {
+				if (add.agent !== undefined || add.isolation !== undefined) {
+					throw new Error(tr("a design block has no execution contract (agent, isolation)", "设计块没有执行配置（agent、isolation）"));
+				}
+				return {
+					kind: "insert_design",
+					...base,
+					title: add.title,
+					design: add.design!,
+					...(after !== undefined ? { after } : {}),
+					...(add.at_top === true ? { at_top: true } : {}),
+				};
+			}
+			const parsedAgent = add.agent !== undefined ? agentName.parse(add.agent) : undefined;
+			return {
+				kind: "insert_task",
+				...base,
+				title: add.title,
+				body: add.body!,
+				...(after !== undefined ? { after } : {}),
+				...(add.at_top === true ? { at_top: true } : {}),
+				...(parsedAgent !== undefined ? { agent: parsedAgent } : {}),
+				...(add.isolation !== undefined ? { isolated: add.isolation === "worktree" } : {}),
+			};
+		}
+		if (flat.move !== undefined) {
+			const move = flat.move;
+			if (move.at_top === true && move.after !== undefined) {
+				throw new Error(
+					tr("playbook_edit_structure move with at_top takes no after", "playbook_edit_structure 的 move 在 at_top 为 true 时不接受 after"),
+				);
+			}
+			if (move.at_top !== true && move.after === undefined) {
+				throw new Error(
+					tr(
+						"playbook_edit_structure move requires either at_top: true or after",
+						"playbook_edit_structure 的 move 需要 at_top: true 或 after",
+					),
+				);
+			}
+			return {
+				kind: "move",
+				...base,
+				block: parseReqBlock(move.block),
+				after: move.at_top === true ? null : parseReqBlock(move.after!),
+			};
+		}
+		if (flat.remove_block !== undefined) {
+			return { kind: "delete", ...base, block: parseReqBlock(flat.remove_block) };
+		}
+		const meta = flat.meta!;
+		const hasAny = meta.agent !== undefined || meta.isolation !== undefined || meta.status !== undefined || meta.tracked !== undefined;
+		if (!hasAny) {
+			throw new Error(
+				tr(
+					"playbook_edit_structure meta requires at least one of agent, isolation, status, or tracked",
+					"playbook_edit_structure 的 meta 至少需要提供 agent、isolation、status 或 tracked 之一",
+				),
+			);
+		}
+		const parsedAgent = meta.agent === undefined ? undefined : meta.agent === null ? null : agentName.parse(meta.agent);
+		const parsedIsolated = meta.isolation === undefined ? undefined : meta.isolation === null ? null : meta.isolation === "worktree";
+		return {
+			kind: "meta",
+			...base,
+			block: parseReqBlock(meta.block),
+			...(parsedAgent !== undefined ? { agent: parsedAgent } : {}),
+			...(parsedIsolated !== undefined ? { isolated: parsedIsolated } : {}),
+			...(meta.status !== undefined ? { status: meta.status } : {}),
+			...(meta.tracked !== undefined ? { tracked: meta.tracked } : {}),
+		};
+	}
+
+	type CompileInternal =
+		| { readonly kind: "compile"; readonly doc?: string; readonly run?: RunId; readonly blocks: readonly BlockId[] }
+		| { readonly kind: "refetch"; readonly doc?: string; readonly run?: RunId; readonly targets: readonly string[] }
+		| {
+				readonly kind: "refetch_and_compile";
+				readonly doc?: string;
+				readonly run?: RunId;
+				readonly targets: readonly string[];
+				readonly blocks: readonly BlockId[];
+		  };
+
+	function compileToInternal(flat: ReturnType<typeof compileParams.parse>): CompileInternal {
+		const base = {
+			...(flat.doc !== undefined ? { doc: flat.doc } : {}),
+			...(flat.run !== undefined ? { run: parseOptRun(flat.run) } : {}),
+		};
+		const parsedBlocks = flat.blocks?.map(parseReqBlock);
+		if (flat.refetch === true) {
+			if (flat.targets === undefined) {
+				throw new Error(tr("playbook_compile with refetch: true requires targets", "playbook_compile 在 refetch 为 true 时需要 targets"));
+			}
+			return parsedBlocks !== undefined
+				? { kind: "refetch_and_compile", ...base, targets: flat.targets, blocks: parsedBlocks }
+				: { kind: "refetch", ...base, targets: flat.targets };
+		}
+		if (flat.targets !== undefined && parsedBlocks !== undefined) {
+			throw new Error(
+				tr(
+					"playbook_compile with both targets and blocks requires refetch: true",
+					"playbook_compile 同时传 targets 和 blocks 时必须设置 refetch: true",
+				),
+			);
+		}
+		if (flat.targets !== undefined) {
+			return { kind: "refetch", ...base, targets: flat.targets };
+		}
+		if (parsedBlocks !== undefined) {
+			return { kind: "compile", ...base, blocks: parsedBlocks };
+		}
+		throw new Error(
+			tr("playbook_compile requires blocks or refetch with targets", "playbook_compile 需要提供 blocks 或 refetch + targets"),
+		);
+	}
+
+	type CheckInternal = {
+		readonly doc?: string;
+		readonly run?: RunId;
+		readonly blocks?: readonly BlockId[];
+		readonly version: string;
+		readonly result: JudgeReport;
+	};
+
+	function checkToInternal(flat: ReturnType<typeof checkParams.parse>): CheckInternal {
+		const base = {
+			...(flat.doc !== undefined ? { doc: flat.doc } : {}),
+			...(flat.run !== undefined ? { run: parseOptRun(flat.run) } : {}),
+			...(flat.blocks !== undefined ? { blocks: flat.blocks.map(parseReqBlock) } : {}),
+			version: flat.version,
+		};
+		if (flat.result === "judge_unavailable") {
 			if (flat.answers !== undefined) {
 				throw new Error(
 					tr("playbook_check result judge_unavailable takes no answers", "playbook_check 的 judge_unavailable 不接受 answers"),
 				);
 			}
-			candidate.result = { kind: "judge_unavailable" };
-		} else if (flat.answers !== undefined) {
-			throw new Error(tr("playbook_check answers needs result answers", "playbook_check 的 answers 需要 result 为 answers"));
+			return { ...base, result: { kind: "judge_unavailable" } };
 		}
-		return checkBranches[flat.op].parse(candidate);
+		if (flat.result === "answers") {
+			if (flat.answers === undefined) {
+				throw new Error(tr("playbook_check with result answers requires answers", "playbook_check 在 result 为 answers 时需要 answers"));
+			}
+			return { ...base, result: { kind: "answers", answers: flat.answers } };
+		}
+		const fallback = flat.result === "pass" ? { missing: 0 } : { missing: 1 };
+		return { ...base, result: { kind: "answers", answers: flat.answers ?? fallback } };
 	}
+
+	type RunInternal =
+		| { readonly kind: "start"; readonly doc?: string; readonly name: string; readonly update_every?: number }
+		| { readonly kind: "finish"; readonly doc?: string; readonly run: RunId };
+
+	function runToInternal(flat: ReturnType<typeof runParams.parse>): RunInternal {
+		const hasStart = flat.start_name !== undefined;
+		const hasFinish = flat.finish_run !== undefined;
+		if (hasStart === hasFinish) {
+			throw new Error(
+				tr("playbook_run requires either start_name or finish_run, not both", "playbook_run 必须且只能提供 start_name 或 finish_run 之一"),
+			);
+		}
+		const base = flat.doc !== undefined ? { doc: flat.doc } : {};
+		if (hasStart) {
+			return {
+				kind: "start",
+				...base,
+				name: flat.start_name!,
+				...(flat.update_every !== undefined ? { update_every: flat.update_every } : {}),
+			};
+		}
+		if (flat.update_every !== undefined) {
+			throw new Error(
+				tr("playbook_run update_every is only valid with start_name", "playbook_run 的 update_every 只能和 start_name 一起使用"),
+			);
+		}
+		return { kind: "finish", ...base, run: run.parse(flat.finish_run!) };
+	}
+
+	type TimelineInternal =
+		| { readonly kind: "snooze"; readonly doc?: string; readonly run: RunId; readonly after: number }
+		| {
+				readonly kind: "post";
+				readonly doc?: string;
+				readonly run?: RunId;
+				readonly recordKind: RecordKind;
+				readonly text: string;
+				readonly block?: BlockId;
+				readonly launch?: LaunchId;
+				readonly next?: number;
+				readonly quote?: string;
+		  };
+
+	function timelineToInternal(flat: ReturnType<typeof timelineParams.parse>): TimelineInternal {
+		const base = flat.doc !== undefined ? { doc: flat.doc } : {};
+		if (flat.snooze_seconds !== undefined) {
+			if (
+				flat.kind !== undefined ||
+				flat.text !== undefined ||
+				flat.block !== undefined ||
+				flat.launch !== undefined ||
+				flat.next !== undefined ||
+				flat.quote !== undefined
+			) {
+				throw new Error(
+					tr(
+						"playbook_timeline snooze_seconds cannot be combined with post fields",
+						"playbook_timeline 的 snooze_seconds 不能与发帖字段混用",
+					),
+				);
+			}
+			if (flat.run === undefined) {
+				throw new Error(tr("playbook_timeline snooze_seconds requires run", "playbook_timeline 的 snooze_seconds 需要 run"));
+			}
+			return { kind: "snooze", ...base, run: run.parse(flat.run), after: flat.snooze_seconds };
+		}
+		if (flat.kind === undefined || flat.text === undefined) {
+			throw new Error(
+				tr(
+					"playbook_timeline requires either snooze_seconds (with run) or kind and text",
+					"playbook_timeline 需要提供 snooze_seconds（带 run）或同时提供 kind 和 text",
+				),
+			);
+		}
+		const parsedRun = parseOptRun(flat.run);
+		const parsedBlock = parseOptBlock(flat.block);
+		const parsedLaunch = parseOptLaunch(flat.launch);
+		return {
+			kind: "post",
+			...base,
+			...(parsedRun !== undefined ? { run: parsedRun } : {}),
+			recordKind: flat.kind,
+			text: flat.text,
+			...(parsedBlock !== undefined ? { block: parsedBlock } : {}),
+			...(parsedLaunch !== undefined ? { launch: parsedLaunch } : {}),
+			...(flat.next !== undefined ? { next: flat.next } : {}),
+			...(flat.quote !== undefined ? { quote: flat.quote } : {}),
+		};
+	}
+
+	type LaunchInternal =
+		| { readonly kind: "launch"; readonly doc?: string; readonly run?: RunId; readonly blocks: readonly BlockId[] }
+		| { readonly kind: "bind"; readonly doc?: string; readonly launch: LaunchId; readonly agent: string }
+		| { readonly kind: "rebase"; readonly doc?: string; readonly launch: LaunchId }
+		| { readonly kind: "close"; readonly doc?: string; readonly launch: LaunchId };
+
+	function launchToInternal(flat: ReturnType<typeof launchParams.parse>): LaunchInternal {
+		const actions = [
+			flat.blocks !== undefined,
+			flat.bind_launch !== undefined,
+			flat.rebase_launch !== undefined,
+			flat.close_launch !== undefined,
+		].filter(Boolean).length;
+		if (actions !== 1) {
+			throw new Error(
+				tr(
+					"playbook_launch requires exactly one of blocks, bind_launch, rebase_launch, or close_launch",
+					"playbook_launch 必须且只能提供 blocks、bind_launch、rebase_launch 或 close_launch 之一",
+				),
+			);
+		}
+		const base = flat.doc !== undefined ? { doc: flat.doc } : {};
+		if (flat.blocks !== undefined) {
+			if (flat.agent !== undefined) {
+				throw new Error(tr("playbook_launch agent is only valid with bind_launch", "playbook_launch 的 agent 只能和 bind_launch 一起使用"));
+			}
+			const parsedRun = parseOptRun(flat.run);
+			return {
+				kind: "launch",
+				...base,
+				...(parsedRun !== undefined ? { run: parsedRun } : {}),
+				blocks: flat.blocks.map(parseReqBlock),
+			};
+		}
+		if (flat.run !== undefined) {
+			throw new Error(
+				tr(
+					"playbook_launch run is only valid when creating a Launch with blocks",
+					"playbook_launch 的 run 只在用 blocks 创建 Launch 时有效",
+				),
+			);
+		}
+		if (flat.bind_launch !== undefined) {
+			if (flat.agent === undefined) {
+				throw new Error(tr("playbook_launch bind_launch requires agent", "playbook_launch 的 bind_launch 需要 agent"));
+			}
+			return { kind: "bind", ...base, launch: parseReqLaunch(flat.bind_launch), agent: flat.agent };
+		}
+		if (flat.agent !== undefined) {
+			throw new Error(tr("playbook_launch agent is only valid with bind_launch", "playbook_launch 的 agent 只能和 bind_launch 一起使用"));
+		}
+		if (flat.rebase_launch !== undefined) {
+			return { kind: "rebase", ...base, launch: parseReqLaunch(flat.rebase_launch) };
+		}
+		return { kind: "close", ...base, launch: parseReqLaunch(flat.close_launch!) };
+	}
+
+	const openInternal = z.object({ doc: z.string() }).strict();
 
 	return {
 		playbook_open: { parameters: openParams, toInternal: (flat: ReturnType<typeof openParams.parse>) => openInternal.parse(flat) },
-		playbook_read: { parameters: readParams, toInternal: readToInternal },
-		playbook_edit: { parameters: editParams, toInternal: editToInternal },
-		playbook_compile: {
-			parameters: compileParams,
-			toInternal: (flat: ReturnType<typeof compileParams.parse>) => compileBranches[flat.op].parse(flat),
-		},
+		playbook_edit_content: { parameters: editContentParams, toInternal: editContentToInternal },
+		playbook_edit_structure: { parameters: editStructureParams, toInternal: editStructureToInternal },
+		playbook_compile: { parameters: compileParams, toInternal: compileToInternal },
 		playbook_check: { parameters: checkParams, toInternal: checkToInternal },
-		playbook_run: { parameters: runParams, toInternal: (flat: ReturnType<typeof runParams.parse>) => runBranches[flat.op].parse(flat) },
-		playbook_timeline: {
-			parameters: timelineParams,
-			toInternal: (flat: ReturnType<typeof timelineParams.parse>) => timelineBranches[flat.op].parse(flat),
-		},
-		playbook_launch: {
-			parameters: launchParams,
-			toInternal: (flat: ReturnType<typeof launchParams.parse>) => launchBranches[flat.op].parse(flat),
-		},
+		playbook_run: { parameters: runParams, toInternal: runToInternal },
+		playbook_timeline: { parameters: timelineParams, toInternal: timelineToInternal },
+		playbook_launch: { parameters: launchParams, toInternal: launchToInternal },
 		wire: {
 			site,
 			compileError,

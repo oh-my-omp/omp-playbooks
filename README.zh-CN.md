@@ -63,7 +63,7 @@ omp plugin install 'https://github.com/oh-my-omp/omp-playbooks#release'
 
 扩展加载时若在 `PATH` 找到 `tern`，就把包内的 `tern-plugin/` 链接到 Tern；已链接到同一目录时跳过。找不到 `tern` 时不链接，安装照样成功，因此没装 Tern 的机器也能装上插件；运行于 Tern pane、但 omp 的 `PATH` 里没有 `tern` 的主会话会收到警告，之后找到 `tern` 的那次扩展加载会补上链接。链接的就是 omp 安装目录本身。Tern 守护进程会自己重新加载原地修改的插件文件，但升级会整个替换安装目录，守护进程会停在“链接目标不存在”或旧版本上。所以扩展随后比较 `tern-plugin/plugin.toml` 的版本和守护进程已加载的版本，不同时执行 `tern plugin reload`，并在下一个运行于 Tern pane 的主会话提示结果。重新加载后版本仍不一致时只警告、不中断安装，下次加载扩展会再比较。
 
-除这一链接外，扩展只在 omp 运行于 session daemon 托管的 Tern pane 时起作用；daemon 把 `TERN_PANE` 设为该 pane 的数字 ID。在别处启动的 omp（普通终端、`omp -p`、没有或不是数字的 `TERN_PANE`）不会从扩展得到任何内容：没有 `playbook_*` 工具和 `help://` 主题，没有命令、通知，也不改写 eval。
+除这一链接外，扩展只在 omp 运行于 session daemon 托管的 Tern pane 时起作用；daemon 把 `TERN_PANE` 设为该 pane 的数字 ID。在别处启动的 omp（普通终端、`omp -p`、没有或不是数字的 `TERN_PANE`）不会从扩展得到任何内容：没有 `playbook_*` 工具、`playbook://` 或 `tool://playbook_open/*` URL，没有命令、通知，也不改写 eval。
 
 **拉取仓库或重启会话不会更新已安装的插件副本。** 已安装过旧实现时先更新：
 
@@ -112,7 +112,7 @@ bun src/service/main.ts /绝对路径/playbook.yaml
 
 扩展会用解析出的语言把 `OMOMP_LANG` 传给文档服务和新协调者会话，因此它们与打开它们的 omp 会话一致。手动启动的服务、从面板接入的已有 omp 会话和 Tern 命令，用各自环境里的语言。Tern 命令读的是 Tern 应用的环境，可能不包含 shell profile 里的设置。每个进程每次解析语言时都会重新读取自己的环境变量。修改 shell profile 不会改变已运行进程的环境变量：在启动 omp 的地方设置变量，再重启 omp 和 Playbook 面板。
 
-Playbook 文件的内容不翻译：文件里写的是什么，显示和编译的就是什么。语言只决定新写的文字用哪种语言。模型读到的工具说明和 topics 是英文；`help://playbook_open/language` 这个 topic 要求协调者把自己新加的标题、正文、设计稿和槽位选项写成会话的语言，`## A Where · …` 面板的角色词保持英文，已有文字不动；启动 prompt 尾注要求 subagent 用这种语言写完成报告。面板自己插入的文字（新流程节点的名字、粘贴图片的说明）跟随面板的语言。
+Playbook 文件的内容不翻译：文件里写的是什么，显示和编译的就是什么。语言只决定新写的文字用哪种语言。模型读到的工具说明和 topics 是英文；`tool://playbook_open/format-outline` 与 `tool://playbook_open/execution` 会在每次读取时动态注入会话语言规则，要求协调者把自己新加的标题、正文、设计稿和槽位选项写成会话的语言，`## A Where · …` 面板的角色词保持英文，已有文字不动；启动 prompt 尾注要求 subagent 用这种语言写完成报告。面板自己插入的文字（新流程节点的名字、粘贴图片的说明）跟随面板的语言。
 
 ## 文件与块
 
@@ -226,11 +226,11 @@ blocks:
 
 提交的修改要求进入只追加的记录。它记录**人的修改要求**，不是设计快照、设计 diff 或 AI 回复；普通读块不会包含它。
 
-```json
-{"op":"revisions","block":"b2","after":0}
+```text
+read playbook://<doc>/revisions?block=b2&after=0
 ```
 
-以上是 `playbook_read` 的参数；查询 Run 的日志还要加 `run`。`after` 是记录序号，返回序号更大的记录。新建 Run 不继承模板的修改历史。
+查询 Run 的日志使用 `playbook://<doc>/<run>/revisions?block=b2&after=0`。`after` 是记录序号，返回序号更大的记录。新建 Run 不继承模板的修改历史。
 
 ## 执行：Playbook、Run、Launch
 
@@ -248,7 +248,7 @@ subagent 收到的是冻结文本，不是 UI、实时设计页或隐式 Playboo
 
 ### 打断执行
 
-“打断执行”发送 `stop_requested`，带上这个块未关闭的 Launch 及其绑定的 agent。协调者在 JS eval 中执行 `await playbook.stop("l3")`：它取消本会话用 `playbook.agent`/`playbook.spawn` 为该 Launch 启动的所有 subagent，并把该 Launch 中仍是 `running` 的块改回 `todo`；正在等待的 `playbook.result` 随后记录失败并关闭 Launch。用别的方式启动的 worker 由协调者用自己的方式停止，再调用 `playbook_edit {op:"status", block, status:"todo"}`。
+“打断执行”发送 `stop_requested`，带上这个块未关闭的 Launch 及其绑定的 agent。协调者在 JS eval 中执行 `await playbook.stop("l3")`：它取消本会话用 `playbook.agent`/`playbook.spawn` 为该 Launch 启动的所有 subagent，并把该 Launch 中仍是 `running` 的块改回 `todo`；正在等待的 `playbook.result` 随后记录失败并关闭 Launch。用别的方式启动的 worker 由协调者用自己的方式停止，再调用 `playbook_edit_structure {"meta":{"block":"b1","status":"todo"}}`。
 
 ### 执行中的变更
 
@@ -347,33 +347,41 @@ subagent 收到的是冻结文本，不是 UI、实时设计页或隐式 Playboo
 - 嵌入的本地文件上限 5 MiB；代码 `src=` 另有 2 MiB 上限，以及二进制、凭据路径和 secret 内容检查。`lines=1-2` 与引用写法 `lines(1..2)` 不同；`hl` 使用显示行号。`src=` 先扫描整个文件中的 secret，再截取行。
 - 单个围栏正文超过 1000 行不绘制；代码和 diff 超过 200 行为错误，超过 40 行为警告。错误和警告都显示行号，只有错误会让 `draft` 检查不通过。空正文或空设计不会因此报错。
 
-## 协调者工具
+## 协调者工具与 `playbook://` URL
 
-下表列出各工具的 JSON 参数形态（在 bash 中通过 `playbook_<name> --json '{…}'` 或 CLI 选项传入，在 eval 中通过 `await tool.playbook_<name>({…})` 调用）。只有恰好连接了一份文档时才能省略 `doc`；省略 `run` 即作用于 Playbook 文件本身。输入严格校验：工具未声明的字段在调用前由宿主删除；已声明、但所选 `op` 不使用的字段会被拒绝。普通 `playbook_read` **不写 `op: "read"`**。
+只读查询、列表与简单时间线发帖统一走 `playbook://` 内部 URL 协议（仅在 Tern 主会话注册，不注册全局 `promptDoc`；`playbook_open` 会返回 URL 模板）：
 
-模型读到的工具说明分两层。omp 在提示词与目录里只显示外部命令说明的前 200 个字符，所以说明先用简短文字交代用途和参数结构表达不了的语义，完整说明末尾逐行列出 `help://` topic 指针及什么时候读。调用细节按需读取：`playbook_open` 有 `format`、`outline`、`slots`、`references`、`execution`、`runs`、`language`；`playbook_edit` 有 `text`、`blocks`、`state`；`playbook_read` 有 `revisions`，`playbook_launch` 有 `lifecycle`，`playbook_timeline` 有 `records`，`playbook_check` 有 `judge`。`playbook_open --help` 输出完整说明、指针与命令行选项；`read help://playbook_open` 列出它的 topic 地址，`read help://playbook_open/format` 返回该 topic 的 Markdown 正文，不含文件头。topics 写在 `src/extension/topics/`；`language` 在每次读取时按会话当前语言生成。
+- `read playbook://` — 列出 Runs。
+- `read playbook://<doc>[/<run>][/<block>]` — 读取 Playbook、某个 Run 或单个块。
+- `read playbook://<doc>[/<run>]/revisions[?after=<n>&block=<bN>]` — 读取设计块的修改要求历史。
+- `read playbook://<doc>[/<run>]/timeline[?after=<n>&limit=<n>]` — 读取时间线条目（`limit` 截断时带 `next_after`）。
+- `read playbook://<doc>[/<run>]/launches/<launchId>` — 读取 Launch 详情。
+- `read playbook://<doc>[/<run>]/checks[?blocks=<b1,b2>]` — 检查确定性发现与 `version`，末尾内联提示如何用 `playbook_check` 提交报告。
+- `write playbook://<doc>[/<run>]/timeline[?kind=note|update|result|failure|retrospective&block=<id>&launch=<id>&next=<秒>&quote=<消息id>]` — 向时间线追加一条记录。
 
-每个工具在自己的工具定义上通过 `docTopics()` 提供 topics，由 omp 原生的 `help://` 协议读取，不依赖 omp-config 扩展或共享 topic 注册表。
+写操作工具采用无 `op` 枚举的扁平 JSON 参数（在 bash 中通过 `playbook_<name> --json '{…}'` 或 CLI 选项传入，在 eval 中通过 `await tool.playbook_<name>({…})` 调用）。只有恰好连接了一份文档时才能省略 `doc`；省略 `run` 即作用于 Playbook 文件本身。
+
+所有工具的 `description` 均控制在 200 字符以内。领域指南位于 `src/extension/topics/`，通过共享 `tool://` 总线注册为 `tool://playbook_open/` 下的 3 篇专题：`format-outline`、`slots-references`、`execution`（每次读取动态注入 `OMOMP_LANG` 语言规则）。
 
 | 工具 | 参数 |
 |---|---|
-| `playbook_open` | `{doc}` |
-| `playbook_read` | `{doc?, run?, block?}`；历史 `{doc?, run?, op:"revisions", block?, after?}`。块带 `status` 和 `report`，或 `task: false` |
-| `playbook_edit` | `op` 选择变更；`doc`、`run`、`block` 照常传。`title` 传 `title`；`status` 传 `status`（`todo`、`running` 或 `done`）；`task` 传 `tracked`（`false` 不跟踪，`true` 从 `todo` 重新跟踪）；`replace` 传 `find` 和 `replace`；`write` 传 `text`；`panel` 传 `panel` 和 `text`；`insert` 传 `title`、`body`，可选 `after`、`agent`、`isolated`；`insert_design` 传 `title` 和 `design`，可选 `after`；`delete` 只传 `block`；`move` 传 `position`（`"top"`，或 `"after"` 加 `after`）；`agent` 传 `agent` 或 `clear: true`；`isolated` 传 `isolation`（`isolated`、`shared` 或 `default`） |
-| `playbook_compile` | `{doc?, run?, op:"compile", blocks:[…]}`；重新取回 `{doc?, run?, op:"refetch", targets:[…]}` |
-| `playbook_check` | `{doc?, run?, op:"inspect", blocks:[…]}`；报告 `{doc?, run?, op:"report", blocks:[…], version, result}`——`result:"answers"` 时每个问题一条 `answers`（`{question, probability}`），或 `result:"judge_unavailable"` |
-| `playbook_run` | `{doc?, op:"start", name, update_every?}`、`{doc?, op:"finish", run}`、`{doc?, op:"list"}` |
-| `playbook_timeline` | `{doc?, op:"read", run?, after?, limit?}` → `{entries}`，`limit` 截断时另带 `next_after`（下一页的 `after`）；`{doc?, op:"post", run?, kind, text, block?, launch?, next?, quote?}`；`{doc?, op:"snooze", run, after}` |
-| `playbook_launch` | `{doc?, op:"launch", run?, blocks:[…]}` → `{launch, kind, text, agent?, isolated?}`；`{doc?, op:"bind", launch, agent}`；`{doc?, op:"info" 或 "rebase" 或 "close", launch}` |
+| `playbook_open` | `{doc}` — 打开/连接文档，返回 `blocks`、`runs`、`pane`、`playbook://` URL 模板与 `tool://playbook_open/*` 专题入口 |
+| `playbook_edit_content` | `{doc?, run?, block, title?, body?, design?, panel?, text?, find?, replace?}` — 精确局部替换（`find`+`replace`）、整体更新（`body`/`design`/`text`）、替换面板（`panel` 字母 ID 或 `where`/`what`/`how` + `text`）或改 `title` |
+| `playbook_edit_structure` | `{doc?, run?, add?, move?, remove_block?, meta?}` — `add: {title, body\|design, after?, at_top?, agent?, isolation?}`；`move: {block, after?\|at_top?}`；`remove_block: "b<n>"`；`meta: {block, agent?: string\|null, isolation?: "none"\|"worktree"\|null, status?: "todo"\|"running"\|"done", tracked?: boolean}` |
+| `playbook_compile` | `{doc?, run?, blocks?: […], targets?: […], refetch?: boolean}` — 编译块，或传 `refetch: true` 与 `targets` 重新拉取外部引用 |
+| `playbook_check` | `{doc?, run?, blocks?: […], version, result: "answers"\|"pass"\|"fail"\|"judge_unavailable", answers?: Record<string, number>}` — 提交 `read playbook://…/checks` 对应版本的模型判定报告 |
+| `playbook_run` | `{doc?, start_name?, update_every?, finish_run?}` — 启动新 Run 或结束已有 Run |
+| `playbook_timeline` | `{doc?, run?, snooze_seconds?, kind?, text?, block?, launch?, next?, quote?}` — 追加结构化时间线记录或推迟 Run 的更新提醒 |
+| `playbook_launch` | `{doc?, run?, blocks?, bind_launch?, agent?, rebase_launch?, close_launch?}` — 创建、绑定、rebase 或关闭 Launch |
 
-`playbook_edit` 的 `write/replace` 只改执行正文或设计稿，不能改需求；`replace` 的 `find` 必须恰好出现一次。`panel` 的 `text` 必须是以 `## <ID> 标题` 开始的整个替换面板，可用于执行正文和设计稿。`insert`、`insert_design` 建立的块是 `todo`；`insert_design` 的需求固定从空开始，由人填写。`task` 只用于执行块。`move` 在位置不变时不写记录。`agent`、`isolated` 只用于执行块，修改它们不改变编译文本，不触发执行中的变更通知；`launch` 只在所有根块对某一项预设了相同值时返回该项。修改已有块时，一个调用内完成加锁、修改、解锁。
+`playbook_edit_content` 只改执行正文或设计稿，不能改需求；`find` 必须恰好出现一次。`panel` 接受面板字母 ID（`A`、`A1`、…）或角色名（`where`、`what`、`how`），`text` 须以 `## <ID> 标题` 开头。`add` 建立的块为 `todo`；设计块的需求固定从空开始由人填写。`tracked`、`agent`、`isolation` 只用于执行块；修改 `agent`/`isolation` 不改变编译文本，不触发 `block_changed` 通知；创建 Launch 只在所有根块预设了相同值时返回对应字段。修改已有块时，单次调用内自动完成加锁、修改、解锁。
 
 ### 跑一次执行块
 
 以上面的文件为例，由主会话依次调用：
 
 1. `playbook_open --json '{"doc":"/绝对路径/playbook.yaml"}'`。
-2. `playbook_compile --json '{"op":"compile","blocks":["b3"]}'`：查看展开的通则、需求、B 面板和槽位值，以及末尾的执行记录要求。
+2. `playbook_compile --json '{"blocks":["b3"]}'`：查看展开的通则、需求、B 面板和槽位值，以及末尾的执行记录要求。
 3. 在主会话的 **JS eval** 中启动 worker：
 
 ```js
@@ -390,7 +398,7 @@ return await playbook.result(worker);
 
 它把 worker 的最终消息作为结果记到 b3（Launch 只有一个块时自动关联）并关闭这个 Launch。不需要中途响应面板时，也可以用一次阻塞调用 `await playbook.run({ blocks: ["b3"], agent: "task:mid" })` 完成启动、等待、记录和关闭。人在面板上点“启动”会在协调者空闲时以 `launch_requested` 到达（同一轮里点的多个启动合成一条通知，按点击顺序编号），通知里给出同样的调用。请求的块没有都预设同一个 `agent`、且会话能列出它的 subagent（与 SUBAGENT 下拉框一样从会话内置的 `task` 工具读取）时，这些调用会带上 `agent: "<subagent>"`，通知同时列出这些 subagent，由协调者从中选一个；会话无法列出时，调用不带 `agent`，通知提示在默认 subagent 被禁用时传入一个可用的 agent。
 
-要在不动文件的情况下从干净状态再执行一遍，调用 `playbook_run {op: "start", name: "检查缓存方案"}`，把返回的 Run ID 作为 `run` 传给上面的调用；最后 `playbook_run {op:"finish", run}`。
+要在不动文件的情况下从干净状态再执行一遍，调用 `playbook_run --json '{"start_name":"检查缓存方案"}'`，把返回的 Run ID 作为 `run` 传给上面的调用；最后 `playbook_run --json '{"finish_run":"r1"}'`。
 
 `task:mid` 必须是当前 omp 可用的 agent；扩展不提供或配置它。调用时没有指定 `agent` 就用块上预设的 `agent`，块也没有预设时用 omp 的默认 agent；默认被禁用时必须显式指定或在块上预设。`isolated` 同样按“显式传参 > 块上预设 > 不传”决定。
 
@@ -403,12 +411,12 @@ JS eval 的 `playbook` 由扩展注入，不要自行加导入行。辅助方法
 | `playbook.result(worker, {block?, close?})` | 等待并写 `result`，未给 `block` 时关联到 Launch 唯一的块；等待异常（包括被 `playbook.stop` 取消）写 `failure` 并抛出。写完后按 `close` 关闭 Launch，默认在 worker 由 `playbook.agent` 创建时关闭 |
 | `playbook.spawn(launch, {…})` | 在未关闭的 prompt Launch 上增加 worker，使用最新基线（`rebase` 后即新文本）；它不拥有该 Launch，`result` 默认不关闭；Launch 已关闭时报错 |
 | `playbook.stop(launch, {doc?})` | 取消本 eval 内核为该 Launch 启动的所有 worker，并把其中仍是 `running` 的块改回 `todo`；返回 `{cancelled}`；本会话没有为它启动过 worker 时报错 |
-| `playbook.read({run?, block?})` | 读块；没有历史查询辅助，历史仍用 `playbook_read` 工具 |
+| `playbook.read({run?, block?})` | 经 `playbook://` 读块；修改历史直接读 `playbook://<doc>[/<run>]/revisions` |
 | `playbook.post({run?, kind, text, …})` | 写记录 |
-| `playbook.timeline({run?, after?})` | 读时间线 |
+| `playbook.timeline({run?, after?, limit?})` | 经 `playbook://` 读时间线 |
 | `playbook.context` | 编排执行时的 `{doc, run?, launch}`（Playbook 本身没有 `run`）；普通 eval 中为空 |
 
-辅助方法不会自动设 `status` 或结束 Run；状态由 subagent 自己写。并行时用多个 `playbook.agent` 启动 worker，各自存进顶层变量，之后分别 `result`；多个 worker 共用一个 Launch 时用 `playbook.spawn` 加入，最后收尾的那个传 `{close: true}`，或调用 `playbook_launch {op:"close", launch:"l<n>"}`。含 `playbook.run/result` 且未显式给 `timeout` 的单元会设置 `timeout: 0`。
+辅助方法不会自动设 `status` 或结束 Run；状态由 subagent 自己写。并行时用多个 `playbook.agent` 启动 worker，各自存进顶层变量，之后分别 `result`；多个 worker 共用一个 Launch 时用 `playbook.spawn` 加入，最后收尾的那个传 `{close: true}`，或调用 `playbook_launch --json '{"close_launch":"l<n>"}'`。含 `playbook.run/result` 且未显式给 `timeout` 的单元会设置 `timeout: 0`。
 
 ### 编排块
 
@@ -421,13 +429,13 @@ JS eval 的 `playbook` 由扩展注入，不要自行加导入行。辅助方法
       ```js
       var worker = await playbook.agent({ blocks: ["b3"], agent: "task:mid" });
       var result = await playbook.result(worker);
-      await tool.playbook_launch({ doc: playbook.context.doc, op: "close", launch: playbook.context.launch });
+      await tool.playbook_launch({ doc: playbook.context.doc, close_launch: playbook.context.launch });
       return result;
       ```
     status: todo
 ````
 
-调用 `playbook_launch {op:"launch", blocks:["b4"]}`（要在 Run 中启动就加 `run`）取得返回的 Launch ID；下面假设为 `l2`，实际以返回值为准。然后发**一个完整代码只有下面这一句**的 eval：
+调用 `playbook_launch --json '{"blocks":["b4"]}'`（要在 Run 中启动就加 `run`）取得返回的 Launch ID；下面假设为 `l2`，实际以返回值为准。然后发**一个完整代码只有下面这一句**的 eval：
 
 ```js
 await playbook.exec("l2")
@@ -439,13 +447,13 @@ Python 编排会设置 **Python 变量** `PLAYBOOK_DOC`、`PLAYBOOK_RUN`（Playb
 
 ## 检查不等于完成或认可
 
-`playbook_check inspect` 返回确定性检查：`compile`、`render_error`、`render_pending`；执行块另检查 `empty_expansion`，执行正文和设计稿检查 `draft`，非编排的执行正文和设计稿检查 `outline`（Where/What/How）。面板不显示检查，组件错误和不符合 Where/What/How 之处在原处显示。检查不负责证明业务设计正确；除编译失败等 Launch 自身约束外，其他检查不通过不是启动门禁。
+`read playbook://<doc>[/<run>]/checks[?blocks=<b1,b2>]` 返回确定性检查：`compile`、`render_error`、`render_pending`；执行块另检查 `empty_expansion`，执行正文和设计稿检查 `draft`，非编排的执行正文和设计稿检查 `outline`（Where/What/How）。面板不显示检查，组件错误和不符合 Where/What/How 之处在原处显示。检查不负责证明业务设计正确；除编译失败等 Launch 自身约束外，其他检查不通过不是启动门禁。
 
 `jev` 是另行报告的模型判定：
 
-- `playbook_check inspect` 返回 `{blocks, source, compiled, view, findings, version}`，**当前不返回问题定义**。
+- `read playbook://<doc>[/<run>]/checks` 返回 `{blocks, source, compiled, view, findings, version}`，末尾附带 `playbook_check` 报告提交提示。
 - 当前固定问题 `missing`：完整编译 prompt 是否提到未包含其中的日志、讨论、文件或先前结果内容？主会话可以在 eval 中用可用的 `judge` 回答。
-- 报告为 `result: "answers"` 加 `answers: [{question: "missing", probability: P(yes)}]`，概率必须在 0–1；`P(yes) >= 0.5` 记为不通过。judge 不可用时报告 `result: "judge_unavailable"`，记为未判定，不当作通过。
+- 使用 `playbook_check` 提交报告：`result: "answers"` 加 `answers: { missing: P(yes) }`（概率在 0–1，`P(yes) >= 0.5` 记为不通过），简写 `result: "pass"` / `"fail"`，或 judge 不可用时报告 `result: "judge_unavailable"`（记为未判定，不当作通过）。
 - 报告须带同一文档、同一 Run、同一顺序块列表的最新 `version`。过期报告会被忽略；输入变化使旧判定失效。
 
 没有设计认可状态，没有从检查到 `done` 的自动转换。

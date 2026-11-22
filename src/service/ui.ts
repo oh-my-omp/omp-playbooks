@@ -1076,8 +1076,8 @@ export function startUi(
 						? el("cards", "div", "pb-cards", cards)
 						: el("empty", "div", "pb-empty", [], {
 								text: tr(
-									"This Playbook has no blocks yet: ask the coordinator to add one with playbook_edit.",
-									"这份 Playbook 还没有块：让协调者用 playbook_edit 加一个。",
+									"This Playbook has no blocks yet: ask the coordinator to add one with playbook_edit_structure.",
+									"这份 Playbook 还没有块：让协调者用 playbook_edit_structure 加一个。",
 								),
 							}),
 				]),

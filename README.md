@@ -63,7 +63,7 @@ omp plugin install 'https://github.com/oh-my-omp/omp-playbooks#release'
 
 When the extension loads and finds `tern` on `PATH`, it links the package's `tern-plugin/` into Tern; it skips this when the same directory is already linked. Without `tern` it links nothing and the install still succeeds, so a machine without Tern can carry the plugin; a main session in a Tern pane whose omp has no `tern` on `PATH` gets a warning, and the next extension load that finds `tern` links the plugin. The link points at the omp install directory itself. The Tern daemon reloads plugin files edited in place, but an upgrade replaces the whole install directory, which leaves the daemon on a missing link target or an old version. The extension therefore compares the version in `tern-plugin/plugin.toml` with the version the daemon loaded, runs `tern plugin reload` when they differ, and reports the outcome in the next main session that runs in a Tern pane. If the versions still differ after the reload it only warns and does not abort the install; the next extension load compares again.
 
-Beyond that link, the extension acts only when omp runs in a Tern pane managed by the session daemon, which sets `TERN_PANE` to the pane's numeric ID. An omp started anywhere else (a plain terminal, `omp -p`, a missing or non-numeric `TERN_PANE`) gets nothing from it: no `playbook_*` tools or `help://` topics, no commands, no notices and no eval rewriting.
+Beyond that link, the extension acts only when omp runs in a Tern pane managed by the session daemon, which sets `TERN_PANE` to the pane's numeric ID. An omp started anywhere else (a plain terminal, `omp -p`, a missing or non-numeric `TERN_PANE`) gets nothing from it: no `playbook_*` tools, no `playbook://` or `tool://playbook_open/*` URLs, no commands, no notices and no eval rewriting.
 
 **Pulling the repository or restarting a session does not update the installed plugin copy.** If an older version is installed, update it first:
 
@@ -112,7 +112,7 @@ The pane, its notices and component diagnostics, the coordinator's notices and t
 
 The extension starts the document service and new coordinator sessions with `OMOMP_LANG` from its resolved language, so they match the omp session that opened them. A service started by hand, an omp session attached from the pane and the Tern command use the language of their own environment. The Tern command reads the Tern app's environment, which may not include your shell profile. Each process rereads its environment whenever it resolves a language. Changing a shell profile does not change an already-running process's environment: set the variable where omp is started, then restart omp and the Playbook pane.
 
-The Playbook file's content is never translated: what the file says is shown and compiled as written. The language only decides what new text is written in. The tool descriptions and topics the model reads are English; the `help://playbook_open/language` topic tells the coordinator to write the titles, bodies, designs and slot options it adds in the session's language, keeping the English role words of `## A Where · …` panels and leaving existing text untouched; the launch-prompt footer asks the subagent for its completion report in that language. Texts the pane itself inserts (a new flow node's name, a pasted image's caption) follow the pane's language.
+The Playbook file's content is never translated: what the file says is shown and compiled as written. The language only decides what new text is written in. The tool descriptions and topics the model reads are English; the `tool://playbook_open/format-outline` and `tool://playbook_open/execution` topics dynamically inject the session's language rule telling the coordinator to write the titles, bodies, designs and slot options it adds in the session's language, keeping the English role words of `## A Where · …` panels and leaving existing text untouched; the launch-prompt footer asks the subagent for its completion report in that language. Texts the pane itself inserts (a new flow node's name, a pasted image's caption) follow the pane's language.
 
 ## The file and its blocks
 
@@ -226,11 +226,11 @@ Editing a block that the coordinator holds takes it back: the coordinator's lock
 
 A submitted change request goes into an append-only log. It records **the person's change requests**, not design snapshots, design diffs or AI replies; an ordinary block read does not include it.
 
-```json
-{"op":"revisions","block":"b2","after":0}
+```text
+read playbook://<doc>/revisions?block=b2&after=0
 ```
 
-The above are `playbook_read` arguments; querying a Run's log also needs `run`. `after` is a record sequence number; records with a larger number are returned. A new Run does not inherit the template's change history.
+Querying a Run's log uses `playbook://<doc>/<run>/revisions?block=b2&after=0`. `after` is a record sequence number; records with a larger number are returned. A new Run does not inherit the template's change history.
 
 ## Execution: the Playbook, Runs, Launches
 
@@ -248,7 +248,7 @@ A subagent receives the frozen text, not the UI, a live design page or any impli
 
 ### Stopping
 
-"Stop" sends `stop_requested` with the block's open Launches and their bound agents. The coordinator runs `await playbook.stop("l3")` in JS eval: it cancels every subagent this session started for that Launch with `playbook.agent`/`playbook.spawn` and sets the Launch's blocks that are still `running` back to `todo`; a pending `playbook.result` then records the failure and closes the Launch. A worker started some other way is stopped by the coordinator its own way, followed by `playbook_edit {op:"status", block, status:"todo"}`.
+"Stop" sends `stop_requested` with the block's open Launches and their bound agents. The coordinator runs `await playbook.stop("l3")` in JS eval: it cancels every subagent this session started for that Launch with `playbook.agent`/`playbook.spawn` and sets the Launch's blocks that are still `running` back to `todo`; a pending `playbook.result` then records the failure and closes the Launch. A worker started some other way is stopped by the coordinator its own way, followed by `playbook_edit_structure {"meta":{"block":"b1","status":"todo"}}`.
 
 ### Changes during execution
 
@@ -347,33 +347,41 @@ Execution bodies and designs are drawn with the same component parser. The compo
 - Embedded local files are capped at 5 MiB; code `src=` also has a 2 MiB cap and binary/credential-path/secret-content checks. `lines=1-2` is written differently from the reference form `lines(1..2)`; `hl` uses displayed line numbers. For `src=` the whole file is scanned for secrets before the lines are cut.
 - A single fence body over 1000 lines is not drawn; code and diffs over 200 lines are an error, over 40 lines a warning. Errors and warnings both show line numbers, and only errors fail the `draft` check. An empty body or design is not treated as an error by this.
 
-## Coordinator tools
+## Coordinator tools and `playbook://` URLs
 
-The table below lists each tool's JSON arguments (passed via `playbook_<name> --json '{…}'` or CLI flags in bash, or to `await tool.playbook_<name>({…})` in eval). `doc` can be omitted only when exactly one document is connected; `run` is omitted to act on the Playbook file itself. Input is strictly validated: a field the tool does not declare is removed by the host before the call runs, and a declared field that the chosen `op` does not use is rejected. A plain `playbook_read` **has no `op: "read"`**.
+Reads, listings, and simple timeline posts go through the `playbook://` internal URL scheme (registered only in Tern main sessions without a global `promptDoc`; `playbook_open` returns the URL templates):
 
-What the model reads of these tools comes in two layers. omp caps an external command's description at 200 characters in the prompt and catalog, so each description starts with a short purpose and the semantics its schema cannot carry. The full description ends with `help://` topic pointers and when to read each. The call instructions are read on demand: `playbook_open` has `format`, `outline`, `slots`, `references`, `execution`, `runs` and `language`; `playbook_edit` has `text`, `blocks` and `state`; `playbook_read` has `revisions`, `playbook_launch` `lifecycle`, `playbook_timeline` `records` and `playbook_check` `judge`. `playbook_open --help` prints the full description, pointers and CLI options; `read help://playbook_open` lists its topic URLs, and `read help://playbook_open/format` returns that topic's Markdown body without its file header. The topics live in `src/extension/topics/`; `language` is generated on every read in the session's current language.
+- `read playbook://` — list Runs.
+- `read playbook://<doc>[/<run>][/<block>]` — read the Playbook, a Run, or a single block.
+- `read playbook://<doc>[/<run>]/revisions[?after=<n>&block=<bN>]` — read design change requests.
+- `read playbook://<doc>[/<run>]/timeline[?after=<n>&limit=<n>]` — read timeline entries (`next_after` is returned when truncated).
+- `read playbook://<doc>[/<run>]/launches/<launchId>` — read Launch details.
+- `read playbook://<doc>[/<run>]/checks[?blocks=<b1,b2>]` — inspect deterministic findings and check `version`, with an inline `playbook_check` report hint.
+- `write playbook://<doc>[/<run>]/timeline[?kind=note|update|result|failure|retrospective&block=<id>&launch=<id>&next=<sec>&quote=<msg>]` — append a timeline record.
 
-Each tool provides its topics through `docTopics()` on its own tool definition. Topic reads use omp's native `help://` protocol and need no omp-config extension or shared topic registry.
+Mutating operations use flat, `op`-free JSON tools (passed via `playbook_<name> --json '{…}'` or CLI flags in bash, or `await tool.playbook_<name>({…})` in eval). `doc` can be omitted only when exactly one document is connected; `run` is omitted to act on the Playbook file itself.
+
+Each tool's description is kept within 200 characters. Domain guides live in `src/extension/topics/` and are registered on the shared `tool://` hub as three topics under `tool://playbook_open/`: `format-outline`, `slots-references`, and `execution` (with `OMOMP_LANG` language rules injected dynamically on every read).
 
 | Tool | Arguments |
 |---|---|
-| `playbook_open` | `{doc}` |
-| `playbook_read` | `{doc?, run?, block?}`; history `{doc?, run?, op:"revisions", block?, after?}`. Blocks carry `status` and `report`, or `task: false` |
-| `playbook_edit` | `op` selects the change; `doc`, `run`, `block` apply as usual. `title` takes `title`; `status` takes `status` (`todo`, `running` or `done`); `task` takes `tracked` (`false` untracked, `true` tracked again from `todo`); `replace` takes `find` and `replace`; `write` takes `text`; `panel` takes `panel` and `text`; `insert` takes `title`, `body`, optional `after`, `agent` and `isolated`; `insert_design` takes `title` and `design`, optional `after`; `delete` takes only `block`; `move` takes `position` (`"top"`, or `"after"` with `after`); `agent` takes `agent` or `clear: true`; `isolated` takes `isolation` (`isolated`, `shared` or `default`) |
-| `playbook_compile` | `{doc?, run?, op:"compile", blocks:[…]}`; refetch `{doc?, run?, op:"refetch", targets:[…]}` |
-| `playbook_check` | `{doc?, run?, op:"inspect", blocks:[…]}`; report `{doc?, run?, op:"report", blocks:[…], version, result}` — `result:"answers"` with one `answers` entry per question (`{question, probability}`), or `result:"judge_unavailable"` |
-| `playbook_run` | `{doc?, op:"start", name, update_every?}`, `{doc?, op:"finish", run}`, `{doc?, op:"list"}` |
-| `playbook_timeline` | `{doc?, op:"read", run?, after?, limit?}` → `{entries}`, plus `next_after` (the next `after`) when `limit` truncated the page; `{doc?, op:"post", run?, kind, text, block?, launch?, next?, quote?}`; `{doc?, op:"snooze", run, after}` |
-| `playbook_launch` | `{doc?, op:"launch", run?, blocks:[…]}` → `{launch, kind, text, agent?, isolated?}`; `{doc?, op:"bind", launch, agent}`; `{doc?, op:"info" or "rebase" or "close", launch}` |
+| `playbook_open` | `{doc}` — opens/connects and returns `blocks`, `runs`, `pane`, `playbook://` URL templates, and `tool://playbook_open/*` topics |
+| `playbook_edit_content` | `{doc?, run?, block, title?, body?, design?, panel?, text?, find?, replace?}` — exact local replacement (`find`+`replace`), whole-block update (`body`/`design`/`text`), panel replacement (`panel` letter ID or `where`/`what`/`how` + `text`), or `title` rename |
+| `playbook_edit_structure` | `{doc?, run?, add?, move?, remove_block?, meta?}` — `add: {title, body\|design, after?, at_top?, agent?, isolation?}`; `move: {block, after?\|at_top?}`; `remove_block: "b<n>"`; `meta: {block, agent?: string\|null, isolation?: "none"\|"worktree"\|null, status?: "todo"\|"running"\|"done", tracked?: boolean}` |
+| `playbook_compile` | `{doc?, run?, blocks?: […], targets?: […], refetch?: boolean}` — compile blocks, or set `refetch: true` with `targets` to refresh external references |
+| `playbook_check` | `{doc?, run?, blocks?: […], version, result: "answers"\|"pass"\|"fail"\|"judge_unavailable", answers?: Record<string, number>}` — submit a judge report for the version from `read playbook://…/checks` |
+| `playbook_run` | `{doc?, start_name?, update_every?, finish_run?}` — start a new Run or finish an existing Run |
+| `playbook_timeline` | `{doc?, run?, snooze_seconds?, kind?, text?, block?, launch?, next?, quote?}` — append a structured record or postpone a Run's update reminder |
+| `playbook_launch` | `{doc?, run?, blocks?, bind_launch?, agent?, rebase_launch?, close_launch?}` — create, bind, rebase, or close a Launch |
 
-`write/replace` in `playbook_edit` change only an execution body or a design, never a requirement; the `find` of `replace` must occur exactly once. The `text` of `panel` must be the whole replacement panel, starting with `## <ID> Title`, and works on execution bodies and designs. `insert` and `insert_design` create a `todo` block; `insert_design` always starts with an empty requirement for a person to fill in. `task` applies only to execution blocks. `move` records nothing when the position does not change. `agent` and `isolated` apply only to execution blocks; changing them does not change the compiled text or trigger a change-during-execution notice, and `launch` returns one only when every root block presets the same value. When editing an existing block, one call takes the lock, edits and releases it.
+`playbook_edit_content` changes only an execution body or a design, never a requirement; `find` must occur exactly once. `panel` takes either a panel letter ID (`A`, `A1`, …) or role (`where`, `what`, `how`) with `text` starting with `## <ID> Title`. `add` creates a `todo` block; a design block always starts with an empty requirement for a person to fill in. `tracked`, `agent`, and `isolation` apply only to execution blocks; changing `agent`/`isolation` does not change compiled text or trigger a `block_changed` notice, and Launch creation returns them only when every root block presets the same value. When editing an existing block, one call takes the lock, edits and releases it.
 
 ### Running one execution block
 
 With the file above, the main session calls in order:
 
 1. `playbook_open --json '{"doc":"/absolute/path/playbook.yaml"}'`.
-2. `playbook_compile --json '{"op":"compile","blocks":["b3"]}'`: check the expanded rules, requirement, panel B and slot value, followed by the execution-record instructions.
+2. `playbook_compile --json '{"blocks":["b3"]}'`: check the expanded rules, requirement, panel B and slot value, followed by the execution-record instructions.
 3. In the main session's **JS eval**, start the worker:
 
 ```js
@@ -390,7 +398,7 @@ return await playbook.result(worker);
 
 It records the worker's final message as a result on b3 (a Launch with a single block is associated automatically) and closes this Launch. When nothing needs answering in between, one blocking call `await playbook.run({ blocks: ["b3"], agent: "task:mid" })` starts, waits, records and closes in one go. A person's "Launch" in the pane arrives as `launch_requested` once the coordinator is idle (launches clicked during one turn in one notice, numbered in click order), and the notice gives the same calls. When the requested blocks do not all preset the same `agent` and the session can list its subagents (read from its built-in `task` tool, like the SUBAGENT dropdown), those calls carry `agent: "<subagent>"` and the notice names the subagents for the coordinator to pick one; when the session cannot list them, the calls carry no `agent` and the notice says to pass an available agent if the default subagent is disabled.
 
-To execute the Playbook again from a clean state without touching the file, call `playbook_run {op: "start", name: "Review the cache plan"}`, take the returned Run ID and pass it as `run` to the calls above; finish with `playbook_run {op:"finish", run}`.
+To execute the Playbook again from a clean state without touching the file, call `playbook_run --json '{"start_name":"Review the cache plan"}'`, take the returned Run ID and pass it as `run` to the calls above; finish with `playbook_run --json '{"finish_run":"r1"}'`.
 
 `task:mid` must be an agent available in the current omp; the extension neither provides nor configures it. A call without `agent` uses the block's preset `agent`, and with no preset either, omp's default agent; when the default is disabled, `agent` must be given or preset on the block. `isolated` follows the same order: explicit argument, then the block's preset, then nothing.
 
@@ -403,12 +411,12 @@ The `playbook` object in JS eval is injected by the extension; do not add an imp
 | `playbook.result(worker, {block?, close?})` | Waits and writes `result`, associated with the Launch's only block when `block` is not given; a wait error, including a cancellation by `playbook.stop`, writes `failure` and throws. Afterwards it closes the Launch as `close` says, by default when the worker was created by `playbook.agent` |
 | `playbook.spawn(launch, {…})` | Adds a worker to an open prompt Launch, using its latest baseline (the new text after `rebase`); the worker does not own the Launch, so its `result` does not close it by default; a closed Launch is refused |
 | `playbook.stop(launch, {doc?})` | Cancels every worker this eval kernel started for the Launch and sets its blocks that are still `running` back to `todo`; returns `{cancelled}`; throws when this session started no worker for it |
-| `playbook.read({run?, block?})` | Reads blocks; there is no history helper, so history still uses the `playbook_read` tool |
+| `playbook.read({run?, block?})` | Reads blocks via `playbook://`; for revision history read `playbook://<doc>[/<run>]/revisions` |
 | `playbook.post({run?, kind, text, …})` | Writes a record |
-| `playbook.timeline({run?, after?})` | Reads the timeline |
+| `playbook.timeline({run?, after?, limit?})` | Reads the timeline via `playbook://` |
 | `playbook.context` | `{doc, run?, launch}` during orchestration (no `run` for the Playbook itself); empty in an ordinary eval |
 
-The helpers never set `status` or finish a Run on their own; the subagent writes its own status. For parallel work, start workers with several `playbook.agent` calls, keep each in a top-level variable and `result` each one later; for several workers on one Launch, add them with `playbook.spawn` and pass `{close: true}` to the one that finishes up, or call `playbook_launch {op:"close", launch:"l<n>"}`. A cell containing `playbook.run/result` with no explicit `timeout` gets `timeout: 0`.
+The helpers never set `status` or finish a Run on their own; the subagent writes its own status. For parallel work, start workers with several `playbook.agent` calls, keep each in a top-level variable and `result` each one later; for several workers on one Launch, add them with `playbook.spawn` and pass `{close: true}` to the one that finishes up, or call `playbook_launch --json '{"close_launch":"l<n>"}'`. A cell containing `playbook.run/result` with no explicit `timeout` gets `timeout: 0`.
 
 ### Orchestration blocks
 
@@ -421,13 +429,13 @@ The block below can be added under `blocks` in the example file; use a `js`/`py`
       ```js
       var worker = await playbook.agent({ blocks: ["b3"], agent: "task:mid" });
       var result = await playbook.result(worker);
-      await tool.playbook_launch({ doc: playbook.context.doc, op: "close", launch: playbook.context.launch });
+      await tool.playbook_launch({ doc: playbook.context.doc, close_launch: playbook.context.launch });
       return result;
       ```
     status: todo
 ````
 
-Call `playbook_launch {op:"launch", blocks:["b4"]}` (add `run` to launch it in a Run) to get the Launch ID; below it is assumed to be `l2`, use the actual returned value. Then send an eval whose **entire code is just this one line**:
+Call `playbook_launch --json '{"blocks":["b4"]}'` (add `run` to launch it in a Run) to get the Launch ID; below it is assumed to be `l2`, use the actual returned value. Then send an eval whose **entire code is just this one line**:
 
 ```js
 await playbook.exec("l2")
@@ -439,13 +447,13 @@ Python orchestration sets the **Python variables** `PLAYBOOK_DOC`, `PLAYBOOK_RUN
 
 ## Checks are not completion or approval
 
-`playbook_check inspect` returns the deterministic checks `compile`, `render_error` and `render_pending`; execution blocks also check `empty_expansion`, execution bodies and designs check `draft`, and non-orchestration bodies and designs check `outline` (Where/What/How). The pane does not show checks; it shows component errors and what breaks the outline in place. Checks do not prove a business design correct; apart from Launch constraints such as compile failures, a failed check does not gate a launch.
+`read playbook://<doc>[/<run>]/checks[?blocks=<b1,b2>]` returns the deterministic checks `compile`, `render_error` and `render_pending`; execution blocks also check `empty_expansion`, execution bodies and designs check `draft`, and non-orchestration bodies and designs check `outline` (Where/What/How). The pane does not show checks; it shows component errors and what breaks the outline in place. Checks do not prove a business design correct; apart from Launch constraints such as compile failures, a failed check does not gate a launch.
 
 `jev` is a separately reported model judgment:
 
-- `playbook_check inspect` returns `{blocks, source, compiled, view, findings, version}` and **currently returns no question definitions**.
+- `read playbook://<doc>[/<run>]/checks` returns `{blocks, source, compiled, view, findings, version}` plus an inline hint for calling `playbook_check`.
 - The current fixed question is `missing`: does the full compiled prompt mention logs, discussions, files or earlier results whose content it does not include? The main session can answer it in eval with an available `judge`.
-- The report is `result: "answers"` with `answers: [{question: "missing", probability: P(yes)}]`, the probability in 0–1; `P(yes) >= 0.5` counts as failed. With no judge available, report `result: "judge_unavailable"`, which counts as not judged, not as passed.
+- Submit the report with `playbook_check`: `result: "answers"` with `answers: { missing: P(yes) }` (probability in 0–1; `P(yes) >= 0.5` counts as failed), shorthand `result: "pass"` / `"fail"`, or `result: "judge_unavailable"` when no judge is available (counts as not judged, not as passed).
 - The report must carry the latest `version` for the same document, the same Run and the same ordered block list. Stale reports are ignored; a change to the input invalidates the old judgment.
 
 There is no design-approval state and no automatic transition from checks to `done`.

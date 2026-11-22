@@ -1,7 +1,25 @@
 ---
-title: References
-when: before writing a ((…)) reference to a block, result, file or GitHub issue
+title: Slots and references
+when: before writing a {{…}} slot or a ((…)) reference to a block, result, file or GitHub issue
 ---
+# Slots
+
+A slot is a value the person picks. A ```` ```slot <name> ```` fence declares it:
+
+```text
+= <current value>
+* <recommended option> | note
+- <option> | note
+~ <option offered earlier> | note
+```
+
+Write `{{<name>}}` in the same text (prose, list items, kv values, table cells, flow node labels) where the value goes. In any other block write `{{b<n>.<name>}}` for slot `<name>` declared in block `b<n>`: declare a choice once and use it everywhere this way.
+
+- The pane draws each use as the current value the person can switch; a pick is written where the slot is declared (a design's slot goes to you as a change request).
+- Compiling replaces each use with the value and drops the fence. A `{{b<n>.<name>}}` whose block declares no such slot fails compilation (`UnknownSlot`).
+- A slot's own name never starts with `b<n>.`.
+- Uses inside inline code or code fences stay as written.
+
 # References
 
 A task body pulls other content in with `((target))` or `((target | selector, selector))`. A reference fits on one line; references in inline code or code fences are not expanded.

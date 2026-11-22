@@ -149,6 +149,27 @@ export function createPlaybook(deps: PlaybookDeps) {
 		const chosen = run ?? context.run;
 		return { ...docArg(doc), ...(chosen ? { run: chosen } : {}) };
 	};
+	const readUrl = (
+		doc: string | undefined,
+		run: string | undefined,
+		path?: string,
+		query?: Readonly<Record<string, string | number | undefined>>,
+	): Promise<unknown> => {
+		const file = doc ?? context.doc;
+		const host = file !== undefined ? encodeURIComponent(file) : "current";
+		const segments: string[] = [];
+		if (run) segments.push(run);
+		if (path) segments.push(path);
+		const pathname = segments.length > 0 ? `/${segments.join("/")}` : "";
+		const search = new URLSearchParams();
+		if (query) {
+			for (const [key, value] of Object.entries(query)) {
+				if (value !== undefined) search.set(key, String(value));
+			}
+		}
+		const qs = search.toString();
+		return call("read", { path: `playbook://${host}${pathname}${qs ? `?${qs}` : ""}:raw` });
+	};
 	const agentOptions = (request: AgentOptions): AgentOptions => {
 		const { agent, label, schema, schemaMode, isolated } = request;
 		return {
@@ -173,7 +194,7 @@ export function createPlaybook(deps: PlaybookDeps) {
 			handle = await deps.agent(prompt, options);
 		} catch (error) {
 			const reason = error instanceof Error ? error.message : String(error);
-			if (fresh) await call("playbook_launch", { ...docArg(target.doc), op: "close", launch });
+			if (fresh) await call("playbook_launch", { ...docArg(target.doc), close_launch: launch });
 			throw new PlaybookError(
 				tr(
 					`agent() failed for Launch ${launch}${fresh ? " (closed)" : ""}: ${reason}. When the default subagent is disabled, pass agent: "<name>", for example agent: "task:mid".`,
@@ -181,7 +202,7 @@ export function createPlaybook(deps: PlaybookDeps) {
 				),
 			);
 		}
-		await call("playbook_launch", { ...docArg(target.doc), op: "bind", launch, agent: handle.id });
+		await call("playbook_launch", { ...docArg(target.doc), bind_launch: launch, agent: handle.id });
 		const spawned: Spawned = { ...target, launch, blocks, ownsLaunch: fresh, id: handle.id, handle };
 		started.set(launch, [...(started.get(launch) ?? []), spawned]);
 		return spawned;
@@ -189,10 +210,10 @@ export function createPlaybook(deps: PlaybookDeps) {
 
 	async function agent(request: AgentRequest): Promise<Spawned> {
 		const target = scope(request.doc, request.run);
-		const launch = created(await call("playbook_launch", { ...target, op: "launch", blocks: [...request.blocks] }));
+		const launch = created(await call("playbook_launch", { ...target, blocks: [...request.blocks] }));
 		if (launch.kind === "orchestration") {
-			await call("playbook_launch", { ...docArg(target.doc), op: "close", launch: launch.launch });
-			const launchCmd = `playbook_launch --json ${shellJson({ ...target, op: "launch", blocks: [...request.blocks] })}`;
+			await call("playbook_launch", { ...docArg(target.doc), close_launch: launch.launch });
+			const launchCmd = `playbook_launch --json ${shellJson({ ...target, blocks: [...request.blocks] })}`;
 			throw new PlaybookError(
 				tr(
 					`${request.blocks.join(", ")} is an orchestration block (Launch ${launch.launch} closed): start it with \`${launchCmd}\` and run \`await playbook.exec("l<n>")\` as its own eval call`,
@@ -212,9 +233,8 @@ export function createPlaybook(deps: PlaybookDeps) {
 		const block = options.block ?? (spawned.blocks.length === 1 ? spawned.blocks[0] : undefined);
 		const about = { launch: spawned.launch, ...(block ? { block } : {}) };
 		const finish = async (kind: "result" | "failure", text: string): Promise<void> => {
-			await call("playbook_timeline", { ...target, op: "post", kind, text, ...about });
-			if (options.close ?? spawned.ownsLaunch)
-				await call("playbook_launch", { ...docArg(spawned.doc), op: "close", launch: spawned.launch });
+			await call("playbook_timeline", { ...target, kind, text, ...about });
+			if (options.close ?? spawned.ownsLaunch) await call("playbook_launch", { ...docArg(spawned.doc), close_launch: spawned.launch });
 		};
 		let value: unknown;
 		try {
@@ -233,7 +253,7 @@ export function createPlaybook(deps: PlaybookDeps) {
 		result,
 
 		async spawn(launch: string, request: AgentOptions & { readonly doc?: string } = {}): Promise<Spawned> {
-			const info = launchInfo(await call("playbook_launch", { ...docArg(request.doc), op: "info", launch }));
+			const info = launchInfo(await readUrl(request.doc, undefined, `launches/${launch}`));
 			if (info.closed)
 				throw new PlaybookError(tr(`${launch} is closed; start a new Launch instead`, `${launch} 已关闭；请改为启动新的 Launch`));
 			if (info.kind === "orchestration")
@@ -248,18 +268,18 @@ export function createPlaybook(deps: PlaybookDeps) {
 			if (workers.length === 0)
 				throw new PlaybookError(
 					tr(
-						`No subagent of ${launch} was started in this session; stop it where it runs, then set its blocks back to todo with \`playbook_edit --json '{"op":"status","block":"<id>","status":"todo"}'\``,
-						`本会话没有启动 ${launch} 的 subagent；请在其运行处停止它，然后用 \`playbook_edit --json '{"op":"status","block":"<id>","status":"todo"}'\` 将其块改回 todo`,
+						`No subagent of ${launch} was started in this session; stop it where it runs, then set its blocks back to todo with \`playbook_edit_structure --json '{"meta":{"block":"<id>","status":"todo"}}'\``,
+						`本会话没有启动 ${launch} 的 subagent；请在其运行处停止它，然后用 \`playbook_edit_structure --json '{"meta":{"block":"<id>","status":"todo"}}'\` 将其块改回 todo`,
 					),
 				);
 			for (const worker of workers) await worker.handle.cancel();
 			started.delete(launch);
-			const info = launchInfo(await call("playbook_launch", { ...docArg(request.doc), op: "info", launch }));
+			const info = launchInfo(await readUrl(request.doc, undefined, `launches/${launch}`));
 			const where = { ...docArg(request.doc), ...(info.run === null ? {} : { run: info.run }) };
 			for (const block of info.blocks) {
-				const current = objectOf(await call("playbook_read", { ...where, block }));
+				const current = objectOf(await readUrl(request.doc, info.run ?? undefined, block));
 				if ("status" in current && current.status === "running")
-					await call("playbook_edit", { ...where, op: "status", block, status: "todo" });
+					await call("playbook_edit_structure", { ...where, meta: { block, status: "todo" } });
 			}
 			return { cancelled: workers.map((worker) => worker.id) };
 		},
@@ -279,18 +299,21 @@ export function createPlaybook(deps: PlaybookDeps) {
 			readonly next?: number;
 		}): Promise<unknown> {
 			const { doc, run, ...entry } = request;
-			return call("playbook_timeline", { ...scope(doc, run), op: "post", ...entry });
+			return call("playbook_timeline", { ...scope(doc, run), ...entry });
 		},
 
-		timeline(request: { readonly doc?: string; readonly run?: string; readonly after?: number } = {}): Promise<unknown> {
-			const { doc, run, after } = request;
-			return call("playbook_timeline", { ...scope(doc, run), op: "read", ...(after !== undefined ? { after } : {}) });
+		timeline(
+			request: { readonly doc?: string; readonly run?: string; readonly after?: number; readonly limit?: number } = {},
+		): Promise<unknown> {
+			const { doc, run, after, limit } = request;
+			const chosen = run ?? context.run;
+			return readUrl(doc, chosen, "timeline", { after, limit });
 		},
 
 		read(request: { readonly doc?: string; readonly run?: string; readonly block?: string } = {}): Promise<unknown> {
 			const { doc, run, block } = request;
 			const chosen = run ?? context.run;
-			return call("playbook_read", { ...docArg(doc), ...(chosen ? { run: chosen } : {}), ...(block ? { block } : {}) });
+			return readUrl(doc, chosen, block);
 		},
 	};
 }

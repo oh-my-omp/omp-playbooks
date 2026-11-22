@@ -2,9 +2,11 @@ import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { AgentToolResult, ExtensionAPI, ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
+import { InternalUrlRouter, type ProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { ptree } from "@oh-my-pi/pi-utils";
 import { tr } from "../../omomp-shared/i18n";
-import { type BlockId, parseLaunchId, type RecordKind, type RunId } from "../domain/model";
+import { clearToolTopics, registerInternalScheme, registerToolTopics } from "../../omomp-shared/internal-url";
+import { type BlockId, parseBlockId, parseLaunchId, type RecordKind, type RunId } from "../domain/model";
 import {
 	documentEndpoint,
 	type EventPayload,
@@ -14,15 +16,22 @@ import {
 	type Request,
 	type ServerFrame,
 } from "../domain/protocol";
+import { parseDocument } from "../service/draft/document";
 import { openServicePane } from "../service/panes";
 import { availableAgents } from "./agents";
 import { K1Client, type Reply } from "./client";
 import { listenPane, type PaneListener } from "./pane-listener";
 import { toolParameters } from "./params";
+import { createPlaybookProtocolHandler, docHostSlug, formatPlaybookUrl } from "./playbook-url";
 import { ensureTernPlugin, type TernPluginState } from "./tern-setup";
 import { playbookTopics } from "./topics";
 
 const ORCHESTRATION = /^\s*```(js|py)\s*\n([\s\S]*)\n```\s*$/;
+const ROLE_PREFIX: Readonly<Record<"where" | "what" | "how", RegExp>> = {
+	where: /^Where(?:$|\s|[·:：|\-—])/,
+	what: /^What(?:$|\s|[·:：|\-—])/,
+	how: /^How(?:$|\s|[·:：|\-—])/,
+};
 
 function ternNotice(state: TernPluginState): { readonly text: string; readonly level: "info" | "warning" } | null {
 	switch (state.kind) {
@@ -95,6 +104,45 @@ function shellJson(value: Record<string, unknown>): string {
 	return `'${JSON.stringify(value).replaceAll("'", "'\\''")}'`;
 }
 
+function resolveRolePanelId(
+	lockedResult: unknown,
+	role: "where" | "what" | "how",
+): { readonly ok: true; readonly id: string } | { readonly ok: false; readonly code: "NotFound" | "Ambiguous"; readonly message: string } {
+	const block =
+		typeof lockedResult === "object" && lockedResult !== null && "block" in lockedResult
+			? (lockedResult as { block: unknown }).block
+			: undefined;
+	const text =
+		typeof block === "object" && block !== null && "kind" in block
+			? block.kind === "task" && "body" in block && typeof block.body === "string"
+				? block.body
+				: block.kind === "design" && "design" in block && typeof block.design === "string"
+					? block.design
+					: ""
+			: "";
+	const pattern = ROLE_PREFIX[role];
+	const matches = parseDocument(text).panels.filter((panel) => panel.explicit && pattern.test(panel.title));
+	if (matches.length === 0) {
+		return {
+			ok: false,
+			code: "NotFound",
+			message: tr(`No explicit panel matching role "${role}" was found in this block`, `该块中没有找到匹配 "${role}" 角色的显式面板`),
+		};
+	}
+	if (matches.length > 1) {
+		const ids = matches.map((panel) => panel.id).join(", ");
+		return {
+			ok: false,
+			code: "Ambiguous",
+			message: tr(
+				`Multiple panels match role "${role}" (${ids}); pass the exact panel letter ID instead`,
+				`多个面板匹配 "${role}" 角色（${ids}）；请改传具体的面板字母 ID`,
+			),
+		};
+	}
+	return { ok: true, id: matches[0]!.id };
+}
+
 export default async function (pi: ExtensionAPI): Promise<void> {
 	const inTern = ternPane();
 	if (inTern === null) {
@@ -116,6 +164,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	let launches: QueuedLaunch[] = [];
 	let busy = false;
 	let delivering: Promise<void> = Promise.resolve();
+
+	function connectedDocs(): string[] {
+		return [...clients.entries()].filter(([, client]) => client.connected).map(([path]) => path);
+	}
 
 	function deliverLaunches(ctx: ExtensionContext): Promise<void> {
 		const delivered = delivering.then(async () => {
@@ -140,7 +192,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				throw new Error(tr(`NoService: cannot resolve Playbook ${file}`, `NoService：无法解析 Playbook ${file}`));
 			}
 		}
-		const connected = [...clients.entries()].filter(([, client]) => client.connected).map(([path]) => path);
+		const connected = connectedDocs();
 		if (connected.length === 1) return connected[0]!;
 		throw new Error(
 			connected.length === 0
@@ -206,38 +258,61 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	async function open(file: string, ctx: ExtensionContext): Promise<Reply> {
 		const absolute = await documentFor(file);
 		const client = await clientFor(absolute, ctx);
-		const ready = await client.connect();
-		if (ready.ok || ready.error.code !== "NoService") return ready;
-		const split = await openServicePane(pane, absolute);
-		if (!split.ok) return startFailed(split.error);
-		const deadline = Date.now() + OPEN_WAIT_MS;
-		for (;;) {
-			await Bun.sleep(250);
-			const next = await client.connect();
-			if (next.ok || next.error.code !== "NoService") return next;
-			if (Date.now() >= deadline)
-				return startFailed(
-					tr(
-						`The document service in Tern pane ${split.pane} did not listen within ${OPEN_WAIT_MS / 1000} s; its pane shows why`,
-						`Tern 面板 ${split.pane} 中的文档服务在 ${OPEN_WAIT_MS / 1000} 秒内没有监听；原因见该面板`,
-					),
-				);
+		let ready = await client.connect();
+		if (!ready.ok && ready.error.code === "NoService") {
+			const split = await openServicePane(pane, absolute);
+			if (!split.ok) return startFailed(split.error);
+			const deadline = Date.now() + OPEN_WAIT_MS;
+			for (;;) {
+				await Bun.sleep(250);
+				ready = await client.connect();
+				if (ready.ok || ready.error.code !== "NoService") break;
+				if (Date.now() >= deadline)
+					return startFailed(
+						tr(
+							`The document service in Tern pane ${split.pane} did not listen within ${OPEN_WAIT_MS / 1000} s; its pane shows why`,
+							`Tern 面板 ${split.pane} 中的文档服务在 ${OPEN_WAIT_MS / 1000} 秒内没有监听；原因见该面板`,
+						),
+					);
+			}
 		}
+		if (!ready.ok) return ready;
+		const slug = docHostSlug(absolute, connectedDocs());
+		const baseResult =
+			typeof ready.result === "object" && ready.result !== null ? (ready.result as Record<string, unknown>) : { result: ready.result };
+		return {
+			id: ready.id,
+			ok: true,
+			result: {
+				...baseResult,
+				doc: absolute,
+				urls: {
+					runs: "playbook://",
+					read: `playbook://${slug}[/<run>][/<block>]`,
+					revisions: `playbook://${slug}[/<run>]/revisions[?after=<n>]`,
+					timeline: `playbook://${slug}[/<run>]/timeline[?after=<n>&limit=<n>]`,
+					launches: `playbook://${slug}[/<run>]/launches/<launchId>`,
+					checks: `playbook://${slug}[/<run>]/checks[?blocks=<b1,b2>]`,
+					post_timeline: `write playbook://${slug}[/<run>]/timeline[?kind=update|result|failure|retrospective]`,
+				},
+				topics: ["tool://playbook_open/format-outline", "tool://playbook_open/slots-references", "tool://playbook_open/execution"],
+			},
+		};
 	}
 
-	async function editBlock(
+	async function editBlockWithLock(
 		file: string | undefined,
 		ctx: ExtensionContext,
 		scope: { run?: RunId; block: BlockId },
-		change: Request,
+		apply: (lockedResult: unknown, client: K1Client) => Promise<{ readonly reply: Reply; readonly deleted?: boolean }>,
 	): Promise<Reply> {
 		const absolute = await documentFor(file);
 		const client = await clientFor(absolute, ctx);
 		const lockId = randomUUID();
 		const locked = await client.request({ op: "lock", args: scope }, lockId);
 		if (!locked.ok) return locked;
-		const changed = await client.request(change);
-		if (change.op !== "delete") await client.request({ op: "unlock", args: { ...scope, request: lockId } });
+		const { reply: changed, deleted } = await apply(locked.result, client);
+		if (!deleted) await client.request({ op: "unlock", args: { ...scope, request: lockId } });
 		if (!changed.ok && changed.error.code === "NotLocked") {
 			return {
 				...changed,
@@ -251,6 +326,18 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			};
 		}
 		return changed;
+	}
+
+	function editBlock(
+		file: string | undefined,
+		ctx: ExtensionContext,
+		scope: { run?: RunId; block: BlockId },
+		change: Request,
+	): Promise<Reply> {
+		return editBlockWithLock(file, ctx, scope, async (_lockedResult, client) => ({
+			reply: await client.request(change),
+			deleted: change.op === "delete",
+		}));
 	}
 
 	const scoped = (value: RunId | undefined): { run?: RunId } => (value === undefined ? {} : { run: value });
@@ -285,39 +372,64 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			parameters: schemas.playbook_open.parameters,
 			toInternal: schemas.playbook_open.toInternal,
 			description:
-				"Connect this session to a Playbook YAML as its coordinator, opening its Tern pane when none runs. Use to write, review or run multi-step agent work. → block ids, Runs.",
+				"Connect to a Playbook YAML (opens Tern pane if needed). Read/write via playbook:// URLs; topics: tool://playbook_open/{format-outline,slots-references,execution}.",
 			run: (params, ctx) => open(params.doc, ctx),
 		} satisfies Tool<"playbook_open">,
 		{
-			name: "playbook_read",
-			label: tr("Playbook: read", "Playbook: 读取"),
-			parameters: schemas.playbook_read.parameters,
-			toInternal: schemas.playbook_read.toInternal,
+			name: "playbook_edit_content",
+			label: tr("Playbook: edit content", "Playbook: 编辑内容"),
+			parameters: schemas.playbook_edit_content.parameters,
+			toInternal: schemas.playbook_edit_content.toInternal,
 			description:
-				"Read committed blocks of the Playbook (or one Run): all blocks or one block; the revisions op lists a design block's change requests instead.",
-			run: (params, ctx) =>
-				"op" in params
-					? request(params.doc, ctx, {
-							op: "revisions",
-							args: {
-								...scoped(params.run),
-								...(params.block ? { block: params.block } : {}),
-								...(params.after !== undefined ? { after: params.after } : {}),
-							},
-						})
-					: request(params.doc, ctx, { op: "read", args: { ...scoped(params.run), ...(params.block ? { block: params.block } : {}) } }),
-		} satisfies Tool<"playbook_read">,
-		{
-			name: "playbook_edit",
-			label: tr("Playbook: edit", "Playbook: 编辑"),
-			parameters: schemas.playbook_edit.parameters,
-			toInternal: schemas.playbook_edit.toInternal,
-			description:
-				"Change one block of the Playbook (or one Run). Each call locks the block; NotLocked means nothing was applied, so read it again. A design's requirement is the person's.",
+				"Edit a Playbook block's title, body/design text, panel, or exact find/replace. Locks block; NotLocked means human interrupted. See tool://playbook_open/format-outline.",
 			run: (params, ctx) => {
-				switch (params.op) {
-					case "insert":
-						return request(params.doc, ctx, {
+				const scope = { ...scoped(params.run), block: params.block };
+				return editBlockWithLock(params.doc, ctx, scope, async (lockedResult, client) => {
+					let last: Reply = { id: "", ok: true, result: null };
+					if (params.title !== undefined) {
+						last = await client.request({ op: "set", args: { ...scope, field: "title", value: params.title } });
+						if (!last.ok) return { reply: last };
+					}
+					if (params.change !== undefined) {
+						switch (params.change.kind) {
+							case "write":
+								last = await client.request({ op: "write", args: { ...scope, text: params.change.text } });
+								break;
+							case "replace":
+								last = await client.request({
+									op: "edit",
+									args: { ...scope, find: params.change.find, replace: params.change.replace },
+								});
+								break;
+							case "panel": {
+								let panelId = params.change.panel;
+								if (panelId === "where" || panelId === "what" || panelId === "how") {
+									const resolved = resolveRolePanelId(lockedResult, panelId);
+									if (!resolved.ok) {
+										return { reply: { id: "", ok: false, error: { code: resolved.code, message: resolved.message } } };
+									}
+									panelId = resolved.id;
+								}
+								last = await client.request({ op: "panel", args: { ...scope, panel: panelId, text: params.change.text } });
+								break;
+							}
+						}
+					}
+					return { reply: last };
+				});
+			},
+		} satisfies Tool<"playbook_edit_content">,
+		{
+			name: "playbook_edit_structure",
+			label: tr("Playbook: edit structure", "Playbook: 编辑结构"),
+			parameters: schemas.playbook_edit_structure.parameters,
+			toInternal: schemas.playbook_edit_structure.toInternal,
+			description:
+				"Add, move, or remove Playbook blocks, or set task block metadata (agent, isolation, status, tracked). See tool://playbook_open/format-outline.",
+			run: async (params, ctx) => {
+				switch (params.kind) {
+					case "insert_task": {
+						const inserted = await request(params.doc, ctx, {
 							op: "insert",
 							args: {
 								...scoped(params.run),
@@ -331,8 +443,28 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 								},
 							},
 						});
-					case "insert_design":
-						return request(params.doc, ctx, {
+						if (inserted.ok && params.at_top === true) {
+							const newBlock =
+								typeof inserted.result === "object" &&
+								inserted.result !== null &&
+								"block" in inserted.result &&
+								typeof inserted.result.block === "string"
+									? parseBlockId(inserted.result.block)
+									: null;
+							if (newBlock !== null) {
+								const moved = await editBlock(
+									params.doc,
+									ctx,
+									{ ...scoped(params.run), block: newBlock },
+									{ op: "move", args: { ...scoped(params.run), block: newBlock, after: null } },
+								);
+								if (!moved.ok) return moved;
+							}
+						}
+						return inserted;
+					}
+					case "insert_design": {
+						const inserted = await request(params.doc, ctx, {
 							op: "insert",
 							args: {
 								...scoped(params.run),
@@ -341,47 +473,32 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 								content: { kind: "design", design: params.design },
 							},
 						});
-					case "write":
+						if (inserted.ok && params.at_top === true) {
+							const newBlock =
+								typeof inserted.result === "object" &&
+								inserted.result !== null &&
+								"block" in inserted.result &&
+								typeof inserted.result.block === "string"
+									? parseBlockId(inserted.result.block)
+									: null;
+							if (newBlock !== null) {
+								const moved = await editBlock(
+									params.doc,
+									ctx,
+									{ ...scoped(params.run), block: newBlock },
+									{ op: "move", args: { ...scoped(params.run), block: newBlock, after: null } },
+								);
+								if (!moved.ok) return moved;
+							}
+						}
+						return inserted;
+					}
+					case "move":
 						return editBlock(
 							params.doc,
 							ctx,
 							{ ...scoped(params.run), block: params.block },
-							{ op: "write", args: { ...scoped(params.run), block: params.block, text: params.text } },
-						);
-					case "panel":
-						return editBlock(
-							params.doc,
-							ctx,
-							{ ...scoped(params.run), block: params.block },
-							{ op: "panel", args: { ...scoped(params.run), block: params.block, panel: params.panel, text: params.text } },
-						);
-					case "title":
-						return editBlock(
-							params.doc,
-							ctx,
-							{ ...scoped(params.run), block: params.block },
-							{ op: "set", args: { ...scoped(params.run), block: params.block, field: "title", value: params.value } },
-						);
-					case "status":
-						return editBlock(
-							params.doc,
-							ctx,
-							{ ...scoped(params.run), block: params.block },
-							{ op: "set", args: { ...scoped(params.run), block: params.block, field: "status", value: params.value } },
-						);
-					case "task":
-						return editBlock(
-							params.doc,
-							ctx,
-							{ ...scoped(params.run), block: params.block },
-							{ op: "set", args: { ...scoped(params.run), block: params.block, field: "task", value: params.value } },
-						);
-					case "replace":
-						return editBlock(
-							params.doc,
-							ctx,
-							{ ...scoped(params.run), block: params.block },
-							{ op: "edit", args: { ...scoped(params.run), block: params.block, find: params.find, replace: params.replace } },
+							{ op: "move", args: { ...scoped(params.run), block: params.block, after: params.after } },
 						);
 					case "delete":
 						return editBlock(
@@ -390,41 +507,45 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 							{ ...scoped(params.run), block: params.block },
 							{ op: "delete", args: { ...scoped(params.run), block: params.block } },
 						);
-					case "move":
-						return editBlock(
-							params.doc,
-							ctx,
-							{ ...scoped(params.run), block: params.block },
-							{ op: "move", args: { ...scoped(params.run), block: params.block, after: params.after } },
-						);
-					case "agent":
-						return editBlock(
-							params.doc,
-							ctx,
-							{ ...scoped(params.run), block: params.block },
-							{ op: "set", args: { ...scoped(params.run), block: params.block, field: "agent", value: params.value } },
-						);
-					case "isolated":
-						return editBlock(
-							params.doc,
-							ctx,
-							{ ...scoped(params.run), block: params.block },
-							{ op: "set", args: { ...scoped(params.run), block: params.block, field: "isolated", value: params.value } },
-						);
+					case "meta": {
+						const scope = { ...scoped(params.run), block: params.block };
+						const changes: Request[] = [];
+						if (params.tracked !== undefined) changes.push({ op: "set", args: { ...scope, field: "task", value: params.tracked } });
+						if (params.status !== undefined) changes.push({ op: "set", args: { ...scope, field: "status", value: params.status } });
+						if (params.agent !== undefined) changes.push({ op: "set", args: { ...scope, field: "agent", value: params.agent } });
+						if (params.isolated !== undefined) changes.push({ op: "set", args: { ...scope, field: "isolated", value: params.isolated } });
+						return editBlockWithLock(params.doc, ctx, scope, async (_lockedResult, client) => {
+							let last: Reply = { id: "", ok: true, result: null };
+							for (const change of changes) {
+								last = await client.request(change);
+								if (!last.ok) return { reply: last };
+							}
+							return { reply: last };
+						});
+					}
 				}
 			},
-		} satisfies Tool<"playbook_edit">,
+		} satisfies Tool<"playbook_edit_structure">,
 		{
 			name: "playbook_compile",
 			label: tr("Playbook: compile", "Playbook: 编译"),
 			parameters: schemas.playbook_compile.parameters,
 			toInternal: schemas.playbook_compile.toInternal,
 			description:
-				"Render the exact prompt the blocks compile to without starting anything, or fetch their external references (files, GitHub, URLs) again.",
-			run: (params, ctx) =>
-				params.op === "compile"
-					? request(params.doc, ctx, { op: "compile", args: { ...scoped(params.run), blocks: params.blocks } })
-					: request(params.doc, ctx, { op: "refetch", args: { ...scoped(params.run), targets: params.targets } }),
+				"Compile blocks into their final expanded prompt, or set refetch: true with targets to refresh external references. See tool://playbook_open/slots-references.",
+			run: async (params, ctx) => {
+				switch (params.kind) {
+					case "compile":
+						return request(params.doc, ctx, { op: "compile", args: { ...scoped(params.run), blocks: params.blocks } });
+					case "refetch":
+						return request(params.doc, ctx, { op: "refetch", args: { ...scoped(params.run), targets: params.targets } });
+					case "refetch_and_compile": {
+						const refetched = await request(params.doc, ctx, { op: "refetch", args: { ...scoped(params.run), targets: params.targets } });
+						if (!refetched.ok) return refetched;
+						return request(params.doc, ctx, { op: "compile", args: { ...scoped(params.run), blocks: params.blocks } });
+					}
+				}
+			},
 		} satisfies Tool<"playbook_compile">,
 		{
 			name: "playbook_check",
@@ -432,59 +553,58 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			parameters: schemas.playbook_check.parameters,
 			toInternal: schemas.playbook_check.toInternal,
 			description:
-				"Inspect blocks for deterministic findings and judge questions, then report the judge's answers. Checks never gate a launch.",
-			run: (params, ctx) =>
-				params.op === "inspect"
-					? request(params.doc, ctx, { op: "inspect", args: { ...scoped(params.run), blocks: params.blocks } })
-					: request(params.doc, ctx, {
-							op: "report",
-							args: { ...scoped(params.run), blocks: params.blocks, version: params.version, result: params.result },
-						}),
+				"Submit judge check verdict for inspected blocks (inspect via read playbook://<doc>[/<run>]/checks first). Checks never gate a launch.",
+			run: async (params, ctx) => {
+				let blocks = params.blocks;
+				if (blocks === undefined) {
+					const readReply = await request(params.doc, ctx, { op: "read", args: scoped(params.run) });
+					if (!readReply.ok) return readReply;
+					const parsed = readResult.safeParse(readReply.result);
+					blocks = parsed.success ? parsed.data.blocks.map((item) => item.id) : [];
+				}
+				return request(params.doc, ctx, {
+					op: "report",
+					args: { ...scoped(params.run), blocks, version: params.version, result: params.result },
+				});
+			},
 		} satisfies Tool<"playbook_check">,
 		{
 			name: "playbook_run",
 			label: tr("Playbook: Run", "Playbook: 运行"),
 			parameters: schemas.playbook_run.parameters,
 			toInternal: schemas.playbook_run.toInternal,
-			description: "Start, finish or list Runs. A Run is a clean copy of the Playbook for one execution; starting one starts no agent.",
-			run: (params, ctx) => {
-				switch (params.op) {
-					case "start":
-						return request(params.doc, ctx, {
+			description: "Start a new Run (fresh todo copy of Playbook) or finish an existing Run. List Runs via read playbook://.",
+			run: (params, ctx) =>
+				params.kind === "start"
+					? request(params.doc, ctx, {
 							op: "start_run",
 							args: { name: params.name, ...(params.update_every !== undefined ? { update_every: params.update_every } : {}) },
-						});
-					case "finish":
-						return request(params.doc, ctx, { op: "finish_run", args: { run: params.run } });
-					case "list":
-						return request(params.doc, ctx, { op: "runs", args: {} });
-				}
-			},
+						})
+					: request(params.doc, ctx, { op: "finish_run", args: { run: params.run } }),
 		} satisfies Tool<"playbook_run">,
 		{
 			name: "playbook_timeline",
 			label: tr("Playbook: timeline", "Playbook: 时间线"),
 			parameters: schemas.playbook_timeline.parameters,
 			toInternal: schemas.playbook_timeline.toInternal,
-			description: "Read or append the Playbook's execution log (or one Run's), and postpone a Run's update reminder.",
+			description:
+				"Append a structured record (update/result/failure/retrospective) to a timeline or snooze a Run's update reminder. Read via playbook://<doc>[/<run>]/timeline.",
 			run: (params, ctx) => {
-				switch (params.op) {
-					case "read":
-						return request(params.doc, ctx, {
-							op: "timeline",
-							args: {
-								...scoped(params.run),
-								...(params.after !== undefined ? { after: params.after } : {}),
-								...(params.limit !== undefined ? { limit: params.limit } : {}),
-							},
-						});
-					case "post": {
-						const { doc: _doc, op: _op, ...entry } = params;
-						return request(params.doc, ctx, { op: "post", args: entry });
-					}
-					case "snooze":
-						return request(params.doc, ctx, { op: "snooze", args: { run: params.run, after: params.after } });
+				if (params.kind === "snooze") {
+					return request(params.doc, ctx, { op: "snooze", args: { run: params.run, after: params.after } });
 				}
+				return request(params.doc, ctx, {
+					op: "post",
+					args: {
+						...scoped(params.run),
+						kind: params.recordKind,
+						text: params.text,
+						...(params.block ? { block: params.block } : {}),
+						...(params.launch ? { launch: params.launch } : {}),
+						...(params.next !== undefined ? { next: params.next } : {}),
+						...(params.quote !== undefined ? { quote: params.quote } : {}),
+					},
+				});
 			},
 		} satisfies Tool<"playbook_timeline">,
 		{
@@ -493,15 +613,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			parameters: schemas.playbook_launch.parameters,
 			toInternal: schemas.playbook_launch.toInternal,
 			description:
-				"Freeze blocks' prompt into a Launch that subagents work from: create, bind, inspect, rebase or close one. It starts no subagent; prefer playbook.agent/playbook.run in eval.",
+				"Create, bind, rebase, or close a Launch. Inspect via read playbook://<doc>[/<run>]/launches/<id>. Prefer playbook.agent/playbook.run in eval (tool://playbook_open/execution).",
 			run: (params, ctx) => {
-				switch (params.op) {
+				switch (params.kind) {
 					case "launch":
 						return request(params.doc, ctx, { op: "launch", args: { ...scoped(params.run), blocks: params.blocks } });
 					case "bind":
 						return request(params.doc, ctx, { op: "bind", args: { launch: params.launch, agent: params.agent } });
-					case "info":
-						return request(params.doc, ctx, { op: "launch_info", args: { launch: params.launch } });
 					case "rebase":
 						return request(params.doc, ctx, { op: "rebase", args: { launch: params.launch } });
 					case "close":
@@ -512,22 +630,35 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	] as const;
 	type AnyTool = (typeof tools)[number];
 
+	let paneListener: PaneListener | null = null;
+	let paneContext: ExtensionContext | null = null;
+	let playbookUrlHandler: ProtocolHandler | null = null;
+
 	let registered = false;
 	function registerTools(entries: readonly AnyTool[]): void {
 		if (registered) return;
 		registered = true;
-		const topics = playbookTopics();
+		registerToolTopics("omp-playbooks", playbookTopics());
+		playbookUrlHandler = createPlaybookProtocolHandler({
+			connectedDocs,
+			resolveDoc: documentFor,
+			request: async (absolute, payload) => {
+				const existing = clients.get(absolute);
+				if (existing) return existing.request(payload);
+				if (paneContext === null) {
+					throw new Error(tr("NoService: coordinator session is not active", "NoService：协调者会话未启动"));
+				}
+				return (await clientFor(absolute, paneContext)).request(payload);
+			},
+		});
+		registerInternalScheme(InternalUrlRouter.instance(), "omp-playbooks", playbookUrlHandler);
 		for (const tool of entries) {
-			const ownTopics = topics.get(tool.name) ?? [];
-			const pointers = ownTopics.map((topic) => `- \`help://${tool.name}/${topic.name}\` — ${topic.when}`);
 			const definition = {
 				name: tool.name,
 				label: tool.label,
 				parameters: tool.parameters,
 				loadMode: "discoverable",
-				description:
-					tool.description + (pointers.length ? `\n\nTopics — read the one a call needs before making it:\n${pointers.join("\n")}` : ""),
-				docTopics: () => Object.fromEntries(ownTopics.map((topic) => [topic.name, topic.read()])),
+				description: tool.description,
 				async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 					const parse = tool.parameters.parse as (value: unknown) => unknown;
 					const toInternal = tool.toInternal as (value: unknown) => unknown;
@@ -548,7 +679,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 						return failure(thrown);
 					}
 				},
-			} satisfies ToolDefinition<typeof tool.parameters> & { docTopics(): Readonly<Record<string, string>> };
+			} satisfies ToolDefinition<typeof tool.parameters>;
 			pi.registerTool(definition);
 		}
 	}
@@ -591,7 +722,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 						`When the default subagent is disabled and the block has no preset agent, add \`agent: "<available agent>"\` (for example "task:mid").`,
 						`默认 subagent 被禁用且块没有预设 agent 时加上 \`agent: "<可用的 agent>"\`（例如 "task:mid"）。`,
 					);
-		const launchCmd = `playbook_launch --json ${shellJson({ doc: absolute, op: "launch", ...scoped(data.run), blocks: data.blocks })}`;
+		const launchCmd = `playbook_launch --json ${shellJson({ doc: absolute, ...scoped(data.run), blocks: data.blocks })}`;
 		return orchestration
 			? tr(
 					`A person requested launching orchestration blocks ${blocks}. Next: run \`${launchCmd}\` to get l<n>, then send a separate eval whose code is only \`await playbook.exec("l<n>")\`.`,
@@ -619,6 +750,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		event: Exclude<EventPayload, { event: "interrupted" | "agents_requested" | "launch_requested" }>,
 	): Promise<string> {
 		let next: string;
+		const connected = connectedDocs();
 		switch (event.event) {
 			case "stop_requested": {
 				const stopCalls = event.data.launches.map((item) => `\`await playbook.stop("${item.id}")\``);
@@ -629,7 +761,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				const launchesZh = event.data.launches.map((item) => item.id).join("、");
 				const agentsEn = agents.join(", ");
 				const agentsZh = agents.join("、");
-				const resetCmd = `playbook_edit --json ${shellJson({ op: "status", block: event.data.block, status: "todo", ...scoped(event.data.run) })}`;
+				const resetCmd = `playbook_edit_structure --json ${shellJson({ ...scoped(event.data.run), meta: { block: event.data.block, status: "todo" } })}`;
 				next = tr(
 					`A person requested stopping execution of block ${event.data.block} (Launch ${launchesEn}${agents.length ? `, subagent ${agentsEn}` : ""}). Next: execute ${stopsEn} in eval: this cancels the subagents this session started for these Launches and sets blocks still running back to todo; any waiting playbook.result calls then record the failure and close the Launch. If a subagent was not started in this session through playbook.agent / playbook.spawn, stop it your own way first, then run \`${resetCmd}\` to set it back to todo.`,
 					`人请求打断块 ${event.data.block} 的执行（Launch ${launchesZh}${agents.length ? `，subagent ${agentsZh}` : ""}）。下一步：在 eval 中执行 ${stopsZh}：它取消本会话为这些 Launch 启动的 subagent，并把仍在执行中的块改回 todo；等着的 playbook.result 随后记录失败并关闭 Launch。若 subagent 不是本会话通过 playbook.agent / playbook.spawn 启动的，先用你自己的方式停止它，再运行 \`${resetCmd}\` 改回 todo。`,
@@ -637,7 +769,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				break;
 			}
 			case "block_changed": {
-				const rebaseCmd = `playbook_launch --json ${shellJson({ op: "rebase", launch: event.data.launch.id })}`;
+				const rebaseCmd = `playbook_launch --json ${shellJson({ rebase_launch: event.data.launch.id })}`;
 				next = tr(
 					`A person changed block ${JSON.stringify(event.data.changed)}, on which Launch ${event.data.launch.id} depends (see the diff below). You can: run \`${rebaseCmd}\` to accept the current text as the new baseline (then playbook.spawn and playbook.exec use it); notify the subagent that is still running; or do nothing.`,
 					`人修改了 Launch ${event.data.launch.id} 依赖的块 ${JSON.stringify(event.data.changed)}（diff 见下）。可以：运行 \`${rebaseCmd}\` 接受当前文本为新基线（之后 playbook.spawn 与 playbook.exec 使用它）；告诉仍在运行的 subagent；或不处理。`,
@@ -646,8 +778,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			}
 			case "update_due":
 				next = tr(
-					`The status update for Run ${event.data.run} is due. Next: run \`playbook_timeline --json '{"op":"post","run":"${event.data.run}","kind":"update","text":"<update>"}'\` to write the update, or \`playbook_timeline --json '{"op":"snooze","run":"${event.data.run}","after":<seconds>}'\` to postpone it.`,
-					`Run ${event.data.run} 的状态更新到期。下一步：运行 \`playbook_timeline --json '{"op":"post","run":"${event.data.run}","kind":"update","text":"<更新内容>"}'\` 写更新，或运行 \`playbook_timeline --json '{"op":"snooze","run":"${event.data.run}","after":<秒数>}'\` 推迟。`,
+					`The status update for Run ${event.data.run} is due. Next: run \`playbook_timeline --json '{"run":"${event.data.run}","kind":"update","text":"<update>"}'\` to write the update, or \`playbook_timeline --json '{"run":"${event.data.run}","snooze_seconds":<seconds>}'\` to postpone it.`,
+					`Run ${event.data.run} 的状态更新到期。下一步：运行 \`playbook_timeline --json '{"run":"${event.data.run}","kind":"update","text":"<更新内容>"}'\` 写更新，或运行 \`playbook_timeline --json '{"run":"${event.data.run}","snooze_seconds":<秒数>}'\` 推迟。`,
 				);
 				break;
 			case "revision_requested": {
@@ -657,11 +789,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					?.request({ op: "revisions", args: { ...scoped(event.data.run), block: event.data.block, after: event.data.revision - 1 } });
 				const found = answer?.ok ? revisionsResult.safeParse(answer.result) : undefined;
 				const prompt = found?.success ? found.data.revisions.find((item) => item.seq === event.data.revision)?.prompt : undefined;
-				const history = `playbook_read --json ${shellJson({ doc: absolute, ...scoped(event.data.run), op: "revisions", block: event.data.block })}`;
-				const readCmd = `playbook_read --json ${shellJson({ doc: absolute, ...scoped(event.data.run), block: event.data.block })}`;
+				const historyUrl = formatPlaybookUrl(absolute, connected, {
+					run: event.data.run,
+					path: "revisions",
+					query: { block: event.data.block },
+				});
+				const readUrl = formatPlaybookUrl(absolute, connected, { run: event.data.run, path: event.data.block });
 				next = tr(
-					`A person submitted change request #${event.data.revision} for the ${where} design block ${event.data.block}${prompt === undefined ? ` (failed to read; query with \`${history}\`)` : `:\n<prompt>\n${prompt}\n</prompt>`}\nNext: read the requirement and current design with \`${readCmd}\`, then revise the design according to the change request: use \`playbook_edit\` write, replace, or panel to change design; do not change requirement. Keep the revised design in the Where/What/How panel structure. When the prompt selects a value for a slot, change that slot fence's \`= \` line to that value; when the original value is not in the options, add a \`~ <original value>\` line. To retrieve previous change requests, run \`${history}\`.`,
-					`人对${where}的设计块 ${event.data.block} 提交了修改 prompt #${event.data.revision}${prompt === undefined ? `（读取失败，用 \`${history}\` 查询）` : `：\n<prompt>\n${prompt}\n</prompt>`}\n下一步：用 \`${readCmd}\` 读需求与当前设计稿，按 prompt 修订设计：用 \`playbook_edit\` 的 write、replace 或 panel 改 design；不要改 requirement。修订后的设计稿保持 Where/What/How 面板结构。prompt 选定了某个槽位的取值时，把那个 slot 围栏的 \`= \` 行改成该值；原来的值不在选项里时补一行 \`~ <原值>\`。需要以前的修改要求时用 \`${history}\`。`,
+					`A person submitted change request #${event.data.revision} for the ${where} design block ${event.data.block}${prompt === undefined ? ` (failed to read; query with \`read ${historyUrl}\`)` : `:\n<prompt>\n${prompt}\n</prompt>`}\nNext: read the requirement and current design with \`read ${readUrl}\`, then revise the design according to the change request: use \`playbook_edit_content\` (\`design\`, \`find\`/\`replace\`, or \`panel\`/\`text\`) to change design; do not change requirement. Keep the revised design in the Where/What/How panel structure. When the prompt selects a value for a slot, change that slot fence's \`= \` line to that value; when the original value is not in the options, add a \`~ <original value>\` line. To retrieve previous change requests, run \`read ${historyUrl}\`.`,
+					`人对${where}的设计块 ${event.data.block} 提交了修改 prompt #${event.data.revision}${prompt === undefined ? `（读取失败，用 \`read ${historyUrl}\` 查询）` : `：\n<prompt>\n${prompt}\n</prompt>`}\n下一步：用 \`read ${readUrl}\` 读需求与当前设计稿，按 prompt 修订设计：用 \`playbook_edit_content\`（\`design\`、\`find\`/\`replace\` 或 \`panel\`/\`text\`）改 design；不要改 requirement。修订后的设计稿保持 Where/What/How 面板结构。prompt 选定了某个槽位的取值时，把那个 slot 围栏的 \`= \` 行改成该值；原来的值不在选项里时补一行 \`~ <原值>\`。需要以前的修改要求时用 \`read ${historyUrl}\`。`,
 				);
 				break;
 			}
@@ -756,27 +892,25 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		}
 		const ready = await (await clientFor(absolute, ctx)).connect();
 		if (!ready.ok) return { ok: false, error: { code: ready.error.code, message: ready.error.message } };
-		const readCmd = `playbook_read --json ${shellJson({ doc: absolute })}`;
+		const readUrl = formatPlaybookUrl(absolute, connectedDocs());
 		pi.sendMessage({
 			customType: "playbook-event",
 			content: tr(
-				`This is a Playbook document service notice, not a user message\nA person designated this session as the coordinator for ${absolute} in the Playbook pane; the extension is connected (equivalent to \`playbook_open\`). Run \`${readCmd}\` to learn it; then follow the next step in each Playbook notice.`,
-				`这是 Playbook 文档服务的通知，不是用户消息\n人在 Playbook 面板里指定本会话为 ${absolute} 的协调者，扩展已经连接（等同 \`playbook_open\`）。用 \`${readCmd}\` 了解它；之后每收到 Playbook 通知，按通知里的下一步做。`,
+				`This is a Playbook document service notice, not a user message\nA person designated this session as the coordinator for ${absolute} in the Playbook pane; the extension is connected (equivalent to \`playbook_open\`). Run \`read ${readUrl}\` to learn it; then follow the next step in each Playbook notice.`,
+				`这是 Playbook 文档服务的通知，不是用户消息\n人在 Playbook 面板里指定本会话为 ${absolute} 的协调者，扩展已经连接（等同 \`playbook_open\`）。用 \`read ${readUrl}\` 了解它；之后每收到 Playbook 通知，按通知里的下一步做。`,
 			),
 			display: true,
 		});
 		return here;
 	}
-	let paneListener: PaneListener | null = null;
-	let paneContext: ExtensionContext | null = null;
 
 	pi.on("session_start", async (_event, ctx) => {
 		if (ctx.agent.kind !== "main") return;
+		paneContext = ctx;
 		registerTools(tools);
 		registerCommands();
 		const notice = ternNotice(ternState);
 		if (notice) ctx.ui.notify(notice.text, notice.level);
-		paneContext = ctx;
 		busy = !ctx.isIdle();
 		if (paneListener === null) paneListener = await listenPane(paneEndpoint(pane), (request) => onPaneRequest(request, paneContext!));
 	});
@@ -795,6 +929,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		stopped = true;
 		paneListener?.close();
 		paneListener = null;
+		paneContext = null;
+		if (registered) {
+			const router = InternalUrlRouter.instance();
+			if (playbookUrlHandler !== null && router.getHandler("playbook") === playbookUrlHandler) {
+				router.unregister("playbook");
+			}
+			playbookUrlHandler = null;
+			clearToolTopics("omp-playbooks");
+		}
 		for (const client of clients.values()) client.close();
 		clients.clear();
 		launches = [];

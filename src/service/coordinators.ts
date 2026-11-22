@@ -94,8 +94,8 @@ export function pairBeside(own: string, target: string): Promise<Outcome> {
 
 export function initPrompt(doc: string): string {
 	return tr(
-		`Call playbook_open with doc ${doc} and act as this Playbook's coordinator. First use playbook_read to read it once, then wait: after each Playbook notice, follow its Next step.`,
-		`调用 playbook_open，doc 为 ${doc}，作为这份 Playbook 的协调者。先用 playbook_read 读一遍它，然后等待：之后每收到 Playbook 通知，就按通知里的下一步做。`,
+		`Call playbook_open with doc ${doc} and act as this Playbook's coordinator. First read it via its playbook:// URL, then wait: after each Playbook notice, follow its Next step.`,
+		`调用 playbook_open，doc 为 ${doc}，作为这份 Playbook 的协调者。先通过它的 playbook:// URL 读一遍，然后等待：之后每收到 Playbook 通知，就按通知里的下一步做。`,
 	);
 }
 

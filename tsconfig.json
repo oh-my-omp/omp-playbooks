@@ -10,6 +10,7 @@
 		"exactOptionalPropertyTypes": false,
 		"noImplicitOverride": true,
 		"noFallthroughCasesInSwitch": true,
+		"verbatimModuleSyntax": true,
 		"skipLibCheck": true,
 		"allowImportingTsExtensions": true,
 		"noEmit": true
