@@ -63,7 +63,7 @@ omp plugin install 'https://github.com/oh-my-omp/omp-playbooks#release'
 
 扩展加载时若在 `PATH` 找到 `tern`，就把包内的 `tern-plugin/` 链接到 Tern；已链接到同一目录时跳过。找不到 `tern` 时不链接，安装照样成功，因此没装 Tern 的机器也能装上插件；运行于 Tern pane、但 omp 的 `PATH` 里没有 `tern` 的主会话会收到警告，之后找到 `tern` 的那次扩展加载会补上链接。链接的就是 omp 安装目录本身。Tern 守护进程会自己重新加载原地修改的插件文件，但升级会整个替换安装目录，守护进程会停在“链接目标不存在”或旧版本上。所以扩展随后比较 `tern-plugin/plugin.toml` 的版本和守护进程已加载的版本，不同时执行 `tern plugin reload`，并在下一个运行于 Tern pane 的主会话提示结果。重新加载后版本仍不一致时只警告、不中断安装，下次加载扩展会再比较。
 
-除这一链接外，扩展只在 omp 运行于 session daemon 托管的 Tern pane 时起作用；daemon 把 `TERN_PANE` 设为该 pane 的数字 ID。在别处启动的 omp（普通终端、`omp -p`、没有或不是数字的 `TERN_PANE`）不会从扩展得到任何内容：没有 `playbook_*` 工具、`playbook://` 或 `tool://playbook_open/*` URL，没有命令、通知，也不改写 eval。
+除这一链接外，扩展只在 omp 运行于 session daemon 托管的 Tern pane 时起作用；daemon 把 `TERN_PANE` 设为该 pane 的数字 ID。在别处启动的 omp（普通终端、`omp -p`、没有或不是数字的 `TERN_PANE`）不会从扩展得到任何内容：没有 `playbook_*` 工具、`playbook://` 或 `help://playbook_open/*` URL，没有命令、通知，也不改写 eval。
 
 **拉取仓库或重启会话不会更新已安装的插件副本。** 已安装过旧实现时先更新：
 
@@ -112,7 +112,7 @@ bun src/service/main.ts /绝对路径/playbook.yaml
 
 扩展会用解析出的语言把 `OMOMP_LANG` 传给文档服务和新协调者会话，因此它们与打开它们的 omp 会话一致。手动启动的服务、从面板接入的已有 omp 会话和 Tern 命令，用各自环境里的语言。Tern 命令读的是 Tern 应用的环境，可能不包含 shell profile 里的设置。每个进程每次解析语言时都会重新读取自己的环境变量。修改 shell profile 不会改变已运行进程的环境变量：在启动 omp 的地方设置变量，再重启 omp 和 Playbook 面板。
 
-Playbook 文件的内容不翻译：文件里写的是什么，显示和编译的就是什么。语言只决定新写的文字用哪种语言。模型读到的工具说明和 topics 是英文；`tool://playbook_open/format-outline` 与 `tool://playbook_open/execution` 会在每次读取时动态注入会话语言规则，要求协调者把自己新加的标题、正文、设计稿和槽位选项写成会话的语言，`## A Where · …` 面板的角色词保持英文，已有文字不动；启动 prompt 尾注要求 subagent 用这种语言写完成报告。面板自己插入的文字（新流程节点的名字、粘贴图片的说明）跟随面板的语言。
+Playbook 文件的内容不翻译：文件里写的是什么，显示和编译的就是什么。语言只决定新写的文字用哪种语言。模型读到的工具说明和 topics 是英文；`help://playbook_open/format-outline` 与 `help://playbook_open/execution` 会在每次读取时动态注入会话语言规则，要求协调者把自己新加的标题、正文、设计稿和槽位选项写成会话的语言，`## A Where · …` 面板的角色词保持英文，已有文字不动；启动 prompt 尾注要求 subagent 用这种语言写完成报告。面板自己插入的文字（新流程节点的名字、粘贴图片的说明）跟随面板的语言。
 
 ## 文件与块
 
@@ -361,11 +361,11 @@ subagent 收到的是冻结文本，不是 UI、实时设计页或隐式 Playboo
 
 写操作工具采用无 `op` 枚举的扁平 JSON 参数（在 bash 中通过 `playbook_<name> --json '{…}'` 或 CLI 选项传入，在 eval 中通过 `await tool.playbook_<name>({…})` 调用）。只有恰好连接了一份文档时才能省略 `doc`；省略 `run` 即作用于 Playbook 文件本身。
 
-所有工具的 `description` 均控制在 200 字符以内。领域指南位于 `src/extension/topics/`，通过共享 `tool://` 总线注册为 `tool://playbook_open/` 下的 3 篇专题：`format-outline`、`slots-references`、`execution`（每次读取动态注入 `OMOMP_LANG` 语言规则）。
+所有工具的 `description` 均控制在 200 字符以内。领域指南位于 `src/extension/topics/`，同时通过原生 `docTopics` 与共享 `help://` 总线暴露为 `help://playbook_open/` 下的 3 篇专题：`format-outline`、`slots-references`、`execution`（每次读取动态注入 `OMOMP_LANG` 语言规则）。
 
 | 工具 | 参数 |
 |---|---|
-| `playbook_open` | `{doc}` — 打开/连接文档，返回 `blocks`、`runs`、`pane`、`playbook://` URL 模板与 `tool://playbook_open/*` 专题入口 |
+| `playbook_open` | `{doc}` — 打开/连接文档，返回 `blocks`、`runs`、`pane`、`playbook://` URL 模板与 `help://playbook_open/*` 专题入口 |
 | `playbook_edit_content` | `{doc?, run?, block, title?, body?, design?, panel?, text?, find?, replace?}` — 精确局部替换（`find`+`replace`）、整体更新（`body`/`design`/`text`）、替换面板（`panel` 字母 ID 或 `where`/`what`/`how` + `text`）或改 `title` |
 | `playbook_edit_structure` | `{doc?, run?, add?, move?, remove_block?, meta?}` — `add: {title, body\|design, after?, at_top?, agent?, isolation?}`；`move: {block, after?\|at_top?}`；`remove_block: "b<n>"`；`meta: {block, agent?: string\|null, isolation?: "none"\|"worktree"\|null, status?: "todo"\|"running"\|"done", tracked?: boolean}` |
 | `playbook_compile` | `{doc?, run?, blocks?: […], targets?: […], refetch?: boolean}` — 编译块，或传 `refetch: true` 与 `targets` 重新拉取外部引用 |

@@ -31,6 +31,7 @@ import { ensureTernPlugin } from "../src/extension/tern-setup";
 import { playbookTopics } from "../src/extension/topics";
 
 const LEGACY_SCHEME = `${"xd"}://`;
+const LEGACY_TOOL_SCHEME = `${"tool"}://`;
 const summary = {
 	id: "r1",
 	name: "Run",
@@ -194,6 +195,7 @@ type Assistant = Extract<Message, { role: "assistant" }>;
 type TextPart = Extract<Assistant["content"][number], { type: "text" | "thinking" }>;
 type Tool = Omit<ToolDefinition, "parameters"> & {
 	parameters: { parse(value: unknown): unknown };
+	docTopics?: () => Readonly<Record<string, string>>;
 };
 type ToolCallResult = (Omit<ToolCallEventResult, "input"> & { input?: EvalToolParams }) | undefined;
 type Handler = (event: unknown, ctx: ExtensionContext) => unknown | Promise<unknown>;
@@ -812,7 +814,7 @@ test("open starts the document service beside the coordinator pane and returns h
 		pane: "document-pane",
 		doc: await realpath(doc),
 		urls: { runs: "playbook://" },
-		topics: ["tool://playbook_open/format-outline", "tool://playbook_open/slots-references", "tool://playbook_open/execution"],
+		topics: ["help://playbook_open/format-outline", "help://playbook_open/slots-references", "help://playbook_open/execution"],
 	});
 	const real = await realpath(doc);
 	expect(await tern.args()).toEqual([
@@ -886,7 +888,7 @@ test("a main session in a daemon Tern pane registers all eight tools as discover
 	for (const tool of h.tools.values()) {
 		expect(tool.loadMode).toBe("discoverable");
 		expect(tool.defaultInactive).toBeUndefined();
-		expect("docTopics" in tool).toBe(false);
+		expect(typeof tool.docTopics).toBe(tool.name === "playbook_open" ? "function" : "undefined");
 	}
 	const first = [...h.tools.values()];
 	await h.event("session_start");
@@ -902,14 +904,16 @@ test("every tool keeps its entire description <= 200 chars with zero legacy sche
 		expect(tool.description.length).toBeLessThanOrEqual(200);
 		expect(tool.description).not.toBe("");
 		expect(tool.description).not.toContain(LEGACY_SCHEME);
-		expect(tool.description).not.toContain("help://");
+		expect(tool.description).not.toContain(LEGACY_TOOL_SCHEME);
 	}
+	expect(h.tools.get("playbook_open")!.description).toContain("help://playbook_open/");
 });
 
-test("topics are consolidated into 3 tool://playbook_open/* entries via registerToolTopics without docTopics", async () => {
+test("topics are consolidated into 3 help://playbook_open/* entries via docTopics and registerToolTopics", async () => {
 	const h = await harness();
 	await h.event("session_start");
 	expect(h.warnings).toEqual([]);
+	expect(InternalUrlRouter.instance().getHandler("tool")).toBeUndefined();
 	const topics = playbookTopics();
 	expect(topics.map((doc) => `${doc.tool}/${doc.topic}`)).toEqual([
 		"playbook_open/execution",
@@ -918,24 +922,25 @@ test("topics are consolidated into 3 tool://playbook_open/* entries via register
 	]);
 	const hubDocs = listToolTopics("playbook_open");
 	expect(hubDocs.map((doc) => doc.topic)).toEqual(["execution", "format-outline", "slots-references"]);
+	const openDocTopics = h.tools.get("playbook_open")!.docTopics!();
+	expect(Object.keys(openDocTopics)).toEqual(["execution", "format-outline", "slots-references"]);
 	for (const doc of hubDocs) {
 		const resolved = resolveToolTopic(doc.tool, doc.topic);
 		expect(resolved).toBeDefined();
+		expect(openDocTopics[doc.topic]).toBe(resolved!.content);
 		expect(resolved!.content.trim()).not.toBe("");
 		expect(resolved!.content).not.toStartWith("---");
 		expect(resolved!.content).not.toContain(LEGACY_SCHEME);
-		expect(resolved!.content).not.toContain("help://");
+		expect(resolved!.content).not.toContain(LEGACY_TOOL_SCHEME);
 	}
-	const router = InternalUrlRouter.instance();
-	const formatRes = await router.resolve("tool://playbook_open/format-outline");
-	expect(formatRes.content as string).toStartWith("# Playbook file format\n");
-	expect(formatRes.content as string).toContain("tool://playbook_open/slots-references");
-	const execRes = await router.resolve("tool://playbook_open/execution");
-	expect(execRes.content as string).toContain("block_changed");
-	expect(execRes.content as string).toContain("# Language");
+	expect(openDocTopics["format-outline"]).toStartWith("# Playbook file format\n");
+	expect(openDocTopics["format-outline"]).toContain("help://playbook_open/slots-references");
+	expect(openDocTopics["format-outline"]).toContain("help://playbook_open/execution");
+	expect(openDocTopics.execution).toContain("block_changed");
+	expect(openDocTopics.execution).toContain("# Language");
 });
 
-test("tool://playbook_open/execution and format-outline regenerate language guidance afresh on every read", async () => {
+test("help://playbook_open/execution and format-outline regenerate language guidance afresh on every read", async () => {
 	const original = process.env.OMOMP_LANG;
 	cleanup.push(() => {
 		if (original === undefined) delete process.env.OMOMP_LANG;
@@ -943,15 +948,17 @@ test("tool://playbook_open/execution and format-outline regenerate language guid
 	});
 	const h = await harness();
 	await h.event("session_start");
-	const router = InternalUrlRouter.instance();
+	const openTool = h.tools.get("playbook_open")!;
 	process.env.OMOMP_LANG = "en";
-	expect((await router.resolve("tool://playbook_open/execution")).content as string).toContain("in English");
-	expect((await router.resolve("tool://playbook_open/format-outline")).content as string).toContain("in English");
+	expect(openTool.docTopics!().execution).toContain("in English");
+	expect(openTool.docTopics!()["format-outline"]).toContain("in English");
+	expect(resolveToolTopic("playbook_open", "execution")!.content).toContain("in English");
 	process.env.OMOMP_LANG = "zh";
-	expect((await router.resolve("tool://playbook_open/execution")).content as string).toContain("in Chinese");
-	expect((await router.resolve("tool://playbook_open/format-outline")).content as string).toContain("in Chinese");
+	expect(openTool.docTopics!().execution).toContain("in Chinese");
+	expect(openTool.docTopics!()["format-outline"]).toContain("in Chinese");
+	expect(resolveToolTopic("playbook_open", "execution")!.content).toContain("in Chinese");
 	process.env.OMOMP_LANG = "en";
-	expect((await router.resolve("tool://playbook_open/execution")).content as string).toContain("in English");
+	expect(openTool.docTopics!().execution).toContain("in English");
 });
 
 test("playbook:// registers without promptDoc, serves all read/write routes, and unregisters on shutdown", async () => {

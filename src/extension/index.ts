@@ -12,7 +12,7 @@ import {
 	type StatefulHarnessHandoff,
 } from "../../omomp-shared/compact-handoff";
 import { tr } from "../../omomp-shared/i18n";
-import { clearToolTopics, registerInternalScheme, registerToolTopics } from "../../omomp-shared/internal-url";
+import { clearToolTopics, registerInternalScheme, registerToolTopics, toDocTopics } from "../../omomp-shared/internal-url";
 import { type BlockId, parseBlockId, parseLaunchId, type RecordKind, type RunId } from "../domain/model";
 import {
 	documentEndpoint,
@@ -355,7 +355,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					checks: `playbook://${slug}[/<run>]/checks[?blocks=<b1,b2>]`,
 					post_timeline: `write playbook://${slug}[/<run>]/timeline[?kind=update|result|failure|retrospective]`,
 				},
-				topics: ["tool://playbook_open/format-outline", "tool://playbook_open/slots-references", "tool://playbook_open/execution"],
+				topics: ["help://playbook_open/format-outline", "help://playbook_open/slots-references", "help://playbook_open/execution"],
 			},
 		};
 	}
@@ -432,7 +432,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			parameters: schemas.playbook_open.parameters,
 			toInternal: schemas.playbook_open.toInternal,
 			description:
-				"Connect to a Playbook YAML (opens Tern pane if needed). Read/write via playbook:// URLs; topics: tool://playbook_open/{format-outline,slots-references,execution}.",
+				"Connect to a Playbook YAML (opens Tern pane if needed). Read/write via playbook:// URLs; topics: help://playbook_open/{format-outline,slots-references,execution}.",
 			run: (params, ctx) => open(params.doc, ctx),
 		} satisfies Tool<"playbook_open">,
 		{
@@ -441,7 +441,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			parameters: schemas.playbook_edit_content.parameters,
 			toInternal: schemas.playbook_edit_content.toInternal,
 			description:
-				"Edit a Playbook block's title, body/design text, panel, or exact find/replace. Locks block; NotLocked means human interrupted. See tool://playbook_open/format-outline.",
+				"Edit a Playbook block's title, body/design text, panel, or exact find/replace. Locks block; NotLocked means human interrupted. See help://playbook_open/format-outline.",
 			run: (params, ctx) => {
 				const scope = { ...scoped(params.run), block: params.block };
 				return editBlockWithLock(params.doc, ctx, scope, async (lockedResult, client) => {
@@ -485,7 +485,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			parameters: schemas.playbook_edit_structure.parameters,
 			toInternal: schemas.playbook_edit_structure.toInternal,
 			description:
-				"Add, move, or remove Playbook blocks, or set task block metadata (agent, isolation, status, tracked). See tool://playbook_open/format-outline.",
+				"Add, move, or remove Playbook blocks, or set task block metadata (agent, isolation, status, tracked). See help://playbook_open/format-outline.",
 			run: async (params, ctx) => {
 				switch (params.kind) {
 					case "insert_task": {
@@ -592,7 +592,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			parameters: schemas.playbook_compile.parameters,
 			toInternal: schemas.playbook_compile.toInternal,
 			description:
-				"Compile blocks into their final expanded prompt, or set refetch: true with targets to refresh external references. See tool://playbook_open/slots-references.",
+				"Compile blocks into their final expanded prompt, or set refetch: true with targets to refresh external references. See help://playbook_open/slots-references.",
 			run: async (params, ctx) => {
 				switch (params.kind) {
 					case "compile":
@@ -673,7 +673,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			parameters: schemas.playbook_launch.parameters,
 			toInternal: schemas.playbook_launch.toInternal,
 			description:
-				"Create, bind, rebase, or close a Launch. Inspect via read playbook://<doc>[/<run>]/launches/<id>. Prefer playbook.agent/playbook.run in eval (tool://playbook_open/execution).",
+				"Create, bind, rebase, or close a Launch. Inspect via read playbook://<doc>[/<run>]/launches/<id>. Prefer playbook.agent/playbook.run in eval (help://playbook_open/execution).",
 			run: (params, ctx) => {
 				switch (params.kind) {
 					case "launch":
@@ -698,7 +698,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	function registerTools(entries: readonly AnyTool[]): void {
 		if (registered) return;
 		registered = true;
-		registerToolTopics("omp-playbooks", playbookTopics());
+		const topicDocs = playbookTopics();
+		registerToolTopics("omp-playbooks", topicDocs);
 		playbookUrlHandler = createPlaybookProtocolHandler({
 			connectedDocs,
 			resolveDoc: documentFor,
@@ -713,12 +714,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		});
 		registerInternalScheme(InternalUrlRouter.instance(), "omp-playbooks", playbookUrlHandler);
 		for (const tool of entries) {
+			const ownTopics = topicDocs.filter((doc) => doc.tool === tool.name);
 			const definition = {
 				name: tool.name,
 				label: tool.label,
 				parameters: tool.parameters,
 				loadMode: "discoverable",
 				description: tool.description,
+				...(ownTopics.length > 0 ? { docTopics: toDocTopics(ownTopics) } : {}),
 				async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 					const parse = tool.parameters.parse as (value: unknown) => unknown;
 					const toInternal = tool.toInternal as (value: unknown) => unknown;
@@ -739,7 +742,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 						return failure(thrown);
 					}
 				},
-			} satisfies ToolDefinition<typeof tool.parameters>;
+			} satisfies ToolDefinition<typeof tool.parameters> & { docTopics?: () => Readonly<Record<string, string>> };
 			pi.registerTool(definition);
 		}
 	}
