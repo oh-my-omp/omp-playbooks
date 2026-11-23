@@ -14,9 +14,9 @@ import { IpcConnection, IpcServer } from "@oh-my-pi/pi-natives";
 import {
 	type CompactExtensionAPI,
 	type CompactPluginContext,
+	getSharedCompactCoordinator,
 	isCompacting,
 	releaseCompactionBarrier,
-	SharedCompactCoordinator,
 } from "../omomp-shared/compact-handoff";
 import { documentEndpoint, type EventPayload, paneEndpoint, type Request } from "../src/domain/protocol";
 import extension, { createPlaybookCompactHandoff } from "../src/extension/index";
@@ -168,23 +168,21 @@ describe("omp-playbooks compact handoff", () => {
 		expect(handoff.pluginId).toBe("omp-playbooks");
 		expect(handoff.captureState(makeCompactContext())).toBeNull();
 
-		const coordinator = new SharedCompactCoordinator();
+		const coordinator = getSharedCompactCoordinator();
+		coordinator.resetForTest();
 		coordinator.register(handoff);
 		const prepared = coordinator.prepareSnapshot(makeCompactContext(), {
-			isUpdate: false,
-			fileOpsPruneReport: {
-				totalInputPaths: 0,
-				strippedQueryCount: 0,
-				filteredNoiseCount: 0,
-				keptUniqueCandidateCount: 0,
-				selectedCount: 0,
-				repoSourcePathsSelected: [],
-				selectedPaths: [],
-			},
+			totalInputPaths: 0,
+			strippedQueryCount: 0,
+			filteredNoiseCount: 0,
+			keptUniqueCandidateCount: 0,
+			selectedCount: 0,
+			repoSourcePathsSelected: [],
+			selectedPaths: [],
 		});
 		expect(prepared.activeHandoffs).toEqual([]);
 		expect(prepared.inactiveStatefulPluginIds).toEqual(["omp-playbooks"]);
-		expect(prepared.harnessProvidedBlock).not.toContain("omp-playbooks");
+		expect(prepared.compactingResult.context?.join("\n")).not.toContain("omp-playbooks");
 	});
 
 	test("createPlaybookCompactHandoff emits harness-provided claim and delta-stream injection when Playbooks are connected", async () => {
@@ -206,7 +204,8 @@ describe("omp-playbooks compact handoff", () => {
 			expect(injection.content).toContain(formatPlaybookUrl(doc, docs));
 		}
 
-		const coordinator = new SharedCompactCoordinator();
+		const coordinator = getSharedCompactCoordinator();
+		coordinator.resetForTest();
 		const hostHandlers = new Map<string, EventHandler[]>();
 		const hostPi: CompactExtensionAPI = {
 			on(event: string, handler: unknown) {
@@ -250,8 +249,7 @@ describe("omp-playbooks compact handoff", () => {
 			sessionId: "s1",
 			messages: [],
 		} satisfies Partial<SessionCompactingEvent>)) as SessionCompactingResult;
-		expect(compacting.context?.join("\n")).toContain("<harness-provided>");
-		expect(compacting.context?.join("\n")).toContain("[omp-playbooks]");
+		expect(compacting.context?.join("\n")).toContain("harness-provided [omp-playbooks]");
 		expect(compacting.context?.join("\n")).toContain('source="omp-playbooks/active-runs"');
 
 		await emitHost("session_compact", {

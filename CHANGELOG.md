@@ -4,6 +4,7 @@
 
 ### Changed
 
+- Updated the shared copy of `compact-handoff.ts` to oh-my-omp/shared@db9dde4.
 - Synced `compact-handoff.ts` and `context-delta.ts` from `oh-my-omp/shared@8f2c5e520126`, deferred `playbook-event` launch, pane attach, and service notices across compaction via the shared compaction barrier, and registered `omp-playbooks` (`source="omp-playbooks/active-runs"`) as a stateful post-compaction handoff that re-injects connected Playbook document paths and `playbook://` handles via `delta-stream`.
 
 ## [0.1.54] - 2026-11-22
