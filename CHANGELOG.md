@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The extension loads again on omp 19.2.0: `playbook://` tool errors now come from the host's `@oh-my-pi/pi-coding-agent/tools/tool-errors`, and the Playbook pane draws SVG figures and follows the dark/light theme through the host's `ui/transcript/figures/svg` and `ui/theme/service` instead of pi-tui paths removed in 19.2.0.
+- `bun.lock` now records the host packages as dev and peer dependencies, matching `package.json`, so `bun install --frozen-lockfile` succeeds again.
+
 ## [0.1.55] - 2026-11-24
 
 ### Changed

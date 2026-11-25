@@ -6,7 +6,7 @@ import type {
 	ProtocolHandler,
 	SchemeSpec,
 } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { tr } from "../../omomp-shared/i18n";
 import { type BlockId, type LaunchId, parseBlockId, parseLaunchId, parseRunId, type RecordKind, type RunId } from "../domain/model";
 import type { Request } from "../domain/protocol";

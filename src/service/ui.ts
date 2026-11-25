@@ -2,9 +2,9 @@ import { createHash } from "node:crypto";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
-import { svgFigurePalette } from "@oh-my-pi/pi-tui/chat/svg-figure";
-import { prepareSvg } from "@oh-my-pi/pi-tui/chat/svg-source";
-import { initThemeSync, setTheme } from "@oh-my-pi/pi-tui/theme/theme";
+import { initTheme, setTheme } from "@oh-my-pi/pi-coding-agent/ui/theme/service";
+import { figurePalette, prepareSvg } from "@oh-my-pi/pi-coding-agent/ui/transcript/figures/svg";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { tr } from "../../omomp-shared/i18n";
 import { type Block, type BlockId, type DocRef, type HumanField, outlinedText } from "../domain/model";
 import type { BlockView, CoreApi, DocView, RenderStatus } from "../domain/ports";
@@ -279,7 +279,7 @@ export function startUi(
 	coordinators: CoordinatorPicker,
 	clipboardImage: ClipboardImageReader,
 ): void {
-	initThemeSync();
+	initTheme();
 	let opened = false;
 	let mounted = false;
 	let renderError: string | null = null;
@@ -699,7 +699,7 @@ export function startUi(
 			id: `${block.id}.${field}`,
 			context: {
 				svg: (id, svg, size, alt) =>
-					imageNode(id, new TextEncoder().encode(prepareSvg(svg, svgFigurePalette())), "image/svg+xml", alt, size),
+					imageNode(id, new TextEncoder().encode(prepareSvg(svg, figurePalette(currentTheme()))), "image/svg+xml", alt, size),
 				image: (id, bytes, mime, alt) => imageNode(id, bytes, mime, alt),
 				readFile: (path) => readDraftFile(baseDir, path),
 			},
