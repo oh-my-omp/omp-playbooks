@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.57] - 2026-11-27
+
 ### Fixed
 
 - The Playbook document service starts again on machines whose omp plugin tree still holds older host packages (for example `@oh-my-pi/pi-coding-agent` 18.2.6): `playbook_open` and Tern's `Playbook: open` no longer fail with `Cannot find module '@oh-my-pi/pi-coding-agent/ui/theme/service'`. The service runs outside omp, so the host packages it imports (`pi-coding-agent`, `pi-natives`, `pi-tui`, `pi-utils`) are now regular dependencies installed at their current version instead of peers satisfied by whatever copy the plugin tree already had.
