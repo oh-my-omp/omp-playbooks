@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.56] - 2026-11-27
+
 ### Fixed
 
 - The extension loads again on omp 19.2.0: `playbook://` tool errors now come from the host's `@oh-my-pi/pi-coding-agent/tools/tool-errors`, and the Playbook pane draws SVG figures and follows the dark/light theme through the host's `ui/transcript/figures/svg` and `ui/theme/service` instead of pi-tui paths removed in 19.2.0.
