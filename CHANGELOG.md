@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Installed the runtime packages as dependencies rather than peer requirements
+- Updated locked @oh-my-pi packages from 19.2.0 to 19.2.1
+
 ## [0.1.56] - 2026-11-27
 
 ### Fixed
