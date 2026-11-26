@@ -16,9 +16,9 @@ import type {
 	ToolDefinition,
 } from "@oh-my-pi/pi-coding-agent";
 import { InternalUrlRouter, parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import { defaultFormData, type HtmlFormData } from "@oh-my-pi/pi-coding-agent/tools/html-form/data";
+import { parseHtmlForm, spansText } from "@oh-my-pi/pi-coding-agent/tools/html-form/parse";
 import { type IpcConnection, IpcServer } from "@oh-my-pi/pi-natives";
-import { defaultFormData, type HtmlFormData } from "@oh-my-pi/pi-tui/html-form/data";
-import { parseHtmlForm, spansText } from "@oh-my-pi/pi-tui/html-form/parse";
 import { language } from "../omomp-shared/i18n";
 import { listToolTopics, resolveToolTopic } from "../omomp-shared/internal-url";
 import { readPluginManifest } from "../omomp-shared/tern-plugin";
