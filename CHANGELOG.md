@@ -8,6 +8,12 @@
 - `playbook_edit_structure` no longer accepts `meta.agent: null` or `meta.isolation: null`: clearing a block's default subagent preset now uses `meta.clear_agent: true`, and clearing its isolation preset uses `meta.isolation: "clear"` (setting stays `agent: "<name>"` / `isolation: "none"|"worktree"`).
 - `playbook_check` no longer accepts `blocks: []` for zero blocks (it now means omitted, i.e. all blocks): report zero inspected blocks with `no_blocks: true`.
 
+## [0.1.57] - 2026-11-27
+
+### Fixed
+
+- The Playbook document service starts again on machines whose omp plugin tree still holds older host packages (for example `@oh-my-pi/pi-coding-agent` 18.2.6): `playbook_open` and Tern's `Playbook: open` no longer fail with `Cannot find module '@oh-my-pi/pi-coding-agent/ui/theme/service'`. The service runs outside omp, so the host packages it imports (`pi-coding-agent`, `pi-natives`, `pi-tui`, `pi-utils`) are now regular dependencies installed at their current version instead of peers satisfied by whatever copy the plugin tree already had.
+
 ## [0.1.56] - 2026-11-27
 
 ### Fixed
