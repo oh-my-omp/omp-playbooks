@@ -440,9 +440,9 @@ for (const [tool, label, fields, mutation, args] of [
 	["playbook_edit_structure", "move top", { move: { block: "b1", at_top: true } }, "move", { after: null }],
 	["playbook_edit_structure", "move after", { move: { block: "b1", after: "b2" } }, "move", { after: "b2" }],
 	["playbook_edit_structure", "agent set", { meta: { block: "b1", agent: " task:mid " } }, "set", { field: "agent", value: "task:mid" }],
-	["playbook_edit_structure", "agent clear", { meta: { block: "b1", agent: null } }, "set", { field: "agent", value: null }],
+	["playbook_edit_structure", "agent clear", { meta: { block: "b1", clear_agent: true } }, "set", { field: "agent", value: null }],
 	["playbook_edit_structure", "isolation none", { meta: { block: "b1", isolation: "none" } }, "set", { field: "isolated", value: false }],
-	["playbook_edit_structure", "isolation clear", { meta: { block: "b1", isolation: null } }, "set", { field: "isolated", value: null }],
+	["playbook_edit_structure", "isolation clear", { meta: { block: "b1", isolation: "clear" } }, "set", { field: "isolated", value: null }],
 ] as const) {
 	test(`${tool} ${label} locks, changes and releases only its own lock`, async () => {
 		const s = await service();
@@ -493,22 +493,84 @@ test("a call whose parameters do not parse fails as BadValue, not NoService, bef
 	expect(s.frames.map((frame) => frame.op)).toEqual(["hello"]);
 });
 
-test("playbook_edit_structure rejects a blank agent, a design-block contract field and a move without a target before any request", async () => {
+test("playbook_edit_structure rejects invalid combinations before any request", async () => {
 	const s = await service();
 	const h = await harness();
 	await h.execute("playbook_open", { doc: s.doc });
 	for (const params of [
 		{ meta: { block: "b1", agent: "   " } },
-		{ meta: { block: "b1", isolation: "yes" } },
 		{ move: { block: "b1" } },
 		{ move: { block: "b1", at_top: true, after: "b2" } },
-		{ add: { title: "T", body: "B", agent: "" } },
 		{ add: { title: "T", design: "D", agent: "task:mid" } },
 	]) {
 		const result = await h.execute("playbook_edit_structure", { doc: s.doc, ...params });
 		expect(result.isError).toBe(true);
 	}
 	expect(s.frames.map((frame) => frame.op)).toEqual(["hello"]);
+});
+
+test("playbook_edit_structure with a host-level invalid enum is refused before reaching the plugin", async () => {
+	const s = await service();
+	const h = await harness();
+	await h.execute("playbook_open", { doc: s.doc });
+	let threw: unknown;
+	try {
+		await h.execute("playbook_edit_structure", { doc: s.doc, meta: { block: "b1", isolation: "yes" } });
+	} catch (thrown) {
+		threw = thrown;
+	}
+	expect(String(threw)).toContain('Validation failed for tool "playbook_edit_structure"');
+	expect(s.frames.map((frame) => frame.op)).toEqual(["hello"]);
+});
+
+test("blank argument values behave as omitted: empty agent presets nothing, blank run/doc/title fields drop out", async () => {
+	const s = await service();
+	const h = await harness();
+	await h.execute("playbook_open", { doc: s.doc });
+	const inserted = await h.execute("playbook_edit_structure", {
+		doc: s.doc,
+		run: "  ",
+		add: { title: "T", body: "B", agent: "" },
+	});
+	expect(inserted.isError).toBe(false);
+	expect(s.frames.at(-1)!.args).toEqual({ title: "T", content: { kind: "task", body: "B" } });
+	const compiled = await h.execute("playbook_compile", { doc: s.doc, run: "", blocks: ["b1"] });
+	expect(compiled.isError).toBe(false);
+	expect(s.frames.at(-1)!.args).toEqual({ blocks: ["b1"] });
+});
+
+test("playbook_edit_content find/replace keep whitespace text and refuse empty array elements", async () => {
+	const s = await service();
+	const h = await harness();
+	const spaced = { ...block, body: "alpha  beta" };
+	s.handler = (frame, connection) =>
+		respond(connection, frame, frame.op === "hello" ? { blocks: ["b1"], runs: [] } : frame.op === "lock" ? { block: spaced } : null);
+	await h.execute("playbook_open", { doc: s.doc });
+	const result = await h.execute("playbook_edit_content", { doc: s.doc, run: "r1", block: "b1", find: "  ", replace: " " });
+	expect(result.isError).toBe(false);
+	expect(s.frames[2]!.args).toEqual({ run: "r1", block: "b1", find: "  ", replace: " " });
+	let threw: unknown;
+	try {
+		await h.execute("playbook_compile", { doc: s.doc, blocks: ["b1", "  "] });
+	} catch (thrown) {
+		threw = thrown;
+	}
+	expect(String(threw)).toContain('Validation failed for tool "playbook_compile"');
+	expect(String(threw)).toContain("array element must not be empty");
+});
+
+test("playbook_check no_blocks reports zero blocks while omitted blocks target all blocks of the document", async () => {
+	const s = await service();
+	const h = await harness();
+	await h.execute("playbook_open", { doc: s.doc });
+	const empty = await h.execute("playbook_check", { doc: s.doc, no_blocks: true, version: "v1", result: "pass" });
+	expect(empty.isError).toBe(false);
+	expect(s.frames.at(-1)).toMatchObject({ op: "report", args: { blocks: [], version: "v1" } });
+	const all = await h.execute("playbook_check", { doc: s.doc, version: "v1", result: "pass" });
+	expect(all.isError).toBe(false);
+	const reads = s.frames.map((frame) => frame.op);
+	expect(reads).toContain("read");
+	expect(s.frames.at(-1)).toMatchObject({ op: "report", args: { blocks: ["b1"], version: "v1" } });
 });
 
 test("playbook:// read returns task blocks carrying agent and isolated", async () => {

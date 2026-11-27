@@ -13,6 +13,7 @@ import {
 } from "../../omomp-shared/compact-handoff";
 import { tr } from "../../omomp-shared/i18n";
 import { clearToolTopics, registerInternalScheme, registerToolTopics, toDocTopics } from "../../omomp-shared/internal-url";
+import { omompTool } from "../../omomp-shared/tool-entry";
 import { type BlockId, parseBlockId, parseLaunchId, type RecordKind, type RunId } from "../domain/model";
 import {
 	documentEndpoint,
@@ -743,7 +744,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					}
 				},
 			} satisfies ToolDefinition<typeof tool.parameters> & { docTopics?: () => Readonly<Record<string, string>> };
-			pi.registerTool(definition);
+			pi.registerTool(omompTool(definition));
 		}
 	}
 

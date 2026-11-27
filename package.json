@@ -26,11 +26,13 @@
 		"@oh-my-pi/pi-utils": "latest"
 	},
 	"peerDependencies": {
-		"@oh-my-pi/omptype": "*"
+		"@oh-my-pi/omptype": "*",
+		"@oh-my-pi/pi-ai": "*"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "latest",
 		"@oh-my-pi/omptype": "latest",
+		"@oh-my-pi/pi-ai": "latest",
 		"@types/bun": "latest",
 		"typescript": "latest"
 	}

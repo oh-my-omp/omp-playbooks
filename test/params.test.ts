@@ -110,7 +110,7 @@ for (const [name, params, internal] of [
 	],
 	[
 		"playbook_edit_structure",
-		{ doc: "/b.yaml", meta: { block: "b1", agent: null, isolation: null } },
+		{ doc: "/b.yaml", meta: { block: "b1", clear_agent: true, isolation: "clear" } },
 		{ kind: "meta", doc: "/b.yaml", block: "b1", agent: null, isolated: null },
 	],
 	[
@@ -137,6 +137,11 @@ for (const [name, params, internal] of [
 		"playbook_check",
 		{ doc: "/b.yaml", blocks: ["b1"], version: "v1", result: "answers", answers: { missing: 0.8 } },
 		{ doc: "/b.yaml", blocks: ["b1"], version: "v1", result: { kind: "answers", answers: { missing: 0.8 } } },
+	],
+	[
+		"playbook_check",
+		{ doc: "/b.yaml", no_blocks: true, version: "v1", result: "pass" },
+		{ doc: "/b.yaml", blocks: [], version: "v1", result: { kind: "answers", answers: { missing: 0 } } },
 	],
 	[
 		"playbook_check",
@@ -200,11 +205,17 @@ for (const [name, params] of [
 	["playbook_edit_structure", { doc: "/b.yaml", meta: { block: "b1" } }],
 	["playbook_edit_structure", { doc: "/b.yaml", meta: { block: "b1", agent: "   " } }],
 	["playbook_edit_structure", { doc: "/b.yaml", meta: { block: "b1", isolation: "yes" } }],
+	["playbook_edit_structure", { doc: "/b.yaml", meta: { block: "b1", agent: "task:mid", clear_agent: true } }],
+	["playbook_edit_structure", { doc: "/b.yaml", meta: { block: "b1", clear_agent: false } }],
+	["playbook_edit_structure", { doc: "/b.yaml", meta: { block: "b1", agent: null } }],
+	["playbook_edit_structure", { doc: "/b.yaml", meta: { block: "b1", isolation: null } }],
 	["playbook_edit_structure", { doc: "/b.yaml", remove_block: "b0" }],
 	["playbook_compile", { doc: "/b.yaml" }],
 	["playbook_compile", { doc: "/b.yaml", refetch: true }],
 	["playbook_compile", { doc: "/b.yaml", blocks: ["b1"], targets: ["file:x"] }],
 	["playbook_check", { doc: "/b.yaml", blocks: ["b1"], version: "v1", result: "answers" }],
+	["playbook_check", { doc: "/b.yaml", blocks: ["b1"], no_blocks: true, version: "v1", result: "pass" }],
+	["playbook_check", { doc: "/b.yaml", no_blocks: false, version: "v1", result: "pass" }],
 	["playbook_check", { doc: "/b.yaml", blocks: ["b1"], version: "v1", result: "judge_unavailable", answers: { missing: 0.8 } }],
 	["playbook_run", { doc: "/b.yaml" }],
 	["playbook_run", { doc: "/b.yaml", start_name: "R", finish_run: "r1" }],
