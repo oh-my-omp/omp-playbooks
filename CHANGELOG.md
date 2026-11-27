@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- All eight `playbook_*` tools now treat blank argument values as omitted: an empty or whitespace-only `doc`, `run`, `title`, `body`, `design`, `text`, `agent`, `start_name`, `quote` and so on no longer renames blocks to nothing, empties bodies or starts nameless Runs; an empty `blocks`/`targets` array means omitted, and an empty element inside one refuses the whole call. In `playbook_edit_content` only, `find` and `replace` match and write whitespace verbatim and only the exact empty string counts as omitted.
+- `playbook_edit_structure` no longer accepts `meta.agent: null` or `meta.isolation: null`: clearing a block's default subagent preset now uses `meta.clear_agent: true`, and clearing its isolation preset uses `meta.isolation: "clear"` (setting stays `agent: "<name>"` / `isolation: "none"|"worktree"`).
+- `playbook_check` no longer accepts `blocks: []` for zero blocks (it now means omitted, i.e. all blocks): report zero inspected blocks with `no_blocks: true`.
+
 ### Changed
 
 - Updated the shared copy of `compact-handoff.ts` to oh-my-omp/shared@69618f3.

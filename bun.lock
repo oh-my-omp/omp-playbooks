@@ -13,11 +13,13 @@
       "devDependencies": {
         "@biomejs/biome": "latest",
         "@oh-my-pi/omptype": "latest",
+        "@oh-my-pi/pi-ai": "latest",
         "@types/bun": "latest",
         "typescript": "latest",
       },
       "peerDependencies": {
         "@oh-my-pi/omptype": "*",
+        "@oh-my-pi/pi-ai": "*",
       },
     },
   },

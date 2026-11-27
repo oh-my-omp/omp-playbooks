@@ -367,9 +367,9 @@ subagent 收到的是冻结文本，不是 UI、实时设计页或隐式 Playboo
 |---|---|
 | `playbook_open` | `{doc}` — 打开/连接文档，返回 `blocks`、`runs`、`pane`、`playbook://` URL 模板与 `help://playbook_open/*` 专题入口 |
 | `playbook_edit_content` | `{doc?, run?, block, title?, body?, design?, panel?, text?, find?, replace?}` — 精确局部替换（`find`+`replace`）、整体更新（`body`/`design`/`text`）、替换面板（`panel` 字母 ID 或 `where`/`what`/`how` + `text`）或改 `title` |
-| `playbook_edit_structure` | `{doc?, run?, add?, move?, remove_block?, meta?}` — `add: {title, body\|design, after?, at_top?, agent?, isolation?}`；`move: {block, after?\|at_top?}`；`remove_block: "b<n>"`；`meta: {block, agent?: string\|null, isolation?: "none"\|"worktree"\|null, status?: "todo"\|"running"\|"done", tracked?: boolean}` |
+| `playbook_edit_structure` | `{doc?, run?, add?, move?, remove_block?, meta?}` — `add: {title, body\|design, after?, at_top?, agent?, isolation?}`；`move: {block, after?\|at_top?}`；`remove_block: "b<n>"`；`meta: {block, agent?: string, clear_agent?: true, isolation?: "none"\|"worktree"\|"clear", status?: "todo"\|"running"\|"done", tracked?: boolean}` — `clear_agent: true` 清空块的默认 subagent 预设，`isolation: "clear"` 清空隔离预设 |
 | `playbook_compile` | `{doc?, run?, blocks?: […], targets?: […], refetch?: boolean}` — 编译块，或传 `refetch: true` 与 `targets` 重新拉取外部引用 |
-| `playbook_check` | `{doc?, run?, blocks?: […], version, result: "answers"\|"pass"\|"fail"\|"judge_unavailable", answers?: Record<string, number>}` — 提交 `read playbook://…/checks` 对应版本的模型判定报告 |
+| `playbook_check` | `{doc?, run?, blocks?: […], no_blocks?: true, version, result: "answers"\|"pass"\|"fail"\|"judge_unavailable", answers?: Record<string, number>}` — 提交 `read playbook://…/checks` 对应版本的模型判定报告；省略 `blocks` 检查全部块，`no_blocks: true` 报告零个块 |
 | `playbook_run` | `{doc?, start_name?, update_every?, finish_run?}` — 启动新 Run 或结束已有 Run |
 | `playbook_timeline` | `{doc?, run?, snooze_seconds?, kind?, text?, block?, launch?, next?, quote?}` — 追加结构化时间线记录或推迟 Run 的更新提醒 |
 | `playbook_launch` | `{doc?, run?, blocks?, bind_launch?, agent?, rebase_launch?, close_launch?}` — 创建、绑定、rebase 或关闭 Launch |

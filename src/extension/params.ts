@@ -1,6 +1,7 @@
 import type * as zod from "@oh-my-pi/omptype/zod";
 import type { EvalToolParams } from "@oh-my-pi/pi-coding-agent";
 import { tr } from "../../omomp-shared/i18n";
+import { verbatim } from "../../omomp-shared/tool-entry";
 import {
 	type BlockId,
 	type JudgeReport,
@@ -216,8 +217,8 @@ export function toolParameters(z: Zod) {
 				.string()
 				.describe("Replacement text: whole block body/design, or whole panel starting with `## <ID> Title` when `panel` is set.")
 				.optional(),
-			find: z.string().describe("Exact text occurring once in the block's body or design (requires `replace`).").optional(),
-			replace: z.string().describe("Replacement text for `find`.").optional(),
+			find: verbatim(z.string().describe("Exact text occurring once in the block's body or design (requires `replace`).").optional()),
+			replace: verbatim(z.string().describe("Replacement text for `find`.").optional()),
 		})
 		.strict();
 
@@ -254,10 +255,14 @@ export function toolParameters(z: Zod) {
 			meta: z
 				.object({
 					block: blockField.describe("Block id `b<n>` whose metadata to update."),
-					agent: z.string().nullable().describe("Default subagent name for a task block, or `null` to clear.").optional(),
-					isolation: isolationField
-						.nullable()
-						.describe('Worktree isolation: `"worktree"`, `"none"`, or `null` to clear preset.')
+					agent: z.string().describe("Default subagent name for a task block. Omit for no change; blank means omitted.").optional(),
+					clear_agent: z
+						.literal(true)
+						.describe("Set `true` to clear the block's default subagent preset (cannot be combined with `agent`).")
+						.optional(),
+					isolation: z
+						.enum(["none", "worktree", "clear"])
+						.describe('Worktree isolation: `"worktree"`, `"none"`, or `"clear"` to remove the preset.')
 						.optional(),
 					status: statusField
 						.describe("Override block status (`todo`, `running`, `done`). Subagents set their own status normally.")
@@ -291,6 +296,10 @@ export function toolParameters(z: Zod) {
 			doc: docField,
 			run: runField,
 			blocks: blocksField.describe("Block ids `b<n>` that were inspected. Omit to target all blocks.").optional(),
+			no_blocks: z
+				.literal(true)
+				.describe("Set `true` to report zero inspected blocks (cannot be combined with `blocks`; omit both to target all blocks).")
+				.optional(),
 			version: z.string().describe("Version hash returned by `read playbook://<doc>[/<run>]/checks`."),
 			result: z
 				.enum(["answers", "pass", "fail", "judge_unavailable"])
@@ -538,17 +547,30 @@ export function toolParameters(z: Zod) {
 			return { kind: "delete", ...base, block: parseReqBlock(flat.remove_block) };
 		}
 		const meta = flat.meta!;
-		const hasAny = meta.agent !== undefined || meta.isolation !== undefined || meta.status !== undefined || meta.tracked !== undefined;
+		const hasAny =
+			meta.agent !== undefined ||
+			meta.clear_agent !== undefined ||
+			meta.isolation !== undefined ||
+			meta.status !== undefined ||
+			meta.tracked !== undefined;
 		if (!hasAny) {
 			throw new Error(
 				tr(
-					"playbook_edit_structure meta requires at least one of agent, isolation, status, or tracked",
-					"playbook_edit_structure 的 meta 至少需要提供 agent、isolation、status 或 tracked 之一",
+					"playbook_edit_structure meta requires at least one of agent, clear_agent, isolation, status, or tracked",
+					"playbook_edit_structure 的 meta 至少需要提供 agent、clear_agent、isolation、status 或 tracked 之一",
 				),
 			);
 		}
-		const parsedAgent = meta.agent === undefined ? undefined : meta.agent === null ? null : agentName.parse(meta.agent);
-		const parsedIsolated = meta.isolation === undefined ? undefined : meta.isolation === null ? null : meta.isolation === "worktree";
+		if (meta.agent !== undefined && meta.clear_agent !== undefined) {
+			throw new Error(
+				tr(
+					"playbook_edit_structure meta accepts either agent or clear_agent, not both",
+					"playbook_edit_structure 的 meta 只能提供 agent 或 clear_agent 之一，不能同时提供",
+				),
+			);
+		}
+		const parsedAgent = meta.clear_agent === true ? null : meta.agent === undefined ? undefined : agentName.parse(meta.agent);
+		const parsedIsolated = meta.isolation === undefined ? undefined : meta.isolation === "clear" ? null : meta.isolation === "worktree";
 		return {
 			kind: "meta",
 			...base,
@@ -613,10 +635,16 @@ export function toolParameters(z: Zod) {
 	};
 
 	function checkToInternal(flat: ReturnType<typeof checkParams.parse>): CheckInternal {
+		if (flat.blocks !== undefined && flat.no_blocks !== undefined) {
+			throw new Error(
+				tr("playbook_check accepts either blocks or no_blocks, not both", "playbook_check 只能提供 blocks 或 no_blocks 之一，不能同时提供"),
+			);
+		}
+		const explicitBlocks = flat.no_blocks === true ? [] : flat.blocks?.map(parseReqBlock);
 		const base = {
 			...(flat.doc !== undefined ? { doc: flat.doc } : {}),
 			...(flat.run !== undefined ? { run: parseOptRun(flat.run) } : {}),
-			...(flat.blocks !== undefined ? { blocks: flat.blocks.map(parseReqBlock) } : {}),
+			...(explicitBlocks !== undefined ? { blocks: explicitBlocks } : {}),
 			version: flat.version,
 		};
 		if (flat.result === "judge_unavailable") {
