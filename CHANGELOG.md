@@ -8,6 +8,10 @@
 - `playbook_edit_structure` no longer accepts `meta.agent: null` or `meta.isolation: null`: clearing a block's default subagent preset now uses `meta.clear_agent: true`, and clearing its isolation preset uses `meta.isolation: "clear"` (setting stays `agent: "<name>"` / `isolation: "none"|"worktree"`).
 - `playbook_check` no longer accepts `blocks: []` for zero blocks (it now means omitted, i.e. all blocks): report zero inspected blocks with `no_blocks: true`.
 
+### Changed
+
+- Updated the shared copy of `compact-handoff.ts` to oh-my-omp/shared@69618f3.
+
 ## [0.1.57] - 2026-11-27
 
 ### Fixed
