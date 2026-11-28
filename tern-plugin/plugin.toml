@@ -1,7 +1,7 @@
 schema = 1
 id = "omp-playbooks"
 name = "Playbooks"
-version = "0.1.57"
+version = "0.2.0"
 description = "Open a Playbook's document view in a pane."
 icon = "file"
 window = "window.luau"

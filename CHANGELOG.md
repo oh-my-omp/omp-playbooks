@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-28
+
 ### Breaking Changes
 
 - All eight `playbook_*` tools now treat blank argument values as omitted: an empty or whitespace-only `doc`, `run`, `title`, `body`, `design`, `text`, `agent`, `start_name`, `quote` and so on no longer renames blocks to nothing, empties bodies or starts nameless Runs; an empty `blocks`/`targets` array means omitted, and an empty element inside one refuses the whole call. In `playbook_edit_content` only, `find` and `replace` match and write whitespace verbatim and only the exact empty string counts as omitted.
